@@ -1,0 +1,14 @@
+# Reflector-side session toward dfw-worker4 (dfw second compute)
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: BGPPeer
+metadata:
+  name: galactic-router-dfw-worker4
+  namespace: galactic-system
+spec:
+  routerRef:
+    name: galactic-control
+  peerASN: 65000
+  address: "fc00:0:d::1"
+  addressFamilies:
+    - afi: l2vpn
+      safi: evpn

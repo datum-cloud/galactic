@@ -1,0 +1,22 @@
+# Keep the original guests on dfw-worker now that dfw has a second compute
+# node. dfw-worker4's taint already keeps them off it; the pin makes the
+# placement explicit for the baseline, which captures on dfw-worker.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-a
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-b
+spec:
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker

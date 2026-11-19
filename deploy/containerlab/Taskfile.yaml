@@ -254,8 +254,9 @@ tasks:
   # reuses it, so the guard below refuses to run on a node without one
   # rather than create the private mount.
   #
-  # Each port is a bond member, as on the transit side. dfw-worker's
-  # eth1/eth3 (bond0) face dfw-worker2 and eth2/eth4 (bond1) dfw-worker3;
+  # Each port is a bond member, as on the transit side. dfw-worker's and
+  # dfw-worker4's eth1/eth3 (bond0) face dfw-worker2 and eth2/eth4 (bond1)
+  # dfw-worker3;
   # sjc-worker's and iad-worker's eth1/eth2 (bond0) face their site's edge
   # node -- keep this in step with gvpc.clab.yaml's site-internal links.
   # Kind nodes' containers carry bare names.
@@ -265,7 +266,7 @@ tasks:
     cmds:
       - |
         set -e
-        for node in dfw-worker sjc-worker iad-worker; do
+        for node in dfw-worker dfw-worker4 sjc-worker iad-worker; do
           if ! docker exec "${node}" sh -c '[ "$(stat -f -c %T /sys/fs/bpf)" = bpf_fs ]'; then
             echo "ERROR: ${node} has no bpffs on /sys/fs/bpf yet; run deploy:cni first." >&2
             echo "       Loading an XDP object now would mount a private one and break Cilium." >&2
@@ -273,6 +274,7 @@ tasks:
           fi
         done
         for pair in dfw-worker:eth1 dfw-worker:eth3 dfw-worker:eth2 dfw-worker:eth4 \
+            dfw-worker4:eth1 dfw-worker4:eth3 dfw-worker4:eth2 dfw-worker4:eth4 \
             sjc-worker:eth1 sjc-worker:eth2 iad-worker:eth1 iad-worker:eth2; do
           container=${pair%%:*}; iface=${pair##*:}
           docker cp node_files/common/xdp-passthrough.o "${container}:/xdp-passthrough.o"
@@ -286,14 +288,14 @@ tasks:
       # session everything else depends on) and galactic-router (EVPN --
       # plain mode on compute/edge, reflector mode on iad-worker3).
       FABRIC_NODES: >-
-        dfw-worker dfw-worker2 dfw-worker3
+        dfw-worker dfw-worker2 dfw-worker3 dfw-worker4
         sjc-worker sjc-worker2
         iad-worker iad-worker2 iad-worker3
       # galactic-cni goes everywhere galactic.datumapis.com/galactic=router
       # is set -- compute and edge alike, but never the reflector, whose
       # galactic=control value is mutually exclusive with it.
       CNI_NODES: >-
-        dfw-worker dfw-worker2 dfw-worker3
+        dfw-worker dfw-worker2 dfw-worker3 dfw-worker4
         sjc-worker sjc-worker2
         iad-worker iad-worker2
       # Egress shards and gateways: one each per edge node.
@@ -584,7 +586,7 @@ tasks:
     cmds:
       - |
         set -e
-        for node in dfw-worker dfw-worker2 dfw-worker3; do
+        for node in dfw-worker dfw-worker2 dfw-worker3 dfw-worker4; do
           docker save fabric-api:latest | docker exec -i "${node}" ctr --namespace k8s.io images import -
         done
       - ./scripts/deploy-looking-glass.sh
@@ -647,7 +649,7 @@ tasks:
       - |
         fail=0
         for lo in 10.255.255.1 10.255.255.2 10.255.255.3 10.255.255.4 \
-                  10.255.255.5 10.255.255.6 10.255.255.7 10.255.255.8 \
+                  10.255.255.5 10.255.255.6 10.255.255.7 10.255.255.8 10.255.255.9 \
                   10.255.255.101 10.255.255.102 10.255.255.103; do
           if docker exec clab-gvpc-tr1 ping -c1 -W2 -I 10.255.255.100 "$lo" >/dev/null 2>&1; then
             echo "ok    ipv4 tr1 -> $lo"
@@ -656,7 +658,7 @@ tasks:
           fi
         done
         for lo in fc00:0:2::1 fc00:0:3::1 fc00:0:4::1 fc00:0:8::1 fc00:0:9::1 \
-                  fc00:0:a::1 fc00:0:b::1 fc00:0:c::1 \
+                  fc00:0:a::1 fc00:0:b::1 fc00:0:c::1 fc00:0:d::1 \
                   fc00:0:5::1 fc00:0:6::1 fc00:0:7::1; do
           if docker exec clab-gvpc-tr1 ping -6 -c1 -W2 -I fc00:0:1::1 "$lo" >/dev/null 2>&1; then
             echo "ok    ipv6 tr1 -> $lo"
@@ -670,6 +672,8 @@ tasks:
     desc: Verify each site's SRv6 locator prefix
     cmds:
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01::/48"
+      # dfw's second compute node originates its own /64 inside the site /48.
+      - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff01:1004::/64"
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff02::/48"
       - docker exec clab-gvpc-tr1 vtysh -c "show bgp ipv6 unicast 2001:db8:ff03::/48"
 
