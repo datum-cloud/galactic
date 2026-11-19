@@ -95,7 +95,7 @@ type Claim struct {
 	// Destinations are the claim's resolved destinations for the module's
 	// mode, each with an available capability.
 	Destinations []Destination
-	// EdgeLink is set on a connector claim's Local desired state (D30): the
+	// EdgeLink is set on a connector claim's Local desired state (D37): the
 	// host link galactic-edge created, which the Local module registers and
 	// never creates or deletes. Its one destination is the claim's own
 	// attachment.

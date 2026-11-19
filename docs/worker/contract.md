@@ -48,7 +48,7 @@ each destination. `local` and `fabric` restrict the result; a destination that
 cannot resolve to the requested mode reports `Resolved=False` with reason
 `ModeUnavailable`.
 
-A **connector claim** (D30) is how galactic-edge hands Worker an edge host
+A **connector claim** (D37) is how galactic-edge hands Worker an edge host
 link it created. Its spec uses the `routed_link` handoff, names no
 destinations and sets `edge_link`: the link's name and the prefixes the link
 carries beyond its own address. Its key names an EdgeAttachment, and Worker

@@ -855,7 +855,7 @@ type ClaimSpec struct {
 	Destinations []*Destination `protobuf:"bytes,2,rep,name=destinations,proto3" json:"destinations,omitempty"`
 	// mode is the mode preference. Unset means MODE_AUTO.
 	Mode Mode `protobuf:"varint,3,opt,name=mode,proto3,enum=galactic.worker.v1alpha1.Mode" json:"mode,omitempty"`
-	// edge_link makes the claim a connector claim (D30): HANDOFF_ROUTED_LINK
+	// edge_link makes the claim a connector claim (D37): HANDOFF_ROUTED_LINK
 	// on an EdgeAttachment, whose host link galactic-edge created. Worker
 	// registers that link with the datapath and never creates or deletes it.
 	// Its one destination is the claim's own attachment, resolved Local.

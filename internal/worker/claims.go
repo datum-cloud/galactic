@@ -102,7 +102,7 @@ func validateSpec(gen uint64, spec *workerv1alpha1.ClaimSpec) error {
 	return nil
 }
 
-// validateEdgeLink checks a connector claim's spec (D30): a routed link on
+// validateEdgeLink checks a connector claim's spec (D37): a routed link on
 // an existing host link, with no destinations of its own, since its one
 // destination is the claim's attachment.
 func validateEdgeLink(spec *workerv1alpha1.ClaimSpec, el *workerv1alpha1.EdgeLink) error {
