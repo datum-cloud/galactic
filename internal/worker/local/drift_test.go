@@ -17,11 +17,14 @@ func TestDriftDetail(t *testing.T) {
 	if !errors.Is(err, errDirty) {
 		t.Fatal("a dirty error is not errDirty")
 	}
-	if got, want := dirtyDetail(err), "filter galactic_local_rx is not current on bond0"; got != want {
-		t.Fatalf("detail %q, want %q", got, want)
+	if got, planned := dirtyDetail(err); got != "filter galactic_local_rx is not current on bond0" || planned {
+		t.Fatalf("detail %q planned %t", got, planned)
 	}
-	if got := dirtyDetail(errDirty); got != "" {
+	if got, _ := dirtyDetail(errDirty); got != "" {
 		t.Fatalf("a bare errDirty has detail %q", got)
+	}
+	if _, ok := (&change{dirty: true, planned: true}).Drift(); ok {
+		t.Fatal("a change that follows from desired state is reported as drift")
 	}
 	if d, ok := (&change{dirty: true, detail: "x"}).Drift(); !ok || d != "x" {
 		t.Fatalf("drift %q %t", d, ok)

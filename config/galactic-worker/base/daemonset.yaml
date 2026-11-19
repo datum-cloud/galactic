@@ -102,8 +102,14 @@ spec:
           # Root for the host paths below; every capability but the two it
           # uses is dropped. NET_ADMIN covers VRFs, links, routes, neighbors
           # and tc filters; BPF covers the pinned maps and the Local
-          # programs. tests/manifests/worker-profiles/privileges.yaml records
-          # this set, and task test:manifests refuses any other.
+          # programs, which the verifier accepts without PERFMON
+          # (internal/worker/local's capability test loads them with exactly
+          # this set). A routed link's pod end is opened through the pod's
+          # /proc entry, which the kernel's ptrace check may refuse for a pod
+          # holding capabilities Worker lacks; Worker then reports the
+          # permission error on the claim. The privileges.yaml beside each
+          # tests/manifests/worker-profiles fixture records this set, and
+          # task test:manifests refuses any other.
           securityContext:
             runAsUser: 0
             # The socket (mode 0660) takes the process's group, which clients

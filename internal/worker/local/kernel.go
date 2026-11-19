@@ -70,8 +70,13 @@ const (
 // errDirty stops a dry run at the first change it would make.
 var errDirty = errors.New("local: the host differs from desired")
 
-// dirtyError is errDirty naming the change a dry run stopped at.
-type dirtyError struct{ detail string }
+// dirtyError is errDirty naming the change a dry run stopped at. planned
+// marks a change that follows from desired state, such as a device that
+// became a receiver, rather than from host state changing under Worker.
+type dirtyError struct {
+	detail  string
+	planned bool
+}
 
 func (e *dirtyError) Error() string { return errDirty.Error() + ": " + e.detail }
 
@@ -82,12 +87,13 @@ func dirty(format string, args ...any) error {
 	return &dirtyError{detail: fmt.Sprintf(format, args...)}
 }
 
-// dirtyDetail returns the change err names, or "" for a bare errDirty.
-func dirtyDetail(err error) string {
+// dirtyDetail returns the change err names, or "" for a bare errDirty, and
+// whether the change was planned rather than drift.
+func dirtyDetail(err error) (string, bool) {
 	if d, ok := errors.AsType[*dirtyError](err); ok {
-		return d.detail
+		return d.detail, d.planned
 	}
-	return ""
+	return "", false
 }
 
 // Kernel is the Local module's host access, in the calling thread's network
@@ -734,6 +740,12 @@ func (k *Kernel) ensureReceivers(want, dry bool) error {
 		}
 		now[r.name] = struct{}{}
 		if err := k.ensureFilter(h.byIdx[r.idx], filterRx, dry); err != nil {
+			// A device Local has not served yet is new, not drift.
+			if d, ok := errors.AsType[*dirtyError](err); ok {
+				if _, served := prev[r.name]; !served {
+					d.planned = true
+				}
+			}
 			return err
 		}
 	}
@@ -749,7 +761,8 @@ func (k *Kernel) ensureReceivers(want, dry bool) error {
 			}
 		}
 		if dry {
-			return dirty("filter %s is left on %s, no longer a receiving device", filterRx, name)
+			return &dirtyError{detail: fmt.Sprintf("filter %s is left on %s, no longer a receiving device",
+				filterRx, name), planned: true}
 		}
 		if err := attach.DetachLocal(name); err != nil {
 			return err

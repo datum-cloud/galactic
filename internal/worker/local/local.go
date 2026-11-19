@@ -123,6 +123,9 @@ type change struct {
 	// retry is set when the scope's last Apply left a link it could not
 	// create, which this change tries again.
 	retry bool
+	// planned is set when the difference follows from desired state, such
+	// as another scope's TAP claim changing the receiving devices.
+	planned bool
 }
 
 // Empty implements module.Change.
@@ -130,7 +133,7 @@ func (c *change) Empty() bool { return !c.dirty }
 
 // Drift implements module.DriftDescriber.
 func (c *change) Drift() (string, bool) {
-	if c.retry {
+	if c.retry || c.planned {
 		return "", false
 	}
 	if c.detail == "" {
@@ -171,7 +174,8 @@ func (m *Module) Plan(_ context.Context, scope module.Scope, desired []module.Cl
 	}
 	switch {
 	case errors.Is(err, errDirty):
-		ch.dirty, ch.detail = true, dirtyDetail(err)
+		ch.dirty = true
+		ch.detail, ch.planned = dirtyDetail(err)
 	case err != nil:
 		return nil, fmt.Errorf("local: plan %s: %w", vpc, err)
 	}
