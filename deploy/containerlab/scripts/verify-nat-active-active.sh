@@ -383,6 +383,10 @@ originate() { # SHARD yes|no
 cleanup() {
   local rc=$?
   set +e
+  if [ -n "${SOAK_PID:-}" ]; then
+    kill "${SOAK_PID}" 2>/dev/null
+    wait "${SOAK_PID}" 2>/dev/null
+  fi
   for p in "${PROHIBITED[@]}"; do unprohibit "${p}"; done
   [ -n "${WITHDRAWN}" ] && originate "${WITHDRAWN}" yes
   if [ -f "${STATE}/fresh" ]; then
@@ -417,7 +421,9 @@ soak_start() {
     "ip6 and dst ${HOST6} and tcp dst port 80 and ip6[53] & 0x12 == 0x02" >"${cap}" 2>&1 &
   local tcpdump_pid=$!
   sleep 2
-  pod_exec "$1" curl -s -o /dev/null -w '%{size_download} %{exitcode}' --limit-rate 150k --max-time 300 \
+  # Run docker exec directly rather than through pod_exec: backgrounding a
+  # function forks a subshell, and $! would then name the subshell.
+  docker exec "${CP}" kubectl -n "${1%%/*}" exec "${1#*/}" -- curl -s -o /dev/null -w '%{size_download} %{exitcode}' --limit-rate 150k --max-time 300 \
     "http://[${HOST6}]/active-active-soak" >"${STATE}/soak" 2>"${STATE}/soak.err" &
   SOAK_PID=$!
   wait "${tcpdump_pid}" || die "could not see the download's connection at the host"
@@ -427,6 +433,7 @@ soak_start() {
 soak_check() {
   local rc=0 got="" code=""
   wait "${SOAK_PID}" || rc=$?
+  SOAK_PID=""
   read -r got code <"${STATE}/soak" || true
   if [ "${rc}" -ne 0 ] || [ "${got}" != "${SOAK_BYTES}" ] || [ "${code}" != 0 ]; then
     die "$1: the download ended at ${got:-nothing} of ${SOAK_BYTES} bytes (curl ${code:-none}, exec ${rc}): $(cat "${STATE}/soak.err")"
