@@ -1,0 +1,12 @@
+# ServiceAccounts and the Worker capabilities each may use
+# (docs/worker/contract.md, "Transport, identity and access"). A
+# ServiceAccount not listed may use none. A caller needs its handoff's
+# capability for every claim, and fabric.srv6 for destinations on other
+# nodes, so each service holds both whatever the placement.
+serviceAccounts:
+  - serviceAccount: galactic-system/galactic-router
+    capabilities: [fabric.routes]
+  - serviceAccount: galactic-system/galactic-nat
+    capabilities: [local.veth_pair, fabric.srv6]
+  - serviceAccount: galactic-system/galactic-gateway
+    capabilities: [local.tap, fabric.srv6]
