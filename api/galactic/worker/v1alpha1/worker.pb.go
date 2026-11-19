@@ -848,11 +848,18 @@ func (*Destination_Shard) isDestination_Target() {}
 func (*Destination_Backend) isDestination_Target() {}
 
 type ClaimSpec struct {
-	state        protoimpl.MessageState `protogen:"open.v1"`
-	Handoff      Handoff                `protobuf:"varint,1,opt,name=handoff,proto3,enum=galactic.worker.v1alpha1.Handoff" json:"handoff,omitempty"`
-	Destinations []*Destination         `protobuf:"bytes,2,rep,name=destinations,proto3" json:"destinations,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Handoff Handoff                `protobuf:"varint,1,opt,name=handoff,proto3,enum=galactic.worker.v1alpha1.Handoff" json:"handoff,omitempty"`
+	// destinations are the claim's tenant destinations. A claim with
+	// edge_link names none.
+	Destinations []*Destination `protobuf:"bytes,2,rep,name=destinations,proto3" json:"destinations,omitempty"`
 	// mode is the mode preference. Unset means MODE_AUTO.
-	Mode          Mode `protobuf:"varint,3,opt,name=mode,proto3,enum=galactic.worker.v1alpha1.Mode" json:"mode,omitempty"`
+	Mode Mode `protobuf:"varint,3,opt,name=mode,proto3,enum=galactic.worker.v1alpha1.Mode" json:"mode,omitempty"`
+	// edge_link makes the claim a connector claim (D30): HANDOFF_ROUTED_LINK
+	// on an EdgeAttachment, whose host link galactic-edge created. Worker
+	// registers that link with the datapath and never creates or deletes it.
+	// Its one destination is the claim's own attachment, resolved Local.
+	EdgeLink      *EdgeLink `protobuf:"bytes,4,opt,name=edge_link,json=edgeLink,proto3" json:"edge_link,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -908,6 +915,73 @@ func (x *ClaimSpec) GetMode() Mode {
 	return Mode_MODE_UNSPECIFIED
 }
 
+func (x *ClaimSpec) GetEdgeLink() *EdgeLink {
+	if x != nil {
+		return x.EdgeLink
+	}
+	return nil
+}
+
+// EdgeLink is the host link of a Galactic Edge attachment. Its address is
+// the EdgeAttachment's status.address, never the request's.
+type EdgeLink struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name is the host link's interface name. The link must carry the
+	// attachment's stamp, or the claim reports HandoffInterfaceNotOwned.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// prefixes are what the link carries beyond its own address: the prefixes
+	// of its open gates and of routes it holds, in CIDR notation. Worker keeps
+	// a pass-through entry for each, and for the link's own address, in the
+	// VPC's egress_route_table.
+	Prefixes      []string `protobuf:"bytes,2,rep,name=prefixes,proto3" json:"prefixes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EdgeLink) Reset() {
+	*x = EdgeLink{}
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EdgeLink) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EdgeLink) ProtoMessage() {}
+
+func (x *EdgeLink) ProtoReflect() protoreflect.Message {
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EdgeLink.ProtoReflect.Descriptor instead.
+func (*EdgeLink) Descriptor() ([]byte, []int) {
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *EdgeLink) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *EdgeLink) GetPrefixes() []string {
+	if x != nil {
+		return x.Prefixes
+	}
+	return nil
+}
+
 type RequestRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Key   *ClaimKey              `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -920,7 +994,7 @@ type RequestRequest struct {
 
 func (x *RequestRequest) Reset() {
 	*x = RequestRequest{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[9]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -932,7 +1006,7 @@ func (x *RequestRequest) String() string {
 func (*RequestRequest) ProtoMessage() {}
 
 func (x *RequestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[9]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -945,7 +1019,7 @@ func (x *RequestRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestRequest.ProtoReflect.Descriptor instead.
 func (*RequestRequest) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{9}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *RequestRequest) GetKey() *ClaimKey {
@@ -978,7 +1052,7 @@ type RequestResponse struct {
 
 func (x *RequestResponse) Reset() {
 	*x = RequestResponse{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[10]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -990,7 +1064,7 @@ func (x *RequestResponse) String() string {
 func (*RequestResponse) ProtoMessage() {}
 
 func (x *RequestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[10]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1003,7 +1077,7 @@ func (x *RequestResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestResponse.ProtoReflect.Descriptor instead.
 func (*RequestResponse) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{10}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RequestResponse) GetStatus() *ClaimStatus {
@@ -1024,7 +1098,7 @@ type UpdateRequest struct {
 
 func (x *UpdateRequest) Reset() {
 	*x = UpdateRequest{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[11]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1036,7 +1110,7 @@ func (x *UpdateRequest) String() string {
 func (*UpdateRequest) ProtoMessage() {}
 
 func (x *UpdateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[11]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1049,7 +1123,7 @@ func (x *UpdateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateRequest.ProtoReflect.Descriptor instead.
 func (*UpdateRequest) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{11}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *UpdateRequest) GetKey() *ClaimKey {
@@ -1082,7 +1156,7 @@ type UpdateResponse struct {
 
 func (x *UpdateResponse) Reset() {
 	*x = UpdateResponse{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[12]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1094,7 +1168,7 @@ func (x *UpdateResponse) String() string {
 func (*UpdateResponse) ProtoMessage() {}
 
 func (x *UpdateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[12]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1107,7 +1181,7 @@ func (x *UpdateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateResponse.ProtoReflect.Descriptor instead.
 func (*UpdateResponse) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{12}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *UpdateResponse) GetStatus() *ClaimStatus {
@@ -1128,7 +1202,7 @@ type ReleaseRequest struct {
 
 func (x *ReleaseRequest) Reset() {
 	*x = ReleaseRequest{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[13]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1140,7 +1214,7 @@ func (x *ReleaseRequest) String() string {
 func (*ReleaseRequest) ProtoMessage() {}
 
 func (x *ReleaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[13]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1153,7 +1227,7 @@ func (x *ReleaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseRequest.ProtoReflect.Descriptor instead.
 func (*ReleaseRequest) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{13}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ReleaseRequest) GetKey() *ClaimKey {
@@ -1181,7 +1255,7 @@ type ReleaseResponse struct {
 
 func (x *ReleaseResponse) Reset() {
 	*x = ReleaseResponse{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[14]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1193,7 +1267,7 @@ func (x *ReleaseResponse) String() string {
 func (*ReleaseResponse) ProtoMessage() {}
 
 func (x *ReleaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[14]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1206,7 +1280,7 @@ func (x *ReleaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReleaseResponse.ProtoReflect.Descriptor instead.
 func (*ReleaseResponse) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{14}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ReleaseResponse) GetStatus() *ClaimStatus {
@@ -1226,7 +1300,7 @@ type ObserveRequest struct {
 
 func (x *ObserveRequest) Reset() {
 	*x = ObserveRequest{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[15]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1238,7 +1312,7 @@ func (x *ObserveRequest) String() string {
 func (*ObserveRequest) ProtoMessage() {}
 
 func (x *ObserveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[15]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1251,7 +1325,7 @@ func (x *ObserveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObserveRequest.ProtoReflect.Descriptor instead.
 func (*ObserveRequest) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{15}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ObserveRequest) GetKey() *ClaimKey {
@@ -1270,7 +1344,7 @@ type ObserveResponse struct {
 
 func (x *ObserveResponse) Reset() {
 	*x = ObserveResponse{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[16]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1282,7 +1356,7 @@ func (x *ObserveResponse) String() string {
 func (*ObserveResponse) ProtoMessage() {}
 
 func (x *ObserveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[16]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1295,7 +1369,7 @@ func (x *ObserveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObserveResponse.ProtoReflect.Descriptor instead.
 func (*ObserveResponse) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{16}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ObserveResponse) GetStatus() *ClaimStatus {
@@ -1318,7 +1392,7 @@ type Condition struct {
 
 func (x *Condition) Reset() {
 	*x = Condition{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[17]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1330,7 +1404,7 @@ func (x *Condition) String() string {
 func (*Condition) ProtoMessage() {}
 
 func (x *Condition) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[17]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1343,7 +1417,7 @@ func (x *Condition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Condition.ProtoReflect.Descriptor instead.
 func (*Condition) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{17}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Condition) GetType() string {
@@ -1401,7 +1475,7 @@ type DestinationStatus struct {
 
 func (x *DestinationStatus) Reset() {
 	*x = DestinationStatus{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[18]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1413,7 +1487,7 @@ func (x *DestinationStatus) String() string {
 func (*DestinationStatus) ProtoMessage() {}
 
 func (x *DestinationStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[18]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1426,7 +1500,7 @@ func (x *DestinationStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestinationStatus.ProtoReflect.Descriptor instead.
 func (*DestinationStatus) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{18}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DestinationStatus) GetDestination() *Destination {
@@ -1522,7 +1596,7 @@ type ClaimStatus struct {
 
 func (x *ClaimStatus) Reset() {
 	*x = ClaimStatus{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[19]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1534,7 +1608,7 @@ func (x *ClaimStatus) String() string {
 func (*ClaimStatus) ProtoMessage() {}
 
 func (x *ClaimStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[19]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1547,7 +1621,7 @@ func (x *ClaimStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClaimStatus.ProtoReflect.Descriptor instead.
 func (*ClaimStatus) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{19}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ClaimStatus) GetKey() *ClaimKey {
@@ -1631,7 +1705,7 @@ type HandoffInterface struct {
 
 func (x *HandoffInterface) Reset() {
 	*x = HandoffInterface{}
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[20]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1643,7 +1717,7 @@ func (x *HandoffInterface) String() string {
 func (*HandoffInterface) ProtoMessage() {}
 
 func (x *HandoffInterface) ProtoReflect() protoreflect.Message {
-	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[20]
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1656,7 +1730,7 @@ func (x *HandoffInterface) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HandoffInterface.ProtoReflect.Descriptor instead.
 func (*HandoffInterface) Descriptor() ([]byte, []int) {
-	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{20}
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *HandoffInterface) GetRole() string {
@@ -1721,11 +1795,15 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"attachment\x12:\n" +
 	"\x05shard\x18\x02 \x01(\v2\".galactic.worker.v1alpha1.ShardRefH\x00R\x05shard\x12@\n" +
 	"\abackend\x18\x03 \x01(\v2$.galactic.worker.v1alpha1.BackendRefH\x00R\abackendB\b\n" +
-	"\x06target\"\xc7\x01\n" +
+	"\x06target\"\x88\x02\n" +
 	"\tClaimSpec\x12;\n" +
 	"\ahandoff\x18\x01 \x01(\x0e2!.galactic.worker.v1alpha1.HandoffR\ahandoff\x12I\n" +
 	"\fdestinations\x18\x02 \x03(\v2%.galactic.worker.v1alpha1.DestinationR\fdestinations\x122\n" +
-	"\x04mode\x18\x03 \x01(\x0e2\x1e.galactic.worker.v1alpha1.ModeR\x04mode\"\x9f\x01\n" +
+	"\x04mode\x18\x03 \x01(\x0e2\x1e.galactic.worker.v1alpha1.ModeR\x04mode\x12?\n" +
+	"\tedge_link\x18\x04 \x01(\v2\".galactic.worker.v1alpha1.EdgeLinkR\bedgeLink\":\n" +
+	"\bEdgeLink\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
+	"\bprefixes\x18\x02 \x03(\tR\bprefixes\"\x9f\x01\n" +
 	"\x0eRequestRequest\x124\n" +
 	"\x03key\x18\x01 \x01(\v2\".galactic.worker.v1alpha1.ClaimKeyR\x03key\x12\x1e\n" +
 	"\n" +
@@ -1835,7 +1913,7 @@ func file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_galactic_worker_v1alpha1_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_galactic_worker_v1alpha1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_galactic_worker_v1alpha1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_galactic_worker_v1alpha1_worker_proto_goTypes = []any{
 	(CapabilityState)(0),            // 0: galactic.worker.v1alpha1.CapabilityState
 	(Handoff)(0),                    // 1: galactic.worker.v1alpha1.Handoff
@@ -1851,23 +1929,24 @@ var file_galactic_worker_v1alpha1_worker_proto_goTypes = []any{
 	(*BackendRef)(nil),              // 11: galactic.worker.v1alpha1.BackendRef
 	(*Destination)(nil),             // 12: galactic.worker.v1alpha1.Destination
 	(*ClaimSpec)(nil),               // 13: galactic.worker.v1alpha1.ClaimSpec
-	(*RequestRequest)(nil),          // 14: galactic.worker.v1alpha1.RequestRequest
-	(*RequestResponse)(nil),         // 15: galactic.worker.v1alpha1.RequestResponse
-	(*UpdateRequest)(nil),           // 16: galactic.worker.v1alpha1.UpdateRequest
-	(*UpdateResponse)(nil),          // 17: galactic.worker.v1alpha1.UpdateResponse
-	(*ReleaseRequest)(nil),          // 18: galactic.worker.v1alpha1.ReleaseRequest
-	(*ReleaseResponse)(nil),         // 19: galactic.worker.v1alpha1.ReleaseResponse
-	(*ObserveRequest)(nil),          // 20: galactic.worker.v1alpha1.ObserveRequest
-	(*ObserveResponse)(nil),         // 21: galactic.worker.v1alpha1.ObserveResponse
-	(*Condition)(nil),               // 22: galactic.worker.v1alpha1.Condition
-	(*DestinationStatus)(nil),       // 23: galactic.worker.v1alpha1.DestinationStatus
-	(*ClaimStatus)(nil),             // 24: galactic.worker.v1alpha1.ClaimStatus
-	(*HandoffInterface)(nil),        // 25: galactic.worker.v1alpha1.HandoffInterface
-	(*durationpb.Duration)(nil),     // 26: google.protobuf.Duration
+	(*EdgeLink)(nil),                // 14: galactic.worker.v1alpha1.EdgeLink
+	(*RequestRequest)(nil),          // 15: galactic.worker.v1alpha1.RequestRequest
+	(*RequestResponse)(nil),         // 16: galactic.worker.v1alpha1.RequestResponse
+	(*UpdateRequest)(nil),           // 17: galactic.worker.v1alpha1.UpdateRequest
+	(*UpdateResponse)(nil),          // 18: galactic.worker.v1alpha1.UpdateResponse
+	(*ReleaseRequest)(nil),          // 19: galactic.worker.v1alpha1.ReleaseRequest
+	(*ReleaseResponse)(nil),         // 20: galactic.worker.v1alpha1.ReleaseResponse
+	(*ObserveRequest)(nil),          // 21: galactic.worker.v1alpha1.ObserveRequest
+	(*ObserveResponse)(nil),         // 22: galactic.worker.v1alpha1.ObserveResponse
+	(*Condition)(nil),               // 23: galactic.worker.v1alpha1.Condition
+	(*DestinationStatus)(nil),       // 24: galactic.worker.v1alpha1.DestinationStatus
+	(*ClaimStatus)(nil),             // 25: galactic.worker.v1alpha1.ClaimStatus
+	(*HandoffInterface)(nil),        // 26: galactic.worker.v1alpha1.HandoffInterface
+	(*durationpb.Duration)(nil),     // 27: google.protobuf.Duration
 }
 var file_galactic_worker_v1alpha1_worker_proto_depIdxs = []int32{
-	26, // 0: galactic.worker.v1alpha1.GetCapabilitiesResponse.lease:type_name -> google.protobuf.Duration
-	26, // 1: galactic.worker.v1alpha1.GetCapabilitiesResponse.renew_interval:type_name -> google.protobuf.Duration
+	27, // 0: galactic.worker.v1alpha1.GetCapabilitiesResponse.lease:type_name -> google.protobuf.Duration
+	27, // 1: galactic.worker.v1alpha1.GetCapabilitiesResponse.renew_interval:type_name -> google.protobuf.Duration
 	7,  // 2: galactic.worker.v1alpha1.GetCapabilitiesResponse.capabilities:type_name -> galactic.worker.v1alpha1.Capability
 	0,  // 3: galactic.worker.v1alpha1.Capability.state:type_name -> galactic.worker.v1alpha1.CapabilityState
 	9,  // 4: galactic.worker.v1alpha1.Destination.attachment:type_name -> galactic.worker.v1alpha1.AttachmentRef
@@ -1876,39 +1955,40 @@ var file_galactic_worker_v1alpha1_worker_proto_depIdxs = []int32{
 	1,  // 7: galactic.worker.v1alpha1.ClaimSpec.handoff:type_name -> galactic.worker.v1alpha1.Handoff
 	12, // 8: galactic.worker.v1alpha1.ClaimSpec.destinations:type_name -> galactic.worker.v1alpha1.Destination
 	2,  // 9: galactic.worker.v1alpha1.ClaimSpec.mode:type_name -> galactic.worker.v1alpha1.Mode
-	8,  // 10: galactic.worker.v1alpha1.RequestRequest.key:type_name -> galactic.worker.v1alpha1.ClaimKey
-	13, // 11: galactic.worker.v1alpha1.RequestRequest.spec:type_name -> galactic.worker.v1alpha1.ClaimSpec
-	24, // 12: galactic.worker.v1alpha1.RequestResponse.status:type_name -> galactic.worker.v1alpha1.ClaimStatus
-	8,  // 13: galactic.worker.v1alpha1.UpdateRequest.key:type_name -> galactic.worker.v1alpha1.ClaimKey
-	13, // 14: galactic.worker.v1alpha1.UpdateRequest.spec:type_name -> galactic.worker.v1alpha1.ClaimSpec
-	24, // 15: galactic.worker.v1alpha1.UpdateResponse.status:type_name -> galactic.worker.v1alpha1.ClaimStatus
-	8,  // 16: galactic.worker.v1alpha1.ReleaseRequest.key:type_name -> galactic.worker.v1alpha1.ClaimKey
-	24, // 17: galactic.worker.v1alpha1.ReleaseResponse.status:type_name -> galactic.worker.v1alpha1.ClaimStatus
-	8,  // 18: galactic.worker.v1alpha1.ObserveRequest.key:type_name -> galactic.worker.v1alpha1.ClaimKey
-	24, // 19: galactic.worker.v1alpha1.ObserveResponse.status:type_name -> galactic.worker.v1alpha1.ClaimStatus
-	3,  // 20: galactic.worker.v1alpha1.Condition.status:type_name -> galactic.worker.v1alpha1.ConditionStatus
-	12, // 21: galactic.worker.v1alpha1.DestinationStatus.destination:type_name -> galactic.worker.v1alpha1.Destination
-	2,  // 22: galactic.worker.v1alpha1.DestinationStatus.mode:type_name -> galactic.worker.v1alpha1.Mode
-	8,  // 23: galactic.worker.v1alpha1.ClaimStatus.key:type_name -> galactic.worker.v1alpha1.ClaimKey
-	22, // 24: galactic.worker.v1alpha1.ClaimStatus.conditions:type_name -> galactic.worker.v1alpha1.Condition
-	23, // 25: galactic.worker.v1alpha1.ClaimStatus.destinations:type_name -> galactic.worker.v1alpha1.DestinationStatus
-	4,  // 26: galactic.worker.v1alpha1.ClaimStatus.withdrawal_scope:type_name -> galactic.worker.v1alpha1.WithdrawalScope
-	25, // 27: galactic.worker.v1alpha1.ClaimStatus.handoff_interfaces:type_name -> galactic.worker.v1alpha1.HandoffInterface
-	5,  // 28: galactic.worker.v1alpha1.Worker.GetCapabilities:input_type -> galactic.worker.v1alpha1.GetCapabilitiesRequest
-	14, // 29: galactic.worker.v1alpha1.Worker.Request:input_type -> galactic.worker.v1alpha1.RequestRequest
-	16, // 30: galactic.worker.v1alpha1.Worker.Update:input_type -> galactic.worker.v1alpha1.UpdateRequest
-	20, // 31: galactic.worker.v1alpha1.Worker.Observe:input_type -> galactic.worker.v1alpha1.ObserveRequest
-	18, // 32: galactic.worker.v1alpha1.Worker.Release:input_type -> galactic.worker.v1alpha1.ReleaseRequest
-	6,  // 33: galactic.worker.v1alpha1.Worker.GetCapabilities:output_type -> galactic.worker.v1alpha1.GetCapabilitiesResponse
-	15, // 34: galactic.worker.v1alpha1.Worker.Request:output_type -> galactic.worker.v1alpha1.RequestResponse
-	17, // 35: galactic.worker.v1alpha1.Worker.Update:output_type -> galactic.worker.v1alpha1.UpdateResponse
-	21, // 36: galactic.worker.v1alpha1.Worker.Observe:output_type -> galactic.worker.v1alpha1.ObserveResponse
-	19, // 37: galactic.worker.v1alpha1.Worker.Release:output_type -> galactic.worker.v1alpha1.ReleaseResponse
-	33, // [33:38] is the sub-list for method output_type
-	28, // [28:33] is the sub-list for method input_type
-	28, // [28:28] is the sub-list for extension type_name
-	28, // [28:28] is the sub-list for extension extendee
-	0,  // [0:28] is the sub-list for field type_name
+	14, // 10: galactic.worker.v1alpha1.ClaimSpec.edge_link:type_name -> galactic.worker.v1alpha1.EdgeLink
+	8,  // 11: galactic.worker.v1alpha1.RequestRequest.key:type_name -> galactic.worker.v1alpha1.ClaimKey
+	13, // 12: galactic.worker.v1alpha1.RequestRequest.spec:type_name -> galactic.worker.v1alpha1.ClaimSpec
+	25, // 13: galactic.worker.v1alpha1.RequestResponse.status:type_name -> galactic.worker.v1alpha1.ClaimStatus
+	8,  // 14: galactic.worker.v1alpha1.UpdateRequest.key:type_name -> galactic.worker.v1alpha1.ClaimKey
+	13, // 15: galactic.worker.v1alpha1.UpdateRequest.spec:type_name -> galactic.worker.v1alpha1.ClaimSpec
+	25, // 16: galactic.worker.v1alpha1.UpdateResponse.status:type_name -> galactic.worker.v1alpha1.ClaimStatus
+	8,  // 17: galactic.worker.v1alpha1.ReleaseRequest.key:type_name -> galactic.worker.v1alpha1.ClaimKey
+	25, // 18: galactic.worker.v1alpha1.ReleaseResponse.status:type_name -> galactic.worker.v1alpha1.ClaimStatus
+	8,  // 19: galactic.worker.v1alpha1.ObserveRequest.key:type_name -> galactic.worker.v1alpha1.ClaimKey
+	25, // 20: galactic.worker.v1alpha1.ObserveResponse.status:type_name -> galactic.worker.v1alpha1.ClaimStatus
+	3,  // 21: galactic.worker.v1alpha1.Condition.status:type_name -> galactic.worker.v1alpha1.ConditionStatus
+	12, // 22: galactic.worker.v1alpha1.DestinationStatus.destination:type_name -> galactic.worker.v1alpha1.Destination
+	2,  // 23: galactic.worker.v1alpha1.DestinationStatus.mode:type_name -> galactic.worker.v1alpha1.Mode
+	8,  // 24: galactic.worker.v1alpha1.ClaimStatus.key:type_name -> galactic.worker.v1alpha1.ClaimKey
+	23, // 25: galactic.worker.v1alpha1.ClaimStatus.conditions:type_name -> galactic.worker.v1alpha1.Condition
+	24, // 26: galactic.worker.v1alpha1.ClaimStatus.destinations:type_name -> galactic.worker.v1alpha1.DestinationStatus
+	4,  // 27: galactic.worker.v1alpha1.ClaimStatus.withdrawal_scope:type_name -> galactic.worker.v1alpha1.WithdrawalScope
+	26, // 28: galactic.worker.v1alpha1.ClaimStatus.handoff_interfaces:type_name -> galactic.worker.v1alpha1.HandoffInterface
+	5,  // 29: galactic.worker.v1alpha1.Worker.GetCapabilities:input_type -> galactic.worker.v1alpha1.GetCapabilitiesRequest
+	15, // 30: galactic.worker.v1alpha1.Worker.Request:input_type -> galactic.worker.v1alpha1.RequestRequest
+	17, // 31: galactic.worker.v1alpha1.Worker.Update:input_type -> galactic.worker.v1alpha1.UpdateRequest
+	21, // 32: galactic.worker.v1alpha1.Worker.Observe:input_type -> galactic.worker.v1alpha1.ObserveRequest
+	19, // 33: galactic.worker.v1alpha1.Worker.Release:input_type -> galactic.worker.v1alpha1.ReleaseRequest
+	6,  // 34: galactic.worker.v1alpha1.Worker.GetCapabilities:output_type -> galactic.worker.v1alpha1.GetCapabilitiesResponse
+	16, // 35: galactic.worker.v1alpha1.Worker.Request:output_type -> galactic.worker.v1alpha1.RequestResponse
+	18, // 36: galactic.worker.v1alpha1.Worker.Update:output_type -> galactic.worker.v1alpha1.UpdateResponse
+	22, // 37: galactic.worker.v1alpha1.Worker.Observe:output_type -> galactic.worker.v1alpha1.ObserveResponse
+	20, // 38: galactic.worker.v1alpha1.Worker.Release:output_type -> galactic.worker.v1alpha1.ReleaseResponse
+	34, // [34:39] is the sub-list for method output_type
+	29, // [29:34] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_galactic_worker_v1alpha1_worker_proto_init() }
@@ -1927,7 +2007,7 @@ func file_galactic_worker_v1alpha1_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_galactic_worker_v1alpha1_worker_proto_rawDesc), len(file_galactic_worker_v1alpha1_worker_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
