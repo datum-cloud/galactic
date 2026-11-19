@@ -164,7 +164,15 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 		}
 		state[m.Mode()] = st
 	}
-	return w.report(evals, state)
+	handoffs := map[module.ClaimKey][]module.HandoffInterface{}
+	for _, m := range mods {
+		if r, ok := m.(module.HandoffReporter); ok {
+			for k, ifs := range r.HandoffInterfaces(scope) {
+				handoffs[k] = append(handoffs[k], ifs...)
+			}
+		}
+	}
+	return w.report(evals, state, handoffs)
 }
 
 // planClaimedHost reports whether the canonical host state of vpc, which
@@ -459,7 +467,8 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 		}
 		for mode, dests := range perMode {
 			desired[mode] = append(desired[mode], module.Claim{Key: e.key, Owner: e.owner, Generation: e.gen,
-				Handoff: c.spec.GetHandoff(), Destinations: dests})
+				Handoff: c.spec.GetHandoff(), OwnerPod: c.rec.PodUID, Addresses: slices.Clone(att.Addresses),
+				Destinations: dests})
 		}
 	}
 	return evals, desired, nil
@@ -512,7 +521,7 @@ func (w *Worker) resolveDestination(ctx context.Context, vpc string, own netip.P
 	}
 	de.mode, de.resolved = mode, true
 	return module.Destination{ID: de.id, Ref: d, Mode: mode, VPC: att.VPC, Node: att.Node, Locator: loc,
-		Addresses: slices.Clone(att.Addresses)}, nil
+		Addresses: slices.Clone(att.Addresses), HostInterface: att.HostInterface}, nil
 }
 
 func modeName(m workerv1alpha1.Mode) string {
@@ -568,7 +577,8 @@ func (w *Worker) reportFailure(evals []*claimEval, reason string, err error) {
 
 // report turns read-back into status, and deletes released claims whose
 // programmed state is gone.
-func (w *Worker) report(evals []*claimEval, state map[workerv1alpha1.Mode]module.State) error {
+func (w *Worker) report(evals []*claimEval, state map[workerv1alpha1.Mode]module.State,
+	handoffs map[module.ClaimKey][]module.HandoffInterface) error {
 	present := func(k module.ClaimKey) bool {
 		for _, st := range state {
 			if len(st[k]) > 0 {
@@ -594,6 +604,11 @@ func (w *Worker) report(evals []*claimEval, state map[workerv1alpha1.Mode]module
 			continue
 		}
 		w.applyStatus(c, e, state)
+		c.status.HandoffInterfaces = nil
+		for _, h := range handoffs[e.key] {
+			c.status.HandoffInterfaces = append(c.status.HandoffInterfaces,
+				&workerv1alpha1.HandoffInterface{Role: h.Role, Name: h.Name, Ifindex: h.Ifindex})
+		}
 		w.publish(c)
 	}
 	w.mu.Unlock()
@@ -708,6 +723,7 @@ func (w *Worker) forget(k module.ClaimKey, gen uint64) error {
 	c.status.Released = true
 	c.status.ObservedGeneration = gen
 	c.status.Destinations = nil
+	c.status.HandoffInterfaces = nil
 	w.publish(c)
 	w.mu.Unlock()
 	updateClaimGauge(w)

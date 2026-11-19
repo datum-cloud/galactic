@@ -257,4 +257,23 @@ message ClaimStatus {
   bool released = 7;
   // revision increases with every snapshot Worker produces for the claim.
   uint64 revision = 8;
+  // handoff_interfaces are the interfaces Worker created for the claim's
+  // handoff, which the client attaches its own program to or configures:
+  // the NAT end of a veth_pair claim's service-internal veth pair, and both
+  // ends of a routed_link or socket claim's routed link. A tap claim has
+  // none. Each is listed once Worker has created it.
+  repeated HandoffInterface handoff_interfaces = 9;
+}
+
+// HandoffInterface is one interface Worker created for a claim's handoff.
+message HandoffInterface {
+  // role is "nat" for the NAT end of a veth pair, in the host's network
+  // namespace; "tenant" for the pair's tenant end, in the VPC's VRF; "host"
+  // for a routed link's host end, in the VPC's VRF; or "pod" for the routed
+  // link's end in the caller's pod, which the pod configures.
+  string role = 1;
+  // name is the interface name in its network namespace.
+  string name = 2;
+  // ifindex is the interface index in its network namespace.
+  int32 ifindex = 3;
 }
