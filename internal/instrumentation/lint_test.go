@@ -38,6 +38,7 @@ import (
 	_ "go.datum.net/galactic/internal/runtime/gobgp"
 	_ "go.datum.net/galactic/internal/serviceroute"
 	_ "go.datum.net/galactic/internal/worker"
+	_ "go.datum.net/galactic/internal/worker/fabric"
 )
 
 const (
