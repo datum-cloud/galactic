@@ -112,3 +112,30 @@ func TestDesireReportsLinkKeyCollisions(t *testing.T) {
 		}
 	}
 }
+
+// TestDesireExpandsALocalShard steers every tenant a Local shard serves into
+// the claim's pair and authorizes the pair's return to their addresses.
+func TestDesireExpandsALocalShard(t *testing.T) {
+	key := module.ClaimKey{Node: "n", VPC: "vpc1", AttachmentUID: "uid-shard"}
+	sid := netip.MustParseAddr("2001:db8:5:1::")
+	a1, a2 := netip.MustParseAddr("2001:db8:a::1"), netip.MustParseAddr("2001:db8:a::2")
+	m := desire("vpc1", []module.Claim{{Key: key, Handoff: workerv1alpha1.Handoff_HANDOFF_VETH_PAIR,
+		Destinations: []module.Destination{{ID: "shard/s", Shard: &module.ShardTarget{Name: "s", SID: sid,
+			Tenants: []module.ShardTenant{
+				{UID: "t1", HostInterface: "tap1", Addresses: []netip.Addr{a1}},
+				{UID: "t2", HostInterface: "tap2", Addresses: []netip.Addr{a2}},
+				{UID: "t3"}, // not attached yet
+			}}}}}})
+	if m.shard == nil || m.shard.key != key || m.shard.sid != sid {
+		t.Fatalf("shard = %+v, want the claim's shard", m.shard)
+	}
+	if len(m.pairs) != 1 || len(m.tenants) != 2 {
+		t.Fatalf("pairs = %v tenants = %v, want one pair and the two attached tenants", m.pairs, m.tenants)
+	}
+	for name, want := range map[string]netip.Addr{"tap1": a1, "tap2": a2} {
+		tw := m.tenants[name]
+		if tw == nil || tw.pair != m.shard.pair || len(tw.guests) != 1 || tw.guests[0] != want {
+			t.Fatalf("tenant %s = %+v, want steered into %s with guest %s", name, tw, m.shard.pair, want)
+		}
+	}
+}

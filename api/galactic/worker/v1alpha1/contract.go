@@ -112,16 +112,24 @@ const (
 	ReasonModeUnavailable            = "ModeUnavailable"
 	ReasonDestinationKindUnsupported = "DestinationKindUnsupported"
 	ReasonDestinationNotFound        = "DestinationNotFound"
-	ReasonLocatorUnknown             = "LocatorUnknown"
-	ReasonModuleNotRunning           = "ModuleNotRunning"
-	ReasonDatapathNotLoaded          = "DatapathNotLoaded"
-	ReasonHookUnsupported            = "HookUnsupported"
-	ReasonHandoffInterfaceMissing    = "HandoffInterfaceMissing"
-	ReasonProgrammingFailed          = "ProgrammingFailed"
-	ReasonScopeOwnedElsewhere        = "ScopeOwnedElsewhere"
-	ReasonAuthorizationRevoked       = "AuthorizationRevoked"
-	ReasonLeaseExpired               = "LeaseExpired"
-	ReasonReleased                   = "Released"
+	// ReasonShardNotReady is a shard destination whose EgressShard reports
+	// no SID, or is not Programmed and Ready.
+	ReasonShardNotReady = "ShardNotReady"
+	// ReasonLocalShardIneligible is a Local shard destination whose VPC
+	// does not take the shard yet: its pair, or the shard's program on the
+	// pair's NAT end, is not ready, so the VPC's tenants keep the remote
+	// shards.
+	ReasonLocalShardIneligible    = "LocalShardIneligible"
+	ReasonLocatorUnknown          = "LocatorUnknown"
+	ReasonModuleNotRunning        = "ModuleNotRunning"
+	ReasonDatapathNotLoaded       = "DatapathNotLoaded"
+	ReasonHookUnsupported         = "HookUnsupported"
+	ReasonHandoffInterfaceMissing = "HandoffInterfaceMissing"
+	ReasonProgrammingFailed       = "ProgrammingFailed"
+	ReasonScopeOwnedElsewhere     = "ScopeOwnedElsewhere"
+	ReasonAuthorizationRevoked    = "AuthorizationRevoked"
+	ReasonLeaseExpired            = "LeaseExpired"
+	ReasonReleased                = "Released"
 	// ReasonDestinationAddressUnknown is a destination whose attachment
 	// records no address, such as a guest that manages its own addressing.
 	ReasonDestinationAddressUnknown = "DestinationAddressUnknown"

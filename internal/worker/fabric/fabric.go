@@ -418,6 +418,9 @@ func (m *Module) readDestination(vpc string, table uint32, haveTable bool, own n
 		st.Reason, st.Message = reason, msg
 		return st
 	}
+	if d.Shard != nil {
+		return m.readShard(d)
+	}
 	switch {
 	case own.IsValid() && own == d.Locator:
 		return fail(workerv1alpha1.ReasonRouteMismatch, "the destination is on this node")
@@ -477,6 +480,25 @@ func (m *Module) readDestination(vpc string, table uint32, haveTable bool, own n
 			return fail(workerv1alpha1.ReasonNeighborUnresolved,
 				fmt.Sprintf("the entry toward %s carries an out-of-date next hop", c.sid))
 		}
+	}
+	st.ForwardReady = true
+	return st
+}
+
+// readShard reports a remote shard destination. Fabric writes nothing for
+// it: galactic-cni's egress sweep keeps the shard groups and the VPC's
+// routes toward them. It is programmed once resolved, and forward ready
+// while the shard SID resolves to an underlay next hop over an SRv6 uplink,
+// the same evidence that makes the shard alive in this node's groups.
+func (m *Module) readShard(d module.Destination) module.DestinationState {
+	st := module.DestinationState{Programmed: true}
+	if _, err := m.cfg.Datapath.NextHop(d.Shard.SID); err != nil {
+		reason := hopReason(err)
+		if reason == "" {
+			reason = workerv1alpha1.ReasonUnderlayUnreachable
+		}
+		st.Reason, st.Message = reason, err.Error()
+		return st
 	}
 	st.ForwardReady = true
 	return st

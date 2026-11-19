@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -103,7 +104,7 @@ func (k *Kernel) read(vpc, node string, claims []module.Claim, m *model, errs ma
 	if err != nil {
 		return fail(workerv1alpha1.ReasonDatapathNotLoaded, err.Error()), nil
 	}
-	_, vrfIdx, haveVRF, err := TableID(vpc)
+	table, vrfIdx, haveVRF, err := TableID(vpc)
 	if err != nil {
 		return out, err
 	}
@@ -164,6 +165,15 @@ func (k *Kernel) read(vpc, node string, claims []module.Claim, m *model, errs ma
 			if other, ok := m.collisions[c.Key]; ok {
 				ck.unprogrammed(workerv1alpha1.ReasonProgrammingFailed,
 					"the claim's handoff links would take the names of claim "+other.String()+"'s")
+				states[d.ID] = ck.done()
+				continue
+			}
+			if d.Shard != nil {
+				// A shard is judged by its pair and the VPC's row; each
+				// tenant's own rows are Local's to keep, and one guest
+				// that is not attached withdraws nothing.
+				handoffCheck(ck, nil)
+				k.shardCheck(ck, table, m, c, d)
 				states[d.ID] = ck.done()
 				continue
 			}
@@ -309,8 +319,23 @@ func (k *Kernel) pairCheck(h *host, m *model, c module.Claim, vrfIdx int, objs *
 	}
 	got, ok := h.readPair(p)
 	if ok {
-		out.handoffs[c.Key] = append(out.handoffs[c.Key],
-			module.HandoffInterface{Role: workerv1alpha1.HandoffRoleNAT, Name: p.nat, Ifindex: int32(got.nat.Attrs().Index)},
+		nat := module.HandoffInterface{Role: workerv1alpha1.HandoffRoleNAT, Name: p.nat,
+			Ifindex: int32(got.nat.Attrs().Index)}
+		if m.shard != nil && m.shard.key == c.Key {
+			var names []string
+			for _, t := range m.tenants {
+				if t.pair == p.tenant {
+					names = append(names, t.name)
+				}
+			}
+			slices.Sort(names)
+			// An unreadable identity leaves the SID empty; the NAT end
+			// then serves nothing, and the row is still judged.
+			if sid, err := k.tenantSID(h, names); err == nil && sid.IsValid() {
+				nat.TenantSID = sid.String()
+			}
+		}
+		out.handoffs[c.Key] = append(out.handoffs[c.Key], nat,
 			module.HandoffInterface{Role: workerv1alpha1.HandoffRoleTenant, Name: p.tenant,
 				Ifindex: int32(got.tenant.Attrs().Index)})
 	}
