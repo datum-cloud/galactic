@@ -62,6 +62,10 @@ internal/plumbing/ebpf/xmitdrops/xmitdrops_bpfel.go
 internal/plumbing/ebpf/xmitdrops/xmitdrops_bpfel.o
 internal/plumbing/ebpf/xmitdrops/xmitdrops_bpfeb.go
 internal/plumbing/ebpf/xmitdrops/xmitdrops_bpfeb.o
+tests/handoffs/probe/handoff_bpfel.go
+tests/handoffs/probe/handoff_bpfel.o
+tests/handoffs/probe/handoff_bpfeb.go
+tests/handoffs/probe/handoff_bpfeb.o
 
 # Same convention as above, for the containerlab-only pass-through XDP
 # program (deploy/containerlab/Taskfile.yaml's build:lab-xdp-passthrough,
