@@ -166,11 +166,11 @@ func (wf *workerFixture) edgeLink(vpc, uid string) *module.EdgeLink {
 // connectorAgent returns a new agent process whose datapath is Worker.
 func (f *fixture) connectorAgent(wf *workerFixture) *Agent {
 	f.t.Helper()
-	c, err := workerclient.Dial(context.Background(), workerclient.Options{SocketPath: wf.socket,
-		Token: func() (string, error) { return "token", nil }, RetryMin: time.Millisecond, RetryMax: 10 * time.Millisecond})
-	if err != nil {
-		f.t.Fatal(err)
-	}
+	c := &WorkerConn{Dial: func(ctx context.Context) (*workerclient.Client, error) {
+		return workerclient.Dial(ctx, workerclient.Options{SocketPath: wf.socket,
+			Token:    func() (string, error) { return "token", nil },
+			RetryMin: time.Millisecond, RetryMax: 10 * time.Millisecond, Attempts: 2})
+	}}
 	f.t.Cleanup(func() { _ = c.Close() })
 	dp := &WorkerDatapath{Client: c, Node: node, Gates: fixtureLinkGates{f.gates}, Wait: 5 * time.Second}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -418,6 +418,39 @@ func TestConnectorGateScopeFencesOlderProcess(t *testing.T) {
 	}
 	if older.Healthy(nil) == nil {
 		t.Fatal("the fenced process is healthy")
+	}
+}
+
+// TestConnectorWorkerDown keeps an attachment whose link Worker registered
+// Programmed while Worker is down, in the running process and in one that
+// starts during the outage, and programs no new attachment until Worker is
+// back.
+func TestConnectorWorkerDown(t *testing.T) {
+	f := newFixture(t)
+	wf := f.startWorker()
+	a := f.connectorAgent(wf)
+	f.pod("pod-1")
+	f.pod("pod-2")
+	wf.admit(f.attach("a1", uid1, "pod-1", vpcA, "2001:db8:100::10", false), true)
+	f.reconcile(a)
+	f.programmed("a1")
+	links := len(f.links())
+
+	wf.stop()
+	wf.stop = nil
+	_ = a.Reconcile(context.Background())
+	f.wantCondition("a1", galacticv1alpha1.EdgeAttachmentProgrammed, metav1.ConditionTrue, ReasonProgrammed)
+
+	restarted := f.connectorAgent(wf)
+	f.attach("a2", "uid-2", "pod-2", vpcA, "2001:db8:100::11", false)
+	_ = restarted.Reconcile(context.Background())
+	f.wantCondition("a1", galacticv1alpha1.EdgeAttachmentProgrammed, metav1.ConditionTrue, ReasonProgrammed)
+	f.wantCondition("a2", galacticv1alpha1.EdgeAttachmentProgrammed, metav1.ConditionFalse, ReasonWorkerUnavailable)
+	if got := len(f.links()); got != links {
+		t.Fatalf("links during the outage = %d, want %d: none removed, none added", got, links)
+	}
+	if idx := f.hostLink("a1").Attrs().Index; !f.gatedAs(uint32(idx), "2001:db8:100::10") {
+		t.Fatal("the registered link lost its gate row during the outage")
 	}
 }
 

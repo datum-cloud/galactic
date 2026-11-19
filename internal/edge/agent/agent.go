@@ -788,6 +788,24 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 	if err != nil {
 		return fail(ReasonProvisionFailed, err)
 	}
+	// workerFail reports a Worker failure. While Worker cannot be reached,
+	// a link it already registered keeps its rows, and forwarding never
+	// depends on Worker: an attachment Programmed on that link stays so,
+	// rather than ending its routes and sessions for an outage of Worker.
+	workerFail := func(err error) outcome {
+		var we *WorkerError
+		if errors.As(err, &we) && we.Reason == ReasonWorkerUnavailable && link.ID == spec.ID &&
+			meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentProgrammed) {
+			slog.Warn("galactic-edge: Galactic Worker is unreachable; keeping the attachment's registered link",
+				"attachment", att.Namespace+"/"+att.Name, "link", spec.HostLink, "err", err)
+			s := spec
+			return outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
+				status: metav1.ConditionTrue, reason: ReasonProgrammed,
+				message: fmt.Sprintf("host link %s in %s; Galactic Worker unreachable, its registration kept",
+					spec.HostLink, spec.HostVRF), spec: &s}
+		}
+		return fail(workerReason(err), err)
+	}
 	if reason, err := a.checkUnderlay(); err != nil {
 		return fail(reason, err)
 	}
@@ -807,7 +825,7 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 		// state for a VPC with a claim, and keeps it while the claim does.
 		if err := c.Prepare(Link{VPC: att.Status.VPC, AttachmentUID: string(att.UID), Name: spec.HostLink,
 			Addr: spec.Address}); err != nil {
-			return fail(workerReason(err), err)
+			return workerFail(err)
 		}
 	}
 	if reason, err := a.ensureHostVRF(att.Status.VPC, spec.HostVRF); err != nil {
@@ -854,7 +872,7 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 	case errors.Is(datapathErr, attachreg.ErrVRFNotRegistered):
 		return fail(ReasonHostVRFMissing, fmt.Errorf("%w: %s", err, a.noVPCState(att.Status.VPC)))
 	case datapathErr != nil:
-		return fail(workerReason(datapathErr), err)
+		return workerFail(datapathErr)
 	case errors.Is(err, hostattach.ErrNamespaceReplaced):
 		return fail(ReasonNamespaceReplaced, err)
 	case err != nil:
