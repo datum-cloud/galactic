@@ -440,7 +440,9 @@ the shard's program natively on the NAT end; the destination reports
 - **Ordered.** galactic-cni's egress sweep writes a `PassThroughLocalNAT`
   class route in a VPC with a row when the row's shard comes first among the
   usable shards of its static list, and restores the shard's SID entry once
-  the row goes.
+  the row goes. The sweep reads the rows every second, so either change takes
+  about a second. CNI ADD still points a new VRF's class route at the first
+  shard that resolves, and the sweep then moves it.
 
 Drain, pins and NAT64 standby keep their rules: a draining local shard keeps
 its pins and takes no new tenants, and a local NAT64 standby is held while a
@@ -453,7 +455,7 @@ Which established sessions survive:
 | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
 | The pair is recreated               | Survive when no packet of the tenant address crossed while the row was gone: the session key is the tenant SID, not the ifindex. A packet in that gap re-pins the address to a remote shard, which breaks its flows. | Unaffected            |
 | NAT's program leaves one VPC's pair | That VPC's are lost: its row goes, its tenants move to the remote shards, which translate them with another address.                                                                                                 | Unaffected, every VPC |
-| galactic-nat restarts               | Survive: the session table and the program's link are pinned, so the datapath keeps running.                                                                                                                         | Survive               |
+| galactic-nat restarts               | Survive: the session table, the pair rows and the program's link (`/sys/fs/bpf/galactic-nat/links/`) are pinned, so the datapath keeps running.                                                                      | Survive               |
 | Worker restarts                     | Survive: rows and programs stay while Worker rebuilds its state.                                                                                                                                                     | Survive               |
 | The local shard drains              | Survive on their pins; new tenant addresses go to other shards.                                                                                                                                                      | Unaffected            |
 | The local shard stops being ready   | Lost: the shard leaves the groups, as a remote shard does.                                                                                                                                                           | Unaffected            |
