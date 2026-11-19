@@ -81,6 +81,11 @@ func (p *pass) ensureLocalShard() error {
 		return nil
 	}
 	rows, err := p.k.Shards.All()
+	if errors.Is(err, os.ErrNotExist) {
+		// A uSID datapath older than egress_local_shard: no VPC can take
+		// the local shard, and Read reports why.
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("local: read egress_local_shard: %w", err)
 	}
@@ -143,6 +148,9 @@ func (k *Kernel) shardCheck(ck *check, table uint32, m *model, c module.Claim, d
 	}
 	row, have, err := k.Shards.Get(table)
 	switch {
+	case errors.Is(err, os.ErrNotExist):
+		ck.unprogrammed(workerv1alpha1.ReasonDatapathNotLoaded,
+			"the uSID datapath has no egress_local_shard map; upgrade galactic-cni")
 	case err != nil:
 		ck.notReady(true, false, workerv1alpha1.ReasonProgrammingFailed, err.Error())
 	case !have || row.ShardSID != d.Shard.SID:

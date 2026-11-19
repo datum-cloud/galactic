@@ -185,8 +185,11 @@ func run(o *options) error {
 	}
 	fabric.InitMetrics()
 	pods := &local.ProcPods{ProcRoot: o.procRoot, Pods: auth.CgroupPodResolver{ProcRoot: o.procRoot}}
+	shards := &local.PinnedShards{PinDir: o.pinDir}
+	defer func() { _ = shards.Close() }()
 	localKernel := &local.Kernel{PinDir: o.pinDir, LocalPinDir: o.localPinDir, DispatchDir: o.dispatchDir,
-		Pods: pods}
+		Shards: shards,
+		Pods:   pods}
 	defer func() { _ = localKernel.Close() }()
 	loc, err := local.New(local.Config{Kernel: localKernel, Node: o.nodeName, Log: slog.Default()})
 	if err != nil {
