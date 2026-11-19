@@ -69,13 +69,20 @@ spec:
                   fieldPath: metadata.name
           # socat sets SOCAT_PEERADDR to the client's address for each
           # connection or datagram.
+          #
+          # SYSTEM:...!!/dev/null sends the reply command's output to the
+          # client and the client's bytes to /dev/null. With a plain SYSTEM
+          # address socat writes the client's request to the command, which
+          # has usually exited by then without reading it. That write fails
+          # with EPIPE (or the next read with ECONNRESET), and when it comes
+          # first socat exits and closes the flow without sending the reply.
           command:
             - sh
             - -c
             - |
               reply='echo "$POD_NAME $SOCAT_PEERADDR"'
-              socat TCP6-LISTEN:80,reuseaddr,fork SYSTEM:"$reply" &
-              exec socat UDP6-RECVFROM:80,reuseaddr,fork SYSTEM:"$reply"
+              socat TCP6-LISTEN:80,reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null &
+              exec socat UDP6-RECVFROM:80,reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -122,10 +129,17 @@ spec:
                   fieldPath: metadata.name
           # socat sets SOCAT_PEERADDR to the client's address for each
           # connection or datagram.
+          #
+          # SYSTEM:...!!/dev/null sends the reply command's output to the
+          # client and the client's bytes to /dev/null. With a plain SYSTEM
+          # address socat writes the client's request to the command, which
+          # has usually exited by then without reading it. That write fails
+          # with EPIPE (or the next read with ECONNRESET), and when it comes
+          # first socat exits and closes the flow without sending the reply.
           command:
             - sh
             - -c
             - |
               reply='echo "$POD_NAME $SOCAT_PEERADDR"'
-              socat TCP6-LISTEN:80,reuseaddr,fork SYSTEM:"$reply" &
-              exec socat UDP6-RECVFROM:80,reuseaddr,fork SYSTEM:"$reply"
+              socat TCP6-LISTEN:80,reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null &
+              exec socat UDP6-RECVFROM:80,reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null

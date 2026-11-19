@@ -244,11 +244,10 @@ gateway_scenario() {
   local rc=0
   LAB=${LAB} "${SCRIPT_DIR}/${script}" --node dfw-worker2 >"${OUT}/logs/${sc}.log" 2>&1 || rc=$?
   cap_stop_all
-  # The lab's ingress checks intermittently lose a TCP flow whose request
-  # reached a backend: the ns60 responder closes without writing a reply
-  # (docs/baseline.md). So the exact flow counts and the check's exit status
-  # are per-run values; the stable result is that each protocol had answered
-  # flows, which shows delivery in both directions.
+  # The exact flow counts and the check's exit status are per-run values; the
+  # stable result is that each protocol had answered flows, which shows
+  # delivery in both directions. The reference was recorded while the ns60
+  # responder still lost flows, before #1452 (docs/baseline.md).
   volatile "${sc}.check_exit" "${rc}"
   local proto answered
   for proto in tcp udp; do
