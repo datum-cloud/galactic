@@ -67,8 +67,8 @@ learns the outcome from `Observe`.
 ### Capabilities
 
 `GetCapabilities` reports one row per capability: `local.tap`,
-`local.veth_pair`, `local.routed_link`, `local.socket` and `fabric.srv6`. Each
-row is `Available` or `Unavailable` with a machine reason, for example
+`local.veth_pair`, `local.routed_link`, `local.socket`, `fabric.srv6` and
+`fabric.routes`. Each row is `Available` or `Unavailable` with a machine reason, for example
 `DatapathNotLoaded`, `HookUnsupported` (an XDP mode or device the
 [qualified platform](qualification.md) excludes) or `ModuleNotRunning`. A claim
 that needs an unavailable capability is accepted and reports `Programmed=False`
@@ -82,6 +82,55 @@ be allowed the handoff's capability, and `fabric.srv6` when a destination is
 on another node or resolves to Fabric at admission. Worker records the owner's
 capabilities with each generation and does not program a destination that
 later resolves to a mode they do not cover.
+
+`fabric.routes` is not a delivery capability. It allows a caller to hand Worker
+tenant routes through the Routes service ([tenant route handoff](#tenant-route-handoff)),
+and only galactic-router is granted it (D24).
+
+### Tenant route handoff
+
+galactic-router keeps learning tenant routes from EVPN, and Worker's Fabric
+module writes them (D24). The router hands each route to Worker through a
+second service on the Worker socket, `galactic.worker.v1alpha1.Routes`, with
+the same transport, identity and sessions as the Worker service (D8).
+
+| RPC    | Semantics                                                                                                                                                                                                                                                               |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Sync` | Bidirectional stream. Each request carries upserts (VPC, the VPC's table, prefix, SID) and withdrawals (VPC, prefix). Worker records them and answers with the request's sequence and the routes it rejected with `MalformedRoute`. The open stream renews the session. |
+
+A caller not allowed `fabric.routes` gets `PERMISSION_DENIED`/`CapabilityNotAllowed`,
+and a Worker with no Fabric module `UNAVAILABLE`/`ModuleNotRunning`. Worker
+keeps the routes in memory only: the router sends every route it holds and
+every recent withdrawal each time it opens a stream, and each change after
+that. Worker acknowledges a request once it has recorded it, before the entry
+is removed, so the router keeps an acknowledged withdrawal for 10 minutes and
+sends it again on each new stream. When a VRF is removed or moves to another
+table, the router withdraws every route it handed Worker for the old table.
+While Worker is unreachable the router keeps its changes and retries.
+
+For every VPC scope Worker owns, the Fabric module writes the recorded routes
+into `egress_route_table` inside the scope's commit, whether or not the scope
+has claims:
+
+- It writes a route only while the route's table is the VPC's current table,
+  so a route never lands in another VPC's table, and never toward this node's
+  own locator, which would loop.
+- It re-resolves each route's underlay next hop when a route or neighbor
+  event touches it, and rewrites the entry when the next hop moved.
+- A route whose next hop stops resolving keeps the entry already written for
+  it, so a shorter entry, such as the VPC's default toward an egress shard,
+  never catches its traffic. A route that cannot be written yet, because it
+  has no entry or its SID changed, is retried on the next event or resync;
+  until then its traffic matches what it matched before, as when the router
+  wrote it, and its destinations report why. Neither fails the commit, so
+  other routes of the scope are written.
+- It removes an entry only when the router withdraws its route, and never
+  touches an entry the router did not hand it, such as CNI's pass-through
+  entries, egress shard entries or Galactic Edge's entries.
+
+In a VPC no Worker owns, the router writes its routes itself under the VPC's
+fence with `Exclusive` (transfer step 1 in
+[ownership](ownership.md#bootstrap-adoption-and-transfer)).
 
 ### Version negotiation
 
@@ -101,6 +150,17 @@ Worker keeps three states for each claim, and never reports one as another (D2).
 | Desired    | The accepted generation and spec, and the owner.                                                                    | Yes, under `/var/lib/galactic-worker`                               |
 | Programmed | What Worker wrote for each destination: mode, VRF table, SID, map rows, routes, and the read-back of each write.    | Rebuilt from the host after a restart                               |
 | Observed   | Readiness evidence Worker did not write: the TAP or veth exists and is up, the neighbor resolves, CNI has attached. | Rebuilt from the host; link events in a VPC's VRF requeue its scope |
+
+Each destination's status reports `forward_ready` and `return_ready`
+separately, and `ready` only when both are true (D25). For a Fabric
+destination, forward readiness means that the `egress_route_table` entry a
+packet to each of the destination's addresses matches comes from a tenant route
+toward the destination's own locator, and that the route's underlay next hop
+resolves as written. Return readiness means this node decapsulates the VPC's
+SID into the VPC's table: its locator is in `locator_table`, and its
+BGPVRFInstance and `vrf_table` row for the VPC are in place. Each is judged per
+destination, so a withdrawal or an unreachable node changes only the
+destinations that use it.
 
 Status carries `observed_generation` and these conditions, matching the
 EdgeAttachment condition names where they mean the same thing:
@@ -129,14 +189,16 @@ missing waits, as the [worked transitions](#worked-transitions) show.
 
 Worker takes these facts only from the sources below, never from the request (D10).
 
-| Fact                     | Source                                                                                                                                |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Physical locator         | The node's BGPRouter Block and Node-ID, the same source `internal/installer/locatorroute.go` uses for the locator's local route.      |
-| VPC identity             | NetworkFabricIdentity for the VPC (`api/cloud/v1alpha1`), written by the fabric identity allocator.                                   |
-| Authorized VPC           | `VPCAttachment.spec.vpc` for workload and service attachments, written by NSO; for a connector, an EdgeAttachment that is `Admitted`. |
-| Owner                    | The authenticated caller (D8), recorded with the claim's desired state.                                                               |
-| Backend SID              | The backend node's locator plus the slot the gateway encodes in the uSID, as `docs/gateway/architecture.md` describes.                |
-| Interface traffic policy | TrafficPolicyBinding, resolved by the cell controller. Worker applies no policy of its own.                                           |
+| Fact                     | Source                                                                                                                                                                                                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Physical locator         | The node's BGPRouter Block and Node-ID, the same source `internal/installer/locatorroute.go` uses for the locator's local route.                                                                                                                              |
+| VPC identity             | NetworkFabricIdentity for the VPC (`api/cloud/v1alpha1`), written by the fabric identity allocator.                                                                                                                                                           |
+| Authorized VPC           | `VPCAttachment.spec.vpc` for workload and service attachments, written by NSO; for a connector, an EdgeAttachment that is `Admitted`.                                                                                                                         |
+| Owner                    | The authenticated caller (D8), recorded with the claim's desired state.                                                                                                                                                                                       |
+| Backend SID              | The backend node's locator plus the slot the gateway encodes in the uSID, as `docs/gateway/architecture.md` describes.                                                                                                                                        |
+| Interface traffic policy | TrafficPolicyBinding, resolved by the cell controller. Worker applies no policy of its own.                                                                                                                                                                   |
+| Destination addresses    | `VPCAttachment.spec.interface.addresses` (D26). An attachment whose guest manages its own addressing records none, and its destination reports `DestinationAddressUnknown`; taking those addresses from the attachment's advertised routes is follow-up work. |
+| Tenant routes            | galactic-router, from EVPN, through the [tenant route handoff](#tenant-route-handoff).                                                                                                                                                                        |
 
 Worker compares a VPC as the base62 identifier the attachment's status records
 (`VPCAttachment.status.vpc`, `EdgeAttachment.status.vpc`). That identifier is
@@ -166,18 +228,25 @@ so Worker compares VPC identity, never addresses.
 
 Status carries these reasons besides the ones above:
 
-| Reason                                             | Where         | Meaning                                                                                                   |
-| -------------------------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------- |
-| `Pending`                                          | Any condition | Worker has not yet reconciled the generation                                                              |
-| `DestinationKindUnsupported`                       | `Resolved`    | A shard or backend destination, until #1437 or #1438 resolves it                                          |
-| `DestinationNotFound`                              | `Resolved`    | The destination attachment no longer exists                                                               |
-| `LocatorUnknown`                                   | `Resolved`    | This node or the destination's node has no SRv6 locator yet                                               |
-| `ModeUnavailable`                                  | `Resolved`    | The destination resolves to a mode the preference excludes                                                |
-| `ModuleNotRunning` and other capability reasons    | `Programmed`  | The capability the destination needs is unavailable                                                       |
-| `CapabilityNotAllowed`                             | `Programmed`  | The destination resolved to a mode the owner was not allowed at admission, so it stays unprogrammed       |
-| `ProgrammingFailed`                                | `Programmed`  | The last commit failed; the message carries the error                                                     |
-| `ScopeOwnedElsewhere`                              | `Programmed`  | Another writer owns the VPC scope's fence (see [ownership](ownership.md#bootstrap-adoption-and-transfer)) |
-| `Released`, `LeaseExpired`, `AuthorizationRevoked` | `Withdrawing` | Why the claim is being withdrawn                                                                          |
+| Reason                                             | Where                 | Meaning                                                                                                   |
+| -------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------- |
+| `Pending`                                          | Any condition         | Worker has not yet reconciled the generation                                                              |
+| `DestinationKindUnsupported`                       | `Resolved`            | A shard or backend destination, until #1437 or #1438 resolves it                                          |
+| `DestinationNotFound`                              | `Resolved`            | The destination attachment no longer exists                                                               |
+| `LocatorUnknown`                                   | `Resolved`            | This node or the destination's node has no SRv6 locator yet                                               |
+| `ModeUnavailable`                                  | `Resolved`            | The destination resolves to a mode the preference excludes                                                |
+| `ModuleNotRunning` and other capability reasons    | `Programmed`          | The capability the destination needs is unavailable                                                       |
+| `CapabilityNotAllowed`                             | `Programmed`          | The destination resolved to a mode the owner was not allowed at admission, so it stays unprogrammed       |
+| `ProgrammingFailed`                                | `Programmed`          | The last commit failed; the message carries the error                                                     |
+| `ScopeOwnedElsewhere`                              | `Programmed`          | Another writer owns the VPC scope's fence (see [ownership](ownership.md#bootstrap-adoption-and-transfer)) |
+| `Released`, `LeaseExpired`, `AuthorizationRevoked` | `Withdrawing`         | Why the claim is being withdrawn                                                                          |
+| `DestinationAddressUnknown`                        | `Programmed`          | The Fabric destination's attachment records no address                                                    |
+| `ForwardRouteMissing`                              | `Programmed`          | No tenant route covers one of the destination's addresses                                                 |
+| `RouteWithdrawn`                                   | `Programmed`          | The tenant route covering one of the destination's addresses was withdrawn                                |
+| `RouteMismatch`                                    | `Programmed`          | The route covering one of the destination's addresses leads to another node's locator                     |
+| `UnderlayUnreachable`                              | `Programmed`, `Ready` | No route over an SRv6 uplink reaches the destination's locator; the entry is kept                         |
+| `NeighborUnresolved`                               | `Programmed`, `Ready` | The underlay next hop has no resolved neighbor, or the entry carries an out-of-date one                   |
+| `ReturnPathNotProgrammed`                          | `Ready`               | This node does not yet decapsulate the VPC's SID into the VPC's table                                     |
 
 Clients retry with exponential backoff from 200 ms to 30 s with full jitter.
 Every mutating call is idempotent for a given generation, so a retry after a
@@ -242,6 +311,8 @@ D8 and D9 were confirmed on 2026-11-18.
   serviceAccounts:
     - serviceAccount: galactic-system/galactic-nat
       capabilities: [local.veth_pair, fabric.srv6]
+    - serviceAccount: galactic-system/galactic-router
+      capabilities: [fabric.routes]
   ```
 
 - **Access model (D9).** Host-network agents (NAT, Gateway, galactic-edge) mount
@@ -260,3 +331,4 @@ Each case names the decision it exercises and the Task that owns its test.
 | Unauthorized cross-VPC claim     | The caller has a claim on an attachment in VPC A. VPC B uses the same guest addresses.                                         | `Update` adds a destination whose attachment is in VPC B.                                                          | Resolves the destination's VPC from its attachment record and its identity from NetworkFabricIdentity, finds B ≠ A, and refuses. Records nothing durable, takes no ticket, logs the refusal and counts it in a metric.                                                                        | `PERMISSION_DENIED`/`VPCNotAuthorized`. The existing generation keeps running. Routes, rules, links and pinned maps are unchanged.                                                                             | D1, D10      | [#1433](https://github.com/datum-cloud/galactic/issues/1433) zero-mutation snapshot test; [#1442](https://github.com/datum-cloud/galactic/issues/1442) observes the unauthorized destination in the lab |
 | Local locator with a missing TAP | Claim admitted; one destination is a guest on this node.                                                                       | Resolution finds the node's own locator, but the guest's TAP does not exist (not yet attached, or being replaced). | Resolves the destination to Local and does not fall back to Fabric. Programs the other destinations. Leaves the missing one unprogrammed and watches CNI attachment events. When CNI ADD creates the TAP, programs it on the new ifindex and reads it back.                                   | Until the TAP appears: `Resolved=True`, `Programmed=False` and `Ready=False`, with reason `HandoffInterfaceMissing` naming the destination. Afterwards: `Ready=True`.                                          | D2, D11      | [#1435](https://github.com/datum-cloud/galactic/issues/1435) root test for Local programming; [#1434](https://github.com/datum-cloud/galactic/issues/1434) for CNI attachment observation               |
 | Withdrawal during repair         | A commit failed part-way, so the VPC scope is resync-required and Worker's repair holds a ticket while it prepares a snapshot. | The owner sends `Release` with the current generation.                                                             | Records the release durably and answers. Takes the scope over again with `Takeover`, which invalidates the repair's ticket, and commits a snapshot computed from desired state without the released claim. The repair's late commit fails with a transitioning or stale error and is dropped. | `Release` returns `OK`. Status shows `Withdrawing` with scope "one claim" until the read-back confirms removal, then `Observe` reports the claim released. No row of the released claim survives the snapshot. | D3, D12, D23 | [#1433](https://github.com/datum-cloud/galactic/issues/1433) crash and interleaving tests; [#1436](https://github.com/datum-cloud/galactic/issues/1436) for Fabric rows                                 |
+| Underlay next hop lost           | Claim `Ready=True` with Fabric destinations on nodes B and C.                                                                  | The underlay route toward node C's locator is withdrawn.                                                           | The route event requeues only the VPCs with a route toward that locator. The Fabric module keeps the entries toward node C and rewrites nothing. When the route returns, it rewrites each entry whose next hop moved.                                                                         | Meanwhile the destination on node C reports `forward_ready=False` with reason `UnderlayUnreachable`, and the one on node B stays `Ready`. Afterwards both are `Ready`.                                         | D11, D25     | [#1436](https://github.com/datum-cloud/galactic/issues/1436) root test for the Fabric datapath and lab captures                                                                                         |
