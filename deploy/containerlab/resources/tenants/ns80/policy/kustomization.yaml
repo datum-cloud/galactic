@@ -1,0 +1,3 @@
+# ns80's traffic policy at every site: both VPCs' attachments (base/).
+resources:
+  - base

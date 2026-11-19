@@ -1,0 +1,14 @@
+# Versions the dedicated-placement baseline (docs/baseline.md) was recorded
+# with. scripts/baseline-versions.sh fails when the host tools, the lab's
+# Dockerfiles, the fixture or the running lab disagree with a value here.
+# Change a pin together with baseline/reference-results.json, never alone.
+#
+# Host tools
+containerlab: 0.75.0
+kind: v0.33.0
+task: 3.51.1
+# Images and components the lab builds or pulls
+kindest_node: v1.37.0
+frr: 10.7.1
+remote_host_base: alpine:3.24
+guest_image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2

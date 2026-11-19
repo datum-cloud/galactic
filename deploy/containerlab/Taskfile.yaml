@@ -434,6 +434,7 @@ tasks:
       - task: "deploy:ns40"
       - task: "deploy:ns60"
       - task: "deploy:ns71"
+      - task: "deploy:ns80"
 
   "deploy:ns10":
     desc: Deploy ns10 test VPC (IPv6-only, fd20 ULA)
@@ -476,6 +477,15 @@ tasks:
       - ./scripts/deploy-tenant-policy.sh ns71 sjc
       - ./scripts/deploy-ns.sh ns71 sjc
       - ./scripts/publish-attachments.sh ns71 sjc
+
+  # The dedicated-placement baseline fixture (docs/baseline.md): two VPCs
+  # with identical guest addresses on dfw's and sjc's compute workers.
+  "deploy:ns80":
+    desc: Deploy ns80 test VPCs (overlapping guests on two workers; baseline fixture)
+    cmds:
+      - ./scripts/deploy-tenant-policy.sh ns80 dfw sjc
+      - ./scripts/deploy-ns.sh ns80 dfw sjc
+      - ./scripts/publish-attachments.sh ns80 dfw sjc
 
   verify:
     desc: Run all verification checks
@@ -1296,6 +1306,7 @@ tasks:
       - task: "verify:ns20"
       - task: "verify:ns30"
       - task: "verify:ns40"
+      - task: "verify:ns80"
 
   # Not idempotent while it runs: it edits ns60's dfw policy and unbinds
   # ns30/private-b's ingress for a moment, and restores both on exit.
@@ -1363,6 +1374,30 @@ tasks:
     desc: Verify ns40 ping (iad only, 2 pods)
     cmds:
       - ./scripts/verify-ns40.sh
+
+  "verify:ns80":
+    desc: Verify ns80 placement, overlapping addresses and cross-site ping in both VPCs
+    cmds:
+      - ./scripts/verify-ns80.sh
+
+  # The dedicated-placement baseline (docs/baseline.md). Not part of verify:
+  # each observation takes a few minutes and runs the gateway ingress checks
+  # again under capture. Evidence lands in bin/baseline/ at the repository
+  # root.
+  "baseline:versions":
+    desc: Check baseline/pins.yaml against the host, the Dockerfiles and the running lab, and record versions
+    cmds:
+      - LAB={{.LAB}} ./scripts/baseline-versions.sh {{.CLI_ARGS | default "../../bin/baseline/versions.yaml"}}
+
+  "baseline:observe":
+    desc: Observe today's remote paths on ns80 once, with captures (OUTDIR via task baseline:observe -- DIR)
+    cmds:
+      - LAB={{.LAB}} ./scripts/baseline-observe.sh {{.CLI_ARGS | default "../../bin/baseline/observe"}}
+
+  "baseline:twice":
+    desc: Record versions, observe twice, and require identical results matching baseline/reference-results.json
+    cmds:
+      - LAB={{.LAB}} ./scripts/baseline-twice.sh {{.CLI_ARGS}}
 
   clean:
     desc: Destroy the lab and delete artifacts

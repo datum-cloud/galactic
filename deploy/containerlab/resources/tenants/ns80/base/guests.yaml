@@ -1,0 +1,56 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-a
+  labels:
+    app: vpc-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vpc-a
+  template:
+    metadata:
+      labels:
+        app: vpc-a
+      annotations:
+        v1.multus-cni.io/default-network: ns80/vpc-a
+    spec:
+      nodeSelector:
+        galactic.datumapis.com/node: compute
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: guest
+          # Pinned by digest: baseline/pins.yaml records the same value.
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-b
+  labels:
+    app: vpc-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vpc-b
+  template:
+    metadata:
+      labels:
+        app: vpc-b
+      annotations:
+        v1.multus-cni.io/default-network: ns80/vpc-b
+    spec:
+      nodeSelector:
+        galactic.datumapis.com/node: compute
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: guest
+          # Pinned by digest: baseline/pins.yaml records the same value.
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
