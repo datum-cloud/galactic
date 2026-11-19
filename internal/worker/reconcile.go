@@ -86,6 +86,9 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 	scope := module.Scope{VPC: vpc}
 	claims := w.snapshotScope(vpc)
 	if len(claims) == 0 {
+		if w.d.Host != nil {
+			return w.reconcileHost(ctx, vpc)
+		}
 		w.mu.Lock()
 		delete(w.scopes, vpc)
 		w.mu.Unlock()
@@ -94,6 +97,12 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 
 	evals, desired, err := w.resolve(ctx, vpc, claims)
 	if err != nil {
+		return err
+	}
+
+	ensure, err := w.planClaimedHost(ctx, vpc)
+	if err != nil {
+		w.reportFailure(evals, workerv1alpha1.ReasonProgrammingFailed, err)
 		return err
 	}
 
@@ -120,8 +129,15 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 		changes[i] = ch
 		empty = empty && ch.Empty()
 	}
-	if !empty || t.Resync {
+	if !empty || ensure || t.Resync {
 		mutate := func() error {
+			// A snapshot reconciles the complete state, including the host
+			// state; Ensure changes nothing already in place.
+			if w.d.Host != nil && (ensure || t.Resync) {
+				if err := w.d.Host.Ensure(ctx, vpc); err != nil {
+					return fmt.Errorf("ensure host state: %w", err)
+				}
+			}
 			for i, m := range mods {
 				if changes[i].Empty() {
 					continue
@@ -167,6 +183,148 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 		state[m.Mode()] = st
 	}
 	return w.report(evals, state)
+}
+
+// planClaimedHost reports whether the canonical host state of vpc, which
+// Worker holds claims in, must be ensured. The claims keep the state in use
+// whatever else does.
+func (w *Worker) planClaimedHost(ctx context.Context, vpc string) (bool, error) {
+	if w.d.Host == nil {
+		return false, nil
+	}
+	w.mu.Lock()
+	w.scope(vpc).unreferencedSince = time.Time{}
+	w.mu.Unlock()
+	hp, err := w.d.Host.Plan(ctx, vpc, true)
+	if err != nil {
+		return false, fmt.Errorf("plan host state: %w", err)
+	}
+	return hp.Ensure, nil
+}
+
+// reconcileHost reconciles a scope Worker holds no claims in. It takes the
+// scope, adopting with a snapshot commit that writes nothing whatever host
+// state CNI or an earlier writer left, and reclaims the VPC's host state once
+// nothing has used it for HostGrace. A scope another writer owns is left
+// alone. A scope whose VRF is gone is forgotten.
+func (w *Worker) reconcileHost(ctx context.Context, vpc string) error {
+	hp, err := w.d.Host.Plan(ctx, vpc, false)
+	if err != nil {
+		return fmt.Errorf("plan host state of VPC %s: %w", vpc, err)
+	}
+	if !hp.Present {
+		// A transfer an earlier incarnation left open refuses every CNI
+		// write, including the ADD that would create the VRF, so it is
+		// completed even with nothing on the host.
+		if err := w.completeTransfer(vpc); err != nil {
+			return err
+		}
+		w.forgetScope(vpc)
+		return nil
+	}
+	reclaim := w.unusedFor(vpc, hp.Referenced())
+
+	t, err := w.acquire(module.Scope{VPC: vpc})
+	if errors.Is(err, errOwnedElsewhere) || errors.Is(err, ownership.ErrTransitioning) ||
+		errors.Is(err, ownership.ErrNotOwner) {
+		w.log.Debug("leaving host state of a VPC another writer owns", "vpc", vpc, "reason", err)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !reclaim && !t.Resync {
+		return nil
+	}
+	gone := false
+	mutate := func() error {
+		// A claim accepted since the plan keeps the state; its own
+		// reconcile follows this one.
+		if !reclaim || w.hasClaims(vpc) {
+			return nil
+		}
+		var err error
+		gone, err = w.d.Host.Reclaim(ctx, vpc)
+		return err
+	}
+	commit := w.d.Fence.Commit
+	if t.Resync {
+		commit = w.d.Fence.CommitSnapshot
+	}
+	if _, err := commit(t, mutate); err != nil {
+		return fmt.Errorf("commit host state of %s: %w", module.Scope{VPC: vpc}.Name(), err)
+	}
+	if gone {
+		w.log.Info("reclaimed unused VPC host state", "vpc", vpc)
+		w.forgetScope(vpc)
+	}
+	return nil
+}
+
+// completeTransfer takes over vpc's scope when it is transitioning away from
+// an earlier Worker incarnation, committing a snapshot that writes nothing.
+func (w *Worker) completeTransfer(vpc string) error {
+	scope := module.Scope{VPC: vpc}
+	rec, err := w.d.Fence.Read(scope.Name())
+	if err != nil || !rec.Transitioning || !workerOrUnowned(rec) {
+		return err
+	}
+	t, err := w.acquire(scope)
+	if err != nil {
+		return err
+	}
+	if _, err := w.d.Fence.CommitSnapshot(t, func() error { return nil }); err != nil {
+		return fmt.Errorf("commit %s: %w", scope.Name(), err)
+	}
+	return nil
+}
+
+// unusedFor records whether vpc's host state is in use, and reports whether
+// it has gone unused for HostGrace. While it waits it queues the scope again
+// for when the grace ends.
+func (w *Worker) unusedFor(vpc string, referenced bool) bool {
+	w.mu.Lock()
+	s := w.scope(vpc)
+	now := w.d.Now()
+	if referenced {
+		s.unreferencedSince = time.Time{}
+		w.mu.Unlock()
+		return false
+	}
+	if s.unreferencedSince.IsZero() {
+		s.unreferencedSince = now
+	}
+	left := w.cfg.HostGrace - now.Sub(s.unreferencedSince)
+	w.mu.Unlock()
+	if left > 0 {
+		w.queue.AddAfter(vpc, left)
+		return false
+	}
+	return true
+}
+
+// hasClaims reports whether Worker holds a claim in vpc.
+func (w *Worker) hasClaims(vpc string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for k := range w.claims {
+		if k.VPC == vpc {
+			return true
+		}
+	}
+	return false
+}
+
+// forgetScope stops tracking vpc's scope unless Worker holds claims in it.
+func (w *Worker) forgetScope(vpc string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for k := range w.claims {
+		if k.VPC == vpc {
+			return
+		}
+	}
+	delete(w.scopes, vpc)
 }
 
 // resolve evaluates every claim of a scope against trusted sources and

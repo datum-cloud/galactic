@@ -96,11 +96,11 @@ every client on the branch has moved to it (D7).
 
 Worker keeps three states for each claim, and never reports one as another (D2).
 
-| State      | What it holds                                                                                                       | Durable                                              |
-| ---------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| Desired    | The accepted generation and spec, and the owner.                                                                    | Yes, under `/var/lib/galactic-worker`                |
-| Programmed | What Worker wrote for each destination: mode, VRF table, SID, map rows, routes, and the read-back of each write.    | Rebuilt from the host after a restart                |
-| Observed   | Readiness evidence Worker did not write: the TAP or veth exists and is up, the neighbor resolves, CNI has attached. | Rebuilt from the host and from CNI attachment events |
+| State      | What it holds                                                                                                       | Durable                                                             |
+| ---------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Desired    | The accepted generation and spec, and the owner.                                                                    | Yes, under `/var/lib/galactic-worker`                               |
+| Programmed | What Worker wrote for each destination: mode, VRF table, SID, map rows, routes, and the read-back of each write.    | Rebuilt from the host after a restart                               |
+| Observed   | Readiness evidence Worker did not write: the TAP or veth exists and is up, the neighbor resolves, CNI has attached. | Rebuilt from the host; link events in a VPC's VRF requeue its scope |
 
 Status carries `observed_generation` and these conditions, matching the
 EdgeAttachment condition names where they mean the same thing:

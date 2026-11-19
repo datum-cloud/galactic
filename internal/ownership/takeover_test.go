@@ -6,6 +6,7 @@ package ownership
 
 import (
 	"errors"
+	"slices"
 	"testing"
 )
 
@@ -106,7 +107,7 @@ func TestExclusiveIfSeesTheRecord(t *testing.T) {
 	errOwned := errors.New("owned")
 	before, _ := a.Read(scope)
 	err := a.ExclusiveIf(scope, func(r Record) error {
-		if r.Owner == "cni" {
+		if r.Owner != "" {
 			return errOwned
 		}
 		return nil
@@ -134,5 +135,24 @@ func TestWorkerOwned(t *testing.T) {
 				t.Fatalf("WorkerOwned(%q) = %t, want %t", tc.owner, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestScopesListsRecords names every scope with a record, and nothing else
+// in the directory.
+func TestScopesListsRecords(t *testing.T) {
+	a := newAuthority(t)
+	for _, s := range []string{"vpc-a", "vpc-b"} {
+		if err := a.Exclusive(s, noCheck, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := a.Scopes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"vpc-a", "vpc-b"}) {
+		t.Fatalf("Scopes = %v, want [vpc-a vpc-b]", got)
 	}
 }

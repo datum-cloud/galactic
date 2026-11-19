@@ -72,7 +72,8 @@ Each step uses the fence operations that exist today (D13).
    fences and adopts under one lock, so a Worker that dies while taking a
    scope over cannot block CNI until it returns.
 2. **Adoption of preexisting state.** When Worker starts, it takes each scope it
-   finds (from the VRF devices and the table reservations in `tables.json`).
+   finds: every host VRF device, and every fence record a Worker incarnation
+   owns, which covers a transfer left open before CNI created the VRF.
    It uses `Claim` for an unowned scope, or `Takeover` for one an earlier
    Worker incarnation owned, including one an older incarnation left between
    `Fence` and `Adopt`. Both return a ticket that requires `CommitSnapshot`,
@@ -95,6 +96,42 @@ Each step uses the fence operations that exist today (D13).
 5. **Loss of the state directory.** Stop every writer, reconcile host state, and
    create a new authority, as `internal/ownership` requires. Never restore
    the directory while writers run.
+
+## Node and VPC scope
+
+[#1434](https://github.com/datum-cloud/galactic/issues/1434) implements the
+fenced authority for the node and VPC scope and the first transfer step for
+CNI and garbage collection.
+
+- **CNI writes with `Exclusive`.** galactic-tap and galactic-veth create the VRF
+  and enslave the host link with `Exclusive` on the VPC's scope. galactic-bgp
+  does the same for each publish attempt (Argument claim, BGPVRFInstance,
+  `vrf_table` registration and BGPAdvertisement), its rollback and the DEL
+  advertisement release (`internal/cni/vpcfence`). The installer's sidecar
+  return install and advertisement reap use the endpoint's VPC scope. CNI waits
+  at most 30 s for an open transfer and never waits for Worker.
+- **Worker owns the scope.** Worker takes every VPC scope it discovers that no
+  other writer owns. A VPC with claims gets its canonical state from
+  `nodevpc.Ensure` inside Worker's commit, before the delivery modules run.
+  Adopting a scope with no claims writes nothing.
+- **References.** A VPC's host state is in use while Worker holds a claim in
+  it, a link is enslaved to its VRF, or a Galactic Edge attachment uses it.
+  Worker reclaims the VRF and BGPVRFInstance once the VPC has gone unused for
+  `--host-grace` (60 s), on the same evidence galactic-router's GC uses
+  (`gc.ReclaimVPC`). The grace keeps the state across an attachment's
+  replacement.
+- **GC transfer.** galactic-router's GC (`maintenance.Guard.Reclaim`) and the
+  installer's `vrf_table` repair refuse a scope a Worker incarnation owns
+  (`ownership.ErrWorkerOwned`) and keep doing their work everywhere else. A
+  Worker-owned scope is reclaimed only by a running Worker.
+- **Observation.** Worker subscribes to link events. A link joining, leaving or
+  changing in a VPC's VRF requeues that VPC, and `hostscope.AttachmentsOf`
+  reads each attachment's current ifindex and neighbors when a module asks.
+  Worker never creates or deletes an attachment's link.
+
+The router's `egress_route_table` writers (#1436), the galactic-vrf sidecar's
+in-pod BGPVRFInstance and backend writes (#1439) and edge host links (#1440)
+move in their own Tasks.
 
 ## Defects this transfer removes
 

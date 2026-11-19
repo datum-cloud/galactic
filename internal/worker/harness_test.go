@@ -28,6 +28,7 @@ import (
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/worker/auth"
+	"go.datum.net/galactic/internal/worker/hostscope"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/module/fake"
 	"go.datum.net/galactic/internal/worker/refusal"
@@ -115,6 +116,9 @@ type env struct {
 	cfg      Config
 	clock    *clock
 	modules  func(*fake.Host) []module.Module
+	// hostState, when set, is the VPCs' canonical host state each
+	// incarnation reconciles.
+	hostState hostscope.Host
 	// pauseOnStart pauses the Local module's Plan before Start, so the
 	// first reconcile of a restart holds until the test resumes it.
 	pauseOnStart bool
@@ -207,7 +211,7 @@ func (e *env) start() {
 		e.t.Fatal(err)
 	}
 	w, err := New(e.cfg, Deps{Store: e.store, Fence: e.fence, Sources: e.src, Modules: reg, Auth: metaAuth{},
-		Now: e.clock.Now})
+		Host: e.hostState, Now: e.clock.Now})
 	if err != nil {
 		e.t.Fatal(err)
 	}

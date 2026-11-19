@@ -294,6 +294,11 @@ sequenceDiagram
   If the guard cannot answer, because the fence directory is not mounted,
   `edgeattachments` cannot be listed or the links cannot be read, GC deletes
   no VRF or `BGPVRFInstance` that pass and counts an error.
+- **A Worker-owned VPC is left to its Worker.** `Reclaim` reads the scope's
+  owner under the same lock and refuses a VPC whose scope a `galactic-worker`
+  incarnation owns (`ownership.ErrWorkerOwned`). That Worker reclaims the VPC
+  itself once it has gone unused, on the same evidence
+  ([host state ownership](../worker/ownership.md#node-and-vpc-scope)).
 - **The very first pass waits for the cache to sync.** `root.go` calls
   `mgr.GetCache().WaitForCacheSync(ctx)` before the initial `RunGC` — an
   empty, not-yet-populated `BGPAdvertisement`/`BGPRouter` list would

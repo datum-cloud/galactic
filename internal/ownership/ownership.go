@@ -390,6 +390,21 @@ func RefuseWorkerOwned(r Record) error {
 	return nil
 }
 
+// Scopes returns the name of every scope with a record.
+func (a *Authority) Scopes() ([]string, error) {
+	entries, err := os.ReadDir(a.dir)
+	if err != nil {
+		return nil, fmt.Errorf("ownership: list %s: %w", a.dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if name, ok := strings.CutSuffix(e.Name(), ".json"); ok && scopeName.MatchString(name) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
 // Read returns the scope's record.
 func (a *Authority) Read(scope string) (Record, error) {
 	var out Record
