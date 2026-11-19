@@ -70,14 +70,6 @@ var radvReconcileInterval = 2 * time.Second
 // that just booted, and each pass costs a solicit per unresolved guest.
 var tapNeighReconcileInterval = 30 * time.Second
 
-// sidecarReturnReconcileInterval paces ensureSidecarReturnPath. Slower than
-// radv's ticker because each pass walks this node's network namespaces, and
-// faster than the credential refresh because what it installs points at a pod:
-// an Envoy restart changes the host-side veth and MAC the return route names,
-// and the sidecar creates the VRF holding the gateway address some time after
-// the pod is scheduled.
-var sidecarReturnReconcileInterval = 30 * time.Second
-
 // egressRouteRefreshInterval paces the egress_route_table re-resolution sweep.
 // Each entry's outgoing link and L2 addresses are resolved once by whoever
 // wrote it and never again, and the writer for a tenant VRF's route toward an
@@ -520,13 +512,6 @@ type ebpfDatapathState struct {
 	// installs them.
 	egress attachreg.EgressConfig
 
-	// sidecarReap carries the ingress sidecar reaper's state from one sidecar
-	// return sweep to the next. Nil leaves reaping off.
-	sidecarReap *sidecarReaper
-
-	// sidecarReturn records each sidecar return sweep. Nil records nothing.
-	sidecarReturn *metrics.SidecarReturn
-
 	// endpointSliceRepair records each EndpointSlice repair pass. Nil records
 	// nothing.
 	endpointSliceRepair *metrics.EndpointSliceRepair
@@ -562,11 +547,10 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	slog.Info("eBPF uSID datapath loaded, pinned, and attached", "interfaces", ifaces, "pinDir", attach.PinDir)
 
 	state := ebpfDatapathState{
-		ifaces: ifaces, watcher: watcher, sidecarReap: &sidecarReaper{},
+		ifaces: ifaces, watcher: watcher,
 		egressGroup: newEgressGroup(egressCfg, nil, nil, attach.PinDir),
 	}
 	state.egressGroup.ctl = m.Egress
-	state.sidecarReturn = m.SidecarReturn
 	state.endpointSliceRepair = m.EndpointSliceRepair
 	m.Egress.SetMode(string(egressCfg.Mode), string(config.EgressModeOrdered), string(config.EgressModeHashed))
 	watcher.OnChange(rewriteEBPFInterfaces)
@@ -609,7 +593,6 @@ func startEBPFDatapath(ctx context.Context, m *metrics.Metrics) (ebpfDatapathSta
 	}
 	state.egressGroup = newEgressGroup(egressCfg, loadEgressShardSIDs(hostConf.EgressShardSIDs), nat64, attach.PinDir)
 	state.egressGroup.ctl = m.Egress
-	state.sidecarReturn = m.SidecarReturn
 	state.endpointSliceRepair = m.EndpointSliceRepair
 	// Ordered mode routes only to the configured shards, so their locators
 	// are the complete set. Hashed mode adds the cluster's EgressShards once
@@ -710,24 +693,6 @@ func startTapNeighborSweep(sem chan struct{}) {
 				slog.Info("Tap guest neighbor resolution incomplete; will retry",
 					"resolved", resolved, "pending", pending)
 			}
-		}()
-	default:
-	}
-}
-
-// startSidecarReturnSweep runs one ensureSidecarReturnPath pass off Run's
-// goroutine. A pass enters every network namespace on this node, so on a node
-// running a large Envoy fleet it would otherwise starve the credential refresh,
-// GC sweeps, and health check.
-//
-// sem is a size-1 semaphore, dropping a tick rather than queueing it when the
-// previous pass is still running.
-func startSidecarReturnSweep(ctx context.Context, sem chan struct{}, st ebpfDatapathState) {
-	select {
-	case sem <- struct{}{}:
-		go func() {
-			defer func() { <-sem }()
-			reconcileSidecarReturnPath(ctx, st)
 		}()
 	default:
 	}
@@ -1188,6 +1153,10 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	// the BGPRouter carrying the locator may not exist yet.
 	reconcileLocatorLocalRoute(ctx, ebpfState)
 
+	// Once, off this goroutine: remove what the retired host-side return path
+	// of the ingress sidecar left on this node.
+	startRetiredSidecarReturnPrune(ctx, ebpfState)
+
 	// Rebuild the attachment rows only CNI ADD otherwise writes, which a map
 	// recreated by this load has lost. Off this goroutine and retried while a
 	// pass fails or leaves attachments pending; the GC tick below repeats it.
@@ -1282,15 +1251,12 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	tapNeighTicker := time.NewTicker(tapNeighReconcileInterval)
 	defer tapNeighTicker.Stop()
 
-	sidecarReturnTicker := time.NewTicker(sidecarReturnReconcileInterval)
-	defer sidecarReturnTicker.Stop()
 	// Size-1 semaphore, so at most one sweep runs at a time and a tick
 	// arriving during one is dropped instead of piling up behind it.
 	tapNeighSem := make(chan struct{}, 1)
 	hostLinkRepairSem := make(chan struct{}, 1)
 	staleTapSem := make(chan struct{}, 1)
 	staleTaps := &staleTapReclaimer{}
-	sidecarReturnSem := make(chan struct{}, 1)
 	endpointSliceRepairSem := make(chan struct{}, 1)
 
 	// Once now, so a node restarting with a host link already stranded does
@@ -1387,13 +1353,6 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 			// the same pace: until it is, the guest is routed outside its
 			// VPC.
 			startHostLinkRepair(hostLinkRepairSem, m.HostLinks)
-
-		case <-sidecarReturnTicker.C:
-			// Install and re-assert the host side of the ingress sidecar's
-			// return path: the routes, neighbors, and uSID map entries a
-			// reply encapsulated toward this node's SID needs to reach an
-			// Envoy pod's per-VPC sidecar VRF.
-			startSidecarReturnSweep(ctx, sidecarReturnSem, ebpfState)
 
 		case <-egressRouteRefreshTicker.C:
 			// Re-resolve every egress route's outgoing link and L2 addresses.
