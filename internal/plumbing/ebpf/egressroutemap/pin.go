@@ -5,8 +5,10 @@
 package egressroutemap
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"github.com/cilium/ebpf"
@@ -67,5 +69,31 @@ func OpenPinnedShardGroupTable(pinDir string) (*ShardGroupTable, io.Closer, erro
 		return nil, nil, fmt.Errorf("egressroutemap: open pinned map %q under %q: %w",
 			prog.UsidMapEgressShardGroups, pinDir, err)
 	}
-	return NewShardGroupTable(NewKernelGroupStore(outer)), outer, nil
+	table := NewShardGroupTable(NewKernelGroupStore(outer))
+	// A datapath older than the local views has no egress_shard_local_groups:
+	// the table then publishes the base view alone, which is all that
+	// datapath reads.
+	local, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, prog.UsidMapEgressShardLocalGroups), nil)
+	switch {
+	case err == nil:
+		table.WithLocalView(NewKernelGroupStore(local))
+		return table, closers{outer, local}, nil
+	case errors.Is(err, os.ErrNotExist):
+		return table, outer, nil
+	default:
+		_ = outer.Close()
+		return nil, nil, fmt.Errorf("egressroutemap: open pinned map %q under %q: %w",
+			prog.UsidMapEgressShardLocalGroups, pinDir, err)
+	}
+}
+
+// closers closes each of its members, joining their errors.
+type closers []io.Closer
+
+func (c closers) Close() error {
+	errs := make([]error, 0, len(c))
+	for _, m := range c {
+		errs = append(errs, m.Close())
+	}
+	return errors.Join(errs...)
 }
