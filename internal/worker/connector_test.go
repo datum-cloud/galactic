@@ -16,7 +16,7 @@ import (
 	"go.datum.net/galactic/internal/worker/sources"
 )
 
-// Connector claims (D30): galactic-edge claims a routed link on an
+// Connector claims (D37): galactic-edge claims a routed link on an
 // EdgeAttachment, naming the host link it created.
 const (
 	edgeSA   = "galactic-system/galactic-edge"

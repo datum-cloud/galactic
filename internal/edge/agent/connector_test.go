@@ -30,7 +30,7 @@ import (
 	"go.datum.net/galactic/pkg/workerclient"
 )
 
-// The connector fixture (D14, D30) runs the agent against a real Worker,
+// The connector fixture (D14, D37) runs the agent against a real Worker,
 // whose reconciliation, admission, ownership and status are the production
 // code's. Its Local module is the fake one, which records what Worker asks
 // it to program, so the fixture proves the agent and Worker protocol, the

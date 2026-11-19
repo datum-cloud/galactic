@@ -151,7 +151,7 @@ message ClaimSpec {
   repeated Destination destinations = 2;
   // mode is the mode preference. Unset means MODE_AUTO.
   Mode mode = 3;
-  // edge_link makes the claim a connector claim (D30): HANDOFF_ROUTED_LINK
+  // edge_link makes the claim a connector claim (D37): HANDOFF_ROUTED_LINK
   // on an EdgeAttachment, whose host link galactic-edge created. Worker
   // registers that link with the datapath and never creates or deletes it.
   // Its one destination is the claim's own attachment, resolved Local.

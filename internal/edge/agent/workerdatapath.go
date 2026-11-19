@@ -115,7 +115,7 @@ type Connector interface {
 const DefaultWorkerWait = 10 * time.Second
 
 // WorkerDatapath is the Datapath that claims each edge link from Galactic
-// Worker (D14, D30). galactic-edge still creates the link, opens and closes
+// Worker (D14, D37). galactic-edge still creates the link, opens and closes
 // its gates and owns its gate link row; Worker registers the link with the
 // uSID datapath and writes the VPC's pass-through entries for it.
 type WorkerDatapath struct {

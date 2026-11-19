@@ -2,7 +2,8 @@
 
 Status: decided (D14), implemented by
 [#1440](https://github.com/datum-cloud/galactic/issues/1440) with connector
-claims (D30).
+claims (D37), an edge gate scope (D38) and a transfer step with rollback
+(D39).
 
 ## Decision
 
@@ -43,7 +44,7 @@ the shared state of the VPC.
 ## Connector claims
 
 A connector claim is a `routed_link` claim on an EdgeAttachment that names the
-host link galactic-edge created (`ClaimSpec.edge_link`, D30). It lists no
+host link galactic-edge created (`ClaimSpec.edge_link`, D37). It lists no
 destinations. Worker resolves one Local destination for it, the claim's own
 attachment. Worker takes the link's address from `EdgeAttachment.status.address`,
 never from the request, and never creates or deletes the link.
@@ -101,15 +102,15 @@ The connector reuses the authority that exists:
 
 ## Ownership transfer
 
-Each VPC on the node has two scopes in `internal/ownership`:
+Each VPC on the node has two scopes in `internal/ownership` (D38):
 
 | Scope             | Owner                                            | Holds                                        |
 | ----------------- | ------------------------------------------------ | -------------------------------------------- |
 | `vpc-<id>`        | Galactic Worker once galactic-edge hands it over | The shared VPC state listed above            |
 | `edge-gates-<id>` | The newest galactic-edge process; never Worker   | The forwarding gates of the VPC's edge links |
 
-galactic-edge's transfer step for a `vpc-<id>` scope it, an older process of
-it, or a Worker handback still holds:
+galactic-edge's transfer step (D39) for a `vpc-<id>` scope it, an older
+process of it, or a Worker handback still holds:
 
 1. Claim every live link of the scope. Worker records the claims and reports
    them `ScopeOwnedElsewhere`; it writes nothing yet.
@@ -145,8 +146,8 @@ Worker's allowlist must grant `galactic-system/galactic-edge` the
    `galactic-handback:<timestamp>` owner.
 3. Restart galactic-edge without `--worker-socket`.
 
-galactic-edge takes each handed-back scope over with `Takeover` and registers
-every link again in its first snapshot commit.
+galactic-edge takes each handed-back scope over with `Takeover` (D39) and
+registers every link again in its first snapshot commit.
 
 ## Where provider adapters plug in
 

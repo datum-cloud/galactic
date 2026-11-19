@@ -23,7 +23,7 @@ import (
 	"go.datum.net/galactic/internal/worker/module"
 )
 
-// Connector claims (D30). galactic-edge creates each Galactic Edge
+// Connector claims (D37). galactic-edge creates each Galactic Edge
 // attachment's host link, stamps it with the attachment's ID
 // (hostattach.LinkID), enslaves it to the VPC's VRF and writes its
 // forwarding gate's link row, all before it requests the claim. The Local

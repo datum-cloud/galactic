@@ -495,7 +495,7 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 
 // edgeLinkDestination resolves a connector claim's one destination: its own
 // EdgeAttachment, delivered Local through the host link galactic-edge
-// created (D30). The link's address is the attachment's, from its trusted
+// created (D37). The link's address is the attachment's, from its trusted
 // source; an attachment with none yet programs nothing.
 func edgeLinkDestination(k module.ClaimKey, own netip.Prefix, att sources.Attachment,
 	el *workerv1alpha1.EdgeLink) (destEval, module.Destination, *module.EdgeLink) {
