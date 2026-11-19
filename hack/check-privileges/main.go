@@ -25,14 +25,19 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 )
+
+// fromImage is a user or group no manifest sets, so the image's applies.
+const fromImage = "image"
 
 // allowlistConfigMap is the prefix of galactic-worker's allowlist ConfigMap,
 // whose generated name ends in a content hash.
@@ -62,8 +67,13 @@ type Workload struct {
 
 // Container is one container's host privileges.
 type Container struct {
-	Privileged               bool `json:"privileged,omitempty"`
-	AllowPrivilegeEscalation bool `json:"allowPrivilegeEscalation,omitempty"`
+	// RunAsUser and RunAsGroup are the container's, or else the pod's;
+	// "image" when neither sets one.
+	RunAsUser                string `json:"runAsUser"`
+	RunAsGroup               string `json:"runAsGroup"`
+	WritableRootFilesystem   bool   `json:"writableRootFilesystem,omitempty"`
+	Privileged               bool   `json:"privileged,omitempty"`
+	AllowPrivilegeEscalation bool   `json:"allowPrivilegeEscalation,omitempty"`
 	// DropsAll is false when the container keeps the runtime's default
 	// capabilities.
 	DropsAll     bool     `json:"dropsAll"`
@@ -164,12 +174,32 @@ func (s *Summary) add(kind string, doc []byte) error {
 			return err
 		}
 		s.Workloads[key(kind, o.Namespace, o.Name)] = workload(o.Spec.Template.Spec)
+	case "StatefulSet":
+		var o appsv1.StatefulSet
+		if err := yaml.Unmarshal(doc, &o); err != nil {
+			return err
+		}
+		s.Workloads[key(kind, o.Namespace, o.Name)] = workload(o.Spec.Template.Spec)
+	case "Job":
+		var o batchv1.Job
+		if err := yaml.Unmarshal(doc, &o); err != nil {
+			return err
+		}
+		s.Workloads[key(kind, o.Namespace, o.Name)] = workload(o.Spec.Template.Spec)
+	case "CronJob":
+		var o batchv1.CronJob
+		if err := yaml.Unmarshal(doc, &o); err != nil {
+			return err
+		}
+		s.Workloads[key(kind, o.Namespace, o.Name)] = workload(o.Spec.JobTemplate.Spec.Template.Spec)
 	case "Pod":
 		var o corev1.Pod
 		if err := yaml.Unmarshal(doc, &o); err != nil {
 			return err
 		}
 		s.Workloads[key(kind, o.Namespace, o.Name)] = workload(o.Spec)
+	case "ReplicaSet", "ReplicationController", "PodTemplate":
+		return fmt.Errorf("unsupported workload kind %s: add it to check-privileges", kind)
 	case "ClusterRole", "Role":
 		var o rbacv1.Role
 		if err := yaml.Unmarshal(doc, &o); err != nil {
@@ -253,11 +283,26 @@ func workload(spec corev1.PodSpec) Workload {
 	}
 	all := append(slices.Clone(spec.InitContainers), spec.Containers...)
 	for _, c := range all {
-		var ct Container
+		ct := Container{RunAsUser: fromImage, RunAsGroup: fromImage, WritableRootFilesystem: true}
+		if psc := spec.SecurityContext; psc != nil {
+			if psc.RunAsUser != nil {
+				ct.RunAsUser = strconv.FormatInt(*psc.RunAsUser, 10)
+			}
+			if psc.RunAsGroup != nil {
+				ct.RunAsGroup = strconv.FormatInt(*psc.RunAsGroup, 10)
+			}
+		}
 		// Escalation is allowed unless set false, and always with
 		// privileged or CAP_SYS_ADMIN.
 		ct.AllowPrivilegeEscalation = true
 		if sc := c.SecurityContext; sc != nil {
+			if sc.RunAsUser != nil {
+				ct.RunAsUser = strconv.FormatInt(*sc.RunAsUser, 10)
+			}
+			if sc.RunAsGroup != nil {
+				ct.RunAsGroup = strconv.FormatInt(*sc.RunAsGroup, 10)
+			}
+			ct.WritableRootFilesystem = sc.ReadOnlyRootFilesystem == nil || !*sc.ReadOnlyRootFilesystem
 			ct.Privileged = sc.Privileged != nil && *sc.Privileged
 			if sc.AllowPrivilegeEscalation != nil {
 				ct.AllowPrivilegeEscalation = *sc.AllowPrivilegeEscalation
@@ -330,6 +375,10 @@ func lines(s Summary) []string {
 		}
 		for n, c := range w.Containers {
 			p := k + " container " + n + " "
+			out = append(out, p+"runAsUser "+c.RunAsUser, p+"runAsGroup "+c.RunAsGroup)
+			if c.WritableRootFilesystem {
+				out = append(out, p+"writable root filesystem")
+			}
 			if c.Privileged {
 				out = append(out, p+"privileged")
 			}

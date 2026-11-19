@@ -278,6 +278,8 @@ workloads:
           - /var/lib/galactic-edge/ownership:rw
           - /var/lib/galactic:rw
           - /var/log/galactic:rw
+        runAsGroup: image
+        runAsUser: "0"
       install-cni:
         dropsAll: true
         hostPaths:
@@ -285,6 +287,8 @@ workloads:
           - /opt/cni/bin:rw
           - /var/lib/galactic:rw
           - /var/log/galactic:rw
+        runAsGroup: image
+        runAsUser: "0"
     hostNetwork: true
   DaemonSet/galactic-system/galactic-gateway:
     containers:
@@ -297,6 +301,8 @@ workloads:
         hostPaths:
           - /proc/sys/net:rw
           - /sys/fs/bpf:rw
+        runAsGroup: image
+        runAsUser: "0"
     hostNetwork: true
   DaemonSet/galactic-system/galactic-nat:
     containers:
@@ -309,6 +315,8 @@ workloads:
         hostPaths:
           - /proc/sys/net:rw
           - /sys/fs/bpf:rw
+        runAsGroup: image
+        runAsUser: "0"
     hostNetwork: true
   DaemonSet/galactic-system/galactic-router:
     containers:
@@ -324,6 +332,8 @@ workloads:
           - /var/lib/cni:rw
           - /var/lib/galactic-edge/ownership:rw
           - /var/run/netns
+        runAsGroup: image
+        runAsUser: "0"
     hostNetwork: true
   DaemonSet/galactic-system/galactic-router-rr:
     containers:
@@ -339,6 +349,8 @@ workloads:
           - /var/lib/cni:rw
           - /var/lib/galactic-edge/ownership:rw
           - /var/run/netns
+        runAsGroup: image
+        runAsUser: "0"
     hostNetwork: true
   DaemonSet/galactic-system/galactic-worker:
     containers:
@@ -355,5 +367,7 @@ workloads:
           - /var/lib/galactic-edge/ownership:rw
           - /var/lib/galactic-worker:rw
           - /var/run/netns
+        runAsGroup: "65441"
+        runAsUser: "0"
     hostNetwork: true
     hostPID: true
