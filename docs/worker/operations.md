@@ -226,6 +226,11 @@ kubectl -n galactic-system logs -f pod/galactic-worker-handback-<node>
 kubectl -n galactic-system delete pod galactic-worker-handback-<node>
 ```
 
+Build it from the `galactic-kustomize` bundle the Worker came from, which
+stamps the same image tag. From a checkout, pin that tag first:
+`kustomize edit set image ghcr.io/datum-cloud/galactic-worker:<tag>` in
+`config/galactic-worker/handback`.
+
 The pod runs `galactic-worker handback`:
 
 1. It refuses while a Worker answers on `/run/galactic-worker/worker.sock`.
@@ -261,9 +266,10 @@ handed-back scope that no other writer took in between.
 3. Hand back the scopes and restart galactic-router on every node, as above.
 4. Delete the rest: `kubectl delete -k config/galactic-worker` and the
    `galactic-worker-allowlist-*` ConfigMap.
-5. Check each node: `inspect` from the handback pod shows only
-   `galactic-handback:` or other owners, `ip link` shows no `G…N`, `G…T`,
-   `G…R` or `G…P` links, and no interface carries a `galactic_local_*` filter.
+5. Check each node from a node debug pod: no record in
+   `/host/var/lib/galactic-edge/ownership/*.json` names a `galactic-worker:`
+   owner, `ip link` shows no `G…N`, `G…T`, `G…R` or `G…P` links, and no
+   interface carries a `galactic_local_*` filter.
 
 ## Roll back a provider attachment node
 
