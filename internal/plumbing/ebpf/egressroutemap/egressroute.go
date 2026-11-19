@@ -165,27 +165,63 @@ var uplinkIndexesFn = attach.UplinkIndexes
 // unreachable one to fail: with a default route in place, all of them
 // "resolve".
 func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, err error) {
+	hop, err := resolveNextHop(sid, true)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return hop.LinkIndex, hop.DMAC, hop.SMAC, nil
+}
+
+// ErrNoUplinkRoute is a SID with no specific route over an SRv6 uplink.
+var ErrNoUplinkRoute = errors.New("no route over an SRv6 uplink")
+
+// ErrNeighborUnresolved is a SID whose underlay next hop has no resolved
+// neighbor entry.
+var ErrNeighborUnresolved = errors.New("next hop neighbor unresolved")
+
+// NextHop is where a packet encapsulated toward a SID leaves the node.
+type NextHop struct {
+	// LinkIndex is the SRv6 uplink the route to the SID leaves through.
+	LinkIndex int
+	// Gateway is the underlay next hop, the SID itself when it is on-link.
+	Gateway net.IP
+	// DMAC and SMAC are the next hop's and the uplink's MAC addresses.
+	DMAC, SMAC net.HardwareAddr
+}
+
+// ResolveNextHop resolves sid's underlay next hop from the kernel's routes and
+// neighbor cache, as Register does, without soliciting the neighbor. The error
+// wraps ErrNoUplinkRoute when no specific route over an SRv6 uplink reaches
+// sid, and ErrNeighborUnresolved when the next hop has no resolved neighbor;
+// with the latter, the returned NextHop still names the link and gateway.
+func ResolveNextHop(sid net.IP) (NextHop, error) {
+	return resolveNextHop(sid, false)
+}
+
+// resolveNextHop resolves sid's next hop, soliciting the neighbor when solicit
+// is set.
+func resolveNextHop(sid net.IP, solicit bool) (NextHop, error) {
 	uplinks, err := uplinkIndexesFn()
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("resolve SRv6 uplinks to validate the route to %s: %w", sid, err)
+		return NextHop{}, fmt.Errorf("resolve SRv6 uplinks to validate the route to %s: %w", sid, err)
 	}
 
 	routes, err := netlink.RouteGet(sid)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("no route to %s: %w", sid, err)
+		return NextHop{}, fmt.Errorf("%w: no route to %s: %w", ErrNoUplinkRoute, sid, err)
 	}
 	if len(routes) == 0 {
-		return 0, nil, nil, fmt.Errorf("no route to %s", sid)
+		return NextHop{}, fmt.Errorf("%w: no route to %s", ErrNoUplinkRoute, sid)
 	}
-	linkIndex = routes[0].LinkIndex
+	linkIndex := routes[0].LinkIndex
 	if _, ok := uplinks[linkIndex]; !ok {
-		return 0, nil, nil, fmt.Errorf(
-			"no route to %s over an SRv6 uplink: it resolves out link %d, which the datapath is not attached to "+
-				"(the fabric has most likely not advertised this SID yet and the lookup fell through to a "+
-				"default route)", sid, linkIndex)
+		return NextHop{}, fmt.Errorf(
+			"%w: no route to %s over an SRv6 uplink: it resolves out link %d, which the datapath is not "+
+				"attached to (the fabric has most likely not advertised this SID yet and the lookup fell "+
+				"through to a default route)", ErrNoUplinkRoute, sid, linkIndex)
 	}
 	if err := rejectDefaultRoute(sid); err != nil {
-		return 0, nil, nil, err
+		return NextHop{}, fmt.Errorf("%w: %w", ErrNoUplinkRoute, err)
 	}
 	nextHop := routes[0].Gw
 	if nextHop == nil {
@@ -194,15 +230,23 @@ func resolveLinkAndL2(sid net.IP) (linkIndex int, dmac, smac net.HardwareAddr, e
 
 	link, err := netlink.LinkByIndex(linkIndex)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("look up link %d: %w", linkIndex, err)
+		return NextHop{}, fmt.Errorf("look up link %d: %w", linkIndex, err)
 	}
-	smac = link.Attrs().HardwareAddr
+	hop := NextHop{LinkIndex: linkIndex, Gateway: nextHop, SMAC: link.Attrs().HardwareAddr}
 
-	dmac, err = resolveNeighbor(linkIndex, nextHop)
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("%w (next-hop for sid %s)", err, sid)
+	if solicit {
+		hop.DMAC, err = resolveNeighbor(linkIndex, nextHop)
+	} else {
+		hop.DMAC, err = lookupNeighbor(linkIndex, nextHop)
+		if err == nil && hop.DMAC == nil {
+			err = fmt.Errorf("no resolved neighbor entry for %s on link %d", nextHop, linkIndex)
+		}
 	}
-	return linkIndex, dmac, smac, nil
+	if err != nil {
+		hop.DMAC = nil
+		return hop, fmt.Errorf("%w: %w (next-hop for sid %s)", ErrNeighborUnresolved, err, sid)
+	}
+	return hop, nil
 }
 
 // rejectDefaultRoute fails when the route sid matches is a default route,
@@ -519,6 +563,72 @@ func (t *EgressRouteTable) Lookup(tableID uint32, prefix *net.IPNet) (sid net.IP
 	return sid, true, nil
 }
 
+// Row is the egress_route_table entry a lookup answered with.
+type Row struct {
+	// SID is the entry's SID: the destination of an encapsulating entry.
+	SID net.IP
+	// LinkIndex, DMAC and SMAC are the next hop stored with an encapsulating
+	// entry.
+	LinkIndex  int
+	DMAC, SMAC net.HardwareAddr
+	// PassThrough is an entry usid_egress defers to the kernel.
+	PassThrough bool
+	// Sentinel is an entry naming an egress shard group.
+	Sentinel bool
+}
+
+// LookupRow is Lookup returning the whole entry: the entry egress_route_table
+// resolves (tableID, prefix) to with a longest-prefix match bounded by
+// prefix's length, as usid_egress does for a packet to prefix's address.
+func (t *EgressRouteTable) LookupRow(tableID uint32, prefix *net.IPNet) (Row, bool, error) {
+	key, err := buildKey(tableID, prefix)
+	if err != nil {
+		return Row{}, false, fmt.Errorf("egressroutemap: egress_route_table: lookup: %w", err)
+	}
+	var value prog.UsidEgressRouteValue
+	if err := t.table.Lookup(key, &value); err != nil {
+		if errors.Is(err, ebpf.ErrKeyNotExist) {
+			return Row{}, false, nil
+		}
+		return Row{}, false, fmt.Errorf("egressroutemap: egress_route_table: lookup table=%d prefix=%s: %w",
+			tableID, prefix, err)
+	}
+	row := Row{
+		SID:         append(net.IP(nil), value.Sid[:]...),
+		LinkIndex:   int(value.LinkIfindex),
+		DMAC:        append(net.HardwareAddr(nil), value.Dmac[:]...),
+		SMAC:        append(net.HardwareAddr(nil), value.Smac[:]...),
+		PassThrough: value.LinkIfindex == 0,
+		Sentinel:    isGroupSentinel(value),
+	}
+	return row, true, nil
+}
+
+// UnregisterIfSID removes the entry of its own that (tableID, prefix) has
+// when it encapsulates toward sid, or toward any SID when sid is nil. A
+// pass-through or sentinel entry is always kept. The entry is read just
+// before it is deleted, as the map offers no compare-and-delete.
+func (t *EgressRouteTable) UnregisterIfSID(tableID uint32, prefix *net.IPNet, sid net.IP) error {
+	key, err := buildKey(tableID, prefix)
+	if err != nil {
+		return fmt.Errorf("egressroutemap: egress_route_table: unregister: %w", err)
+	}
+	var value prog.UsidEgressRouteValue
+	switch err := t.table.Lookup(key, &value); {
+	case errors.Is(err, ebpf.ErrKeyNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("egressroutemap: egress_route_table: unregister table=%d prefix=%s: %w", tableID, prefix, err)
+	case value.LinkIfindex == 0 || isGroupSentinel(value):
+		return nil
+	case sid != nil && !net.IP(value.Sid[:]).Equal(sid):
+		return nil
+	}
+	// The lookup is longest-prefix, so the entry read may be a shorter one
+	// covering prefix; deleting the exact key then finds nothing.
+	return t.Unregister(tableID, prefix)
+}
+
 // Prefixes returns every prefix egress_route_table holds an entry of its own
 // for, in CIDR string form, keyed by Linux VRF table ID. It walks the whole
 // map once. Unlike Lookup it never answers for one prefix with a shorter one.
@@ -771,6 +881,19 @@ type RefreshOption func(*refreshConfig)
 type refreshConfig struct {
 	groupFor func(prefix *net.IPNet) (uint32, bool)
 	layout   *ClassLayout
+	// tenantRouteTables are tables whose tenant routes another writer
+	// re-resolves.
+	tenantRouteTables map[uint32]struct{}
+}
+
+// WithoutTenantRoutes leaves the tenant routes of tables alone: in each, the
+// sweep refreshes only egress shard entries and sentinels, and skips every
+// other encapsulating entry. Galactic Worker's Fabric module writes and
+// re-resolves the tenant routes of the VPCs it owns.
+func WithoutTenantRoutes(tables map[uint32]struct{}) RefreshOption {
+	return func(c *refreshConfig) {
+		c.tenantRouteTables = tables
+	}
 }
 
 // ClassLayout is the hashed-mode assignment of translation classes to shard
@@ -937,6 +1060,13 @@ func (t *EgressRouteTable) Refresh(
 
 		sid := make(net.IP, 16)
 		copy(sid, value.Sid[:])
+
+		if _, tenant := cfg.tenantRouteTables[key.TableId]; tenant {
+			if fields, err := decodeSID(sid); err != nil || !shards.isShard(fields) {
+				result.Skipped++
+				continue // a tenant route its owner keeps current
+			}
+		}
 
 		if cfg.groupFor != nil {
 			if fields, err := decodeSID(sid); err == nil && shards.isShard(fields) {

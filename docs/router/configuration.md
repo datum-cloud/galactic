@@ -16,23 +16,25 @@ below.
 
 Logging takes `--log-level` (`LOG_LEVEL`), without the `GALACTIC_ROUTER` prefix and the standard `--zap-*` flags; see [Logging](../observability/logging.md).
 
-| Option                   | Environment Variable                       | CLI Flag                     | Default                     |
-| ------------------------ | ------------------------------------------ | ---------------------------- | --------------------------- |
-| Node name                | `GALACTIC_ROUTER_NODE_NAME`                | `--node-name`                | _(required)_                |
-| Route reflector          | `GALACTIC_ROUTER_REFLECTOR`                | `--reflector`                | `false`                     |
-| BGP listen port          | `GALACTIC_ROUTER_BGP_LISTEN_PORT`          | `--bgp-listen-port`          | `179`                       |
-| BGP local address        | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`        | `--bgp-local-address`        | _(auto-detected from `lo`)_ |
-| Metrics port             | `GALACTIC_ROUTER_METRICS_PORT`             | `--metrics-port`             | `9179`                      |
-| gRPC health port         | `GALACTIC_ROUTER_GRPC_HEALTH_PORT`         | `--grpc-health-port`         | `5179`                      |
-| Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE`             | `--gc-namespace`             | `galactic-system`           |
-| Orphan-cleanup interval  | `GALACTIC_ROUTER_GC_INTERVAL`              | `--gc-interval`              | `5m`                        |
-| BMP stations             | `GALACTIC_ROUTER_BMP_STATIONS`             | `--bmp-stations`             | _(empty; BMP disabled)_     |
-| BMP policy               | `GALACTIC_ROUTER_BMP_POLICY`               | `--bmp-policy`               | `pre-policy`                |
-| BMP statistics interval  | `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL`  | `--bmp-statistics-interval`  | `60s`                       |
-| GoBGP API directory      | `GALACTIC_ROUTER_GOBGP_API_DIR`            | `--gobgp-api-dir`            | _(empty; no API)_           |
-| Traffic policy           | `GALACTIC_ROUTER_TRAFFIC_POLICY`           | `--traffic-policy`           | `false`                     |
-| Service frontends        | `GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED` | `--service-frontend-enabled` | `false`                     |
-| Spread remote pairing    | `GALACTIC_ROUTER_SERVICE_SPREAD_PAIRING`   | `--service-spread-pairing`   | `first`                     |
+| Option                   | Environment Variable                       | CLI Flag                     | Default                                  |
+| ------------------------ | ------------------------------------------ | ---------------------------- | ---------------------------------------- |
+| Node name                | `GALACTIC_ROUTER_NODE_NAME`                | `--node-name`                | _(required)_                             |
+| Route reflector          | `GALACTIC_ROUTER_REFLECTOR`                | `--reflector`                | `false`                                  |
+| BGP listen port          | `GALACTIC_ROUTER_BGP_LISTEN_PORT`          | `--bgp-listen-port`          | `179`                                    |
+| BGP local address        | `GALACTIC_ROUTER_BGP_LOCAL_ADDRESS`        | `--bgp-local-address`        | _(auto-detected from `lo`)_              |
+| Metrics port             | `GALACTIC_ROUTER_METRICS_PORT`             | `--metrics-port`             | `9179`                                   |
+| gRPC health port         | `GALACTIC_ROUTER_GRPC_HEALTH_PORT`         | `--grpc-health-port`         | `5179`                                   |
+| Orphan-cleanup namespace | `GALACTIC_ROUTER_GC_NAMESPACE`             | `--gc-namespace`             | `galactic-system`                        |
+| Orphan-cleanup interval  | `GALACTIC_ROUTER_GC_INTERVAL`              | `--gc-interval`              | `5m`                                     |
+| BMP stations             | `GALACTIC_ROUTER_BMP_STATIONS`             | `--bmp-stations`             | _(empty; BMP disabled)_                  |
+| BMP policy               | `GALACTIC_ROUTER_BMP_POLICY`               | `--bmp-policy`               | `pre-policy`                             |
+| BMP statistics interval  | `GALACTIC_ROUTER_BMP_STATISTICS_INTERVAL`  | `--bmp-statistics-interval`  | `60s`                                    |
+| GoBGP API directory      | `GALACTIC_ROUTER_GOBGP_API_DIR`            | `--gobgp-api-dir`            | _(empty; no API)_                        |
+| Worker socket            | `GALACTIC_ROUTER_WORKER_SOCKET`            | `--worker-socket`            | _(empty; no route handoff)_              |
+| Worker token file        | `GALACTIC_ROUTER_WORKER_TOKEN_FILE`        | `--worker-token-file`        | `/var/run/secrets/galactic-worker/token` |
+| Traffic policy           | `GALACTIC_ROUTER_TRAFFIC_POLICY`           | `--traffic-policy`           | `false`                                  |
+| Service frontends        | `GALACTIC_ROUTER_SERVICE_FRONTEND_ENABLED` | `--service-frontend-enabled` | `false`                                  |
+| Spread remote pairing    | `GALACTIC_ROUTER_SERVICE_SPREAD_PAIRING`   | `--service-spread-pairing`   | `first`                                  |
 
 ## Required Options
 
@@ -211,6 +213,33 @@ gobgp --target unix:///host/run/galactic-router/<namespace>_<name>.sock neighbor
 
 **Type:** directory path
 **Default:** _(empty)_
+
+### `--worker-socket` / `GALACTIC_ROUTER_WORKER_SOCKET`
+
+Galactic Worker's socket. With it set, the router hands every tenant route it
+installs or withdraws to Worker through the Routes service
+([contract](../worker/contract.md#tenant-route-handoff)), and Worker's Fabric
+module writes the routes of every VPC Worker owns. The router writes a route
+itself only in a VPC Worker does not own, under the VPC's write fence. While
+Worker is unreachable the router keeps the changes and retries the connection
+with backoff, sending everything it holds once a stream opens. Empty hands
+Worker nothing.
+
+The base DaemonSet sets `/run/galactic-worker/worker.sock` and mounts the
+directory from the host. Worker's allowlist must grant the router's
+ServiceAccount `fabric.routes`.
+
+**Type:** socket path
+**Default:** _(empty)_
+
+### `--worker-token-file` / `GALACTIC_ROUTER_WORKER_TOKEN_FILE`
+
+The projected ServiceAccount token, audience `galactic-worker`, the router
+presents to Worker. It is read again for every connection. The base DaemonSet
+projects it at the default path.
+
+**Type:** file path
+**Default:** `/var/run/secrets/galactic-worker/token`
 
 ### `--bmp-policy` / `GALACTIC_ROUTER_BMP_POLICY`
 

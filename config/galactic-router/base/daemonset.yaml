@@ -72,6 +72,12 @@ spec:
             # node pod. See the gobgp-api volume below.
             - name: GALACTIC_ROUTER_GOBGP_API_DIR
               value: /run/galactic-router
+            # Hand every tenant route to galactic-worker, whose Fabric module
+            # writes the routes of the VPCs it owns. Without a Worker on the
+            # node the router writes every route itself and keeps retrying
+            # the connection quietly.
+            - name: GALACTIC_ROUTER_WORKER_SOCKET
+              value: /run/galactic-worker/worker.sock
           ports:
             - name: metrics
               containerPort: 9179
@@ -173,6 +179,13 @@ spec:
               mountPath: /var/lib/galactic-edge/ownership
             - name: gobgp-api
               mountPath: /run/galactic-router
+            # galactic-worker's socket, and the token, audience
+            # galactic-worker, that identifies this pod to it.
+            - name: galactic-worker-socket
+              mountPath: /run/galactic-worker
+            - name: galactic-worker-token
+              mountPath: /var/run/secrets/galactic-worker
+              readOnly: true
       volumes:
         - name: netns
           hostPath:
@@ -189,6 +202,17 @@ spec:
           hostPath:
             path: /run/galactic-router
             type: DirectoryOrCreate
+        - name: galactic-worker-socket
+          hostPath:
+            path: /run/galactic-worker
+            type: DirectoryOrCreate
+        - name: galactic-worker-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: galactic-worker
+                  expirationSeconds: 3600
+                  path: token
         # Never delete or restore this directory while a writer is alive.
         - name: edge-ownership
           hostPath:

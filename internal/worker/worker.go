@@ -35,6 +35,7 @@ import (
 	"go.datum.net/galactic/internal/worker/auth"
 	"go.datum.net/galactic/internal/worker/hostscope"
 	"go.datum.net/galactic/internal/worker/module"
+	"go.datum.net/galactic/internal/worker/routes"
 	"go.datum.net/galactic/internal/worker/sources"
 	"go.datum.net/galactic/internal/worker/store"
 )
@@ -121,7 +122,11 @@ type Deps struct {
 	// its modules for scopes with claims.
 	Host hostscope.Host
 	Auth Authenticator
-	Log  *slog.Logger
+	// Routes holds the tenant routes the Routes service records, which the
+	// Fabric module writes. Without it the Routes service refuses every
+	// stream with ModuleNotRunning.
+	Routes *routes.Table
+	Log    *slog.Logger
 	// Now is the clock, time.Now when nil.
 	Now func() time.Time
 }
@@ -300,6 +305,16 @@ func (w *Worker) HostChanged(vpc string) {
 	if w.d.Host == nil {
 		return
 	}
+	w.mu.Lock()
+	w.scope(vpc)
+	w.mu.Unlock()
+	w.queue.Add(vpc)
+}
+
+// RoutesChanged requeues vpc's scope after the tenant routes recorded for it
+// changed, or a datapath event touched the routes programmed for it. It
+// starts tracking the scope when Worker did not know it.
+func (w *Worker) RoutesChanged(vpc string) {
 	w.mu.Lock()
 	w.scope(vpc)
 	w.mu.Unlock()
