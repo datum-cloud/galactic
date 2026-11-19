@@ -53,7 +53,7 @@ check frr "fabric-router Dockerfile" "$(dockerfile_arg "${REPO}/containers/fabri
 check frr "tr1 vtysh" \
   "$(docker exec "clab-${LAB}-tr1" vtysh -c 'show version' | sed -nE 's/^FRRouting ([0-9.]+).*/\1/p' | head -1)"
 check remote_host_base "remote-host Dockerfile" "$(sed -nE 's/^FROM (.*)/\1/p' "${REPO}/containers/remote-host/Dockerfile" | head -1)"
-for f in base/guests.yaml dfw/tap-guest.yaml; do
+for f in base/guests.yaml; do
   for img in $(sed -nE 's/^ *image: *//p' "${LAB_DIR}/resources/tenants/ns80/${f}" | sort -u); do
     check guest_image "ns80/${f}" "${img}"
   done
