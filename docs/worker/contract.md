@@ -173,6 +173,10 @@ EdgeAttachment condition names where they mean the same thing:
 | `Ready`       | `Programmed` is true and observed state shows every handoff can carry traffic.                         |
 | `Withdrawing` | A release, revocation or lease expiry is removing programmed state. Status names the withdrawal scope. |
 
+A claim's status also lists `handoff_interfaces`: each interface Worker
+created for the claim's handoff, by role, name and ifindex
+([the Local module](#the-local-module)).
+
 The withdrawal scope names what stops: one destination, one claim, every claim
 of a caller, or a whole VPC on the node. Operators read it to judge the reach
 of a withdrawal ([#1441](https://github.com/datum-cloud/galactic/issues/1441)).
@@ -215,16 +219,17 @@ so Worker compares VPC identity, never addresses.
 [#1444](https://github.com/datum-cloud/galactic/issues/1444) proved each Local
 handoff on the [qualified platform](qualification.md), with prototypes placed by
 today's loaders (D27). Each row below is the mechanism the Local module
-([#1435](https://github.com/datum-cloud/galactic/issues/1435)) programs, and
-each requirement is part of that handoff's `Ready`. The scripts, captures and
-results are in
-[the lab's handoff checks](../../deploy/containerlab/docs/handoffs.md).
+([#1435](https://github.com/datum-cloud/galactic/issues/1435),
+`internal/worker/local`) programs, and each requirement is part of that
+handoff's `Ready`. The scripts, captures and results are in
+[the lab's handoff checks](../../deploy/containerlab/docs/handoffs.md);
+[the Local module](#the-local-module) describes the implementation.
 
-| Capability                          | Mechanism                                                                                                                                                                                                                                                                               |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local.tap`                         | A dispatcher slot on the receiving interface returns `XDP_PASS` with metadata naming the TAP. A tc ingress program on the same interface decides the TAP's ingress policy, marks the packet decided and delivers with `bpf_redirect_neigh`. The reply leaves from the TAP's tc ingress. |
-| `local.veth_pair`                   | A tc program on the tenant TAP or veth redirects into the pair's tenant end. XDP on the NAT end runs the shard. The return is redirected into the NAT end and received by tc on the tenant end, which decides policy and delivers.                                                      |
-| `local.routed_link`, `local.socket` | A veth from a VRF in the pod to the tenant VRF on the host, with a `/127` on each end. A socket bound to the pod's VRF (`SO_BINDTODEVICE`) sends and receives through it with no redirect; the kernel routes both ways.                                                                 |
+| Capability                          | Mechanism                                                                                                                                                                                                                                                                                                              |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local.tap`                         | A dispatcher slot on the receiving interface returns `XDP_PASS` with metadata naming the TAP. A tc ingress program on the same interface decides the TAP's ingress policy, marks the packet decided and delivers with `bpf_redirect_neigh`. The reply leaves from the TAP's tc ingress.                                |
+| `local.veth_pair`                   | A tc program on the tenant TAP or veth redirects into the pair's tenant end. XDP on the NAT end runs the shard. The return is redirected into the NAT end and received by tc on the tenant end, which decides policy and delivers.                                                                                     |
+| `local.routed_link`, `local.socket` | A veth from a VRF in the pod to the tenant VRF on the host. Its pod end uses the claim attachment's addresses (D26), each routed as a `/128` to the host end in the tenant VRF (D29). A socket bound to the pod's VRF (`SO_BINDTODEVICE`) sends and receives through it with no redirect; the kernel routes both ways. |
 
 These amend the mechanisms the qualification plan first named:
 
@@ -259,10 +264,14 @@ These amend the mechanisms the qualification plan first named:
   Without one, `usid_egress` sends a tenant's packet for a Local peer (a public
   client, the shard address's client, the routed link) to the VPC's `::/0` NAT
   route, encapsulated. Worker writes the pass-through under its own owner. The
-  egress decision `usid_egress` then makes is on the Private path, so until
-  [#1435](https://github.com/datum-cloud/galactic/issues/1435) moves the Local
-  branch into `usid_egress`, a tenant's Private egress grant also governs its
-  Local flows, and the handoff's own program decides again on the right path.
+  egress decision `usid_egress` then makes is on the Private path, so while
+  the Local branch stays out of `usid_egress`, a tenant's Private egress grant
+  also governs its Local flows, and the handoff's own program decides again
+  on the right path. [#1435](https://github.com/datum-cloud/galactic/issues/1435)
+  keeps the branch out (D28): the Local module writes the entries for the
+  prefixes its own handoffs serve, a routed link's addresses
+  (`PassThroughLocal`), and the resolver that selects a handoff writes the
+  entries that steer a tenant's public flows into it (D29).
 - **No other tc owner may claim a tenant TAP.** A node's other datapath,
   Cilium in particular, must never attach to a tenant interface. Deployed
   configurations meet this by pinning Cilium's `devices` to the node's uplink
@@ -280,17 +289,87 @@ These amend the mechanisms the qualification plan first named:
 - **A handoff program on a tenant interface runs after galactic-cni's own.**
   Its filters take the lowest tc priorities on the interface's ingress, so a
   separate Local filter sits at the next priority and sees only what
-  `usid_egress` passed on. #1435 either keeps that order or moves the Local
-  branch into `usid_egress`.
+  `usid_egress` passed on. #1435 keeps that order (D28).
 
 Each handoff places requirements on its interfaces:
 
-| Handoff             | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local.tap`         | The TAP has carrier only while its reader (the hypervisor) holds it; Worker reports `HandoffInterfaceMissing` until then. `bpf_redirect_neigh` does not check the TAP's MTU: the lab delivered 8049-byte packets into a TAP at MTU 1500, and its guest took them. A real guest drops frames above its own MTU, with no ICMPv6 Packet Too Big to the sender, so the TAP's MTU is at least the receiving path's. IPv6 fragments to a TAP guest were not delivered in either mode; #1435 decides whether Local delivery reassembles or refuses them. |
-| `local.veth_pair`   | The tenant end of the pair needs GRO (or an XDP program) for a native `XDP_REDIRECT` into the pair to be received. XDP rewrites checksums as complete, so a frame with an offloaded, partial checksum is corrupted; see the checksum row in the [qualification plan](qualification.md#handoffs).                                                                                                                                                                                                                                                  |
-| `local.routed_link` | The host end is a tenant interface the pod controls. It drops any source outside its `/127`, and the routed link's prefix has a pass-through entry in the tenant VRF.                                                                                                                                                                                                                                                                                                                                                                             |
-| `local.socket`      | The socket is bound to the pod's VRF. An unbound socket uses the pod's main table and reaches no tenant.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Handoff             | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `local.tap`         | The TAP has carrier only while its reader (the hypervisor) holds it; Worker reports `HandoffInterfaceMissing` until then. `bpf_redirect_neigh` does not check the TAP's MTU: the lab delivered 8049-byte packets into a TAP at MTU 1500, and its guest took them. A real guest drops frames above its own MTU, with no ICMPv6 Packet Too Big to the sender, so the TAP's MTU is at least the receiving path's. IPv6 fragments to a TAP guest were not delivered in either mode, so Local refuses them: `local_rx` drops and counts an IPv6 fragment (D28). `local_rx` also drops a packet larger than the TAP's MTU, and the destination reports `HandoffMTUTooSmall` while the TAP's MTU is below a receiving device's. |
+| `local.veth_pair`   | The tenant end of the pair needs GRO (or an XDP program) for a native `XDP_REDIRECT` into the pair to be received. XDP rewrites checksums as complete, so a frame with an offloaded, partial checksum is corrupted; see the checksum row in the [qualification plan](qualification.md#handoffs). Local creates the pair with GRO on and transmit checksum offload off at the tenant end, so the kernel finishes a partial checksum, and segments a GSO packet, before the NAT end's program sees it.                                                                                                                                                                                                                     |
+| `local.routed_link` | The host end is a tenant interface the pod controls. It drops any source but the claim attachment's IPv6 addresses (at most four) and link-local ones, and each of those addresses has a route to the host end and a pass-through entry in the tenant VRF (D29).                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `local.socket`      | The socket is bound to the pod's VRF. An unbound socket uses the pod's main table and reaches no tenant.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+### The Local module
+
+`internal/worker/local` is the Local module, registered with the Fabric module
+in `cmd/galactic-worker`. Its tc programs are in
+`internal/plumbing/ebpf/localprog` and include the uSID datapath, so every
+policy decision runs `tp_capture` and `tp_decide` against the maps galactic-cni
+pinned. Its own maps (`lt_*`) are pinned under `/sys/fs/bpf/galactic-local`
+(`--local-pin-dir`), so a restarted Worker keeps the rows the running programs
+read.
+
+| Program            | Hook                                                                               | Does                                                                                                                                                                                                          |
+| ------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local_rx`         | tc ingress of each public receiving device: its bond, or its VLANs when it has any | Delivers a packet whose metadata (`localprog/local_meta.h`) names a TAP a `local.tap` claim authorizes, on the PublicService path, and records the flow. A packet without the metadata goes on to the kernel. |
+| `local_link_rx`    | tc ingress of each destination's tenant interface, after galactic-cni's filters    | Sends a recorded flow's reply out of the device the flow arrived on, on the PublicService path, and a flow whose destination has a `PassThroughLocalNAT` entry into the VPC's pair, on the PublicNAT path.    |
+| `local_pair_rx`    | tc ingress of a pair's tenant end                                                  | Delivers the NAT end's return to the destination address it names in the pair's VPC, on the PublicNAT path.                                                                                                   |
+| `local_link_guard` | tc ingress of a routed link's host end                                             | Drops any source the link was not given.                                                                                                                                                                      |
+
+The module keeps link lifecycle apart from program ownership. CNI creates and
+deletes tenant TAPs and veths; the module attaches only its own filters and
+rows to them, keyed by their current ifindex, and reprograms them when CNI
+replaces an interface. The module creates the service-internal veth pair of a
+`veth_pair` claim and the routed link of a `routed_link` or `socket` claim,
+names them `G<VPC><key><role>` with the alias
+`galactic-local:<VPC>/<attachment>`, and deletes them when the claim goes. It
+creates a routed link's pod end only in the pod Worker authenticated the
+claim's owner from: it finds a process of that pod through its cgroup, as the
+API's peer check does (D21), and refuses a pod on the host's network. A
+duplicate `Request` from the owner's new pod moves the link there.
+
+A destination is programmed when the module's rows and filters are in place,
+confirmed by read-back. It is ready when, in addition:
+
+- its tenant interface is in the VPC's VRF, has carrier and carries
+  galactic-cni's chain (`HandoffInterfaceMissing` otherwise);
+- the module's filters are current (`HandoffHookMissing`);
+- for `local.tap`, a receiving device's dispatcher runs a live public slot
+  (`DispatcherSlotUnclaimed`) and the TAP's MTU covers the device's
+  (`HandoffMTUTooSmall`);
+- for `local.veth_pair`, the client's program runs native on the NAT end
+  (`HandoffHookMissing`, or `HookUnsupported` in generic mode), and the pair
+  has carrier;
+- for `local.routed_link`, the link reaches the owner's current pod and has
+  carrier, which it has once the pod brings its end up;
+- the destination's neighbor has not failed (`NeighborUnresolved`). A neighbor
+  not yet resolved is no failure: `bpf_redirect_neigh` resolves it.
+
+Forward readiness covers the path from the handoff to the destination and
+return readiness the path back, so a missing hook withdraws only the direction
+it carries.
+
+Public ingress cannot assert tenant context. Only an XDP program can write
+skb metadata, so a packet from the wire carries none, and `local_rx` delivers
+only to a TAP Local authorized and drops a packet that names any other. Every
+Local program that delivers decides the receiver's policy on its own path and
+sets the decided mark itself, and the pair delivers only to the destination
+addresses a claim names. Every uplink discovery path skips a link Galactic
+creates per VPC, including the NAT end of a pair, which lives in the host's
+namespace outside any VRF (`attach.IsInternalLink`).
+
+A tenant's public flows enter a handoff only through `egress_route_table`. A
+`PassThroughLocalNAT` entry steers into the VPC's pair, and the shard resolver
+([#1437](https://github.com/datum-cloud/galactic/issues/1437)) writes it for a
+Local shard. A `local.tap` reply reaches `local_link_rx` only when its
+destination has a pass-through entry, so replies to clients anywhere need
+either a default pass-through or a Local branch in `usid_egress`, which
+[#1438](https://github.com/datum-cloud/galactic/issues/1438) decides (D29).
+
+The client learns the interfaces the module created from the claim's
+`handoff_interfaces`: the NAT end it attaches its native XDP program to, and
+the routed link's pod end it configures.
 
 ## Errors and retry
 
@@ -327,7 +406,12 @@ Status carries these reasons besides the ones above:
 | `RouteWithdrawn`                                   | `Programmed`          | The tenant route covering one of the destination's addresses was withdrawn                                |
 | `RouteMismatch`                                    | `Programmed`          | The route covering one of the destination's addresses leads to another node's locator                     |
 | `UnderlayUnreachable`                              | `Programmed`, `Ready` | No route over an SRv6 uplink reaches the destination's locator; the entry is kept                         |
-| `NeighborUnresolved`                               | `Programmed`, `Ready` | The underlay next hop has no resolved neighbor, or the entry carries an out-of-date one                   |
+| `NeighborUnresolved`                               | `Programmed`, `Ready` | The underlay next hop, or a Local destination's guest, has no resolved neighbor, or the entry's is stale  |
+| `HandoffInterfaceMissing`                          | `Programmed`, `Ready` | A Local destination's interface or handoff link is missing, has no carrier or lacks galactic-cni's chain  |
+| `HandoffHookMissing`                               | `Ready`               | A Local handoff program is off its hook: Local's own filter, or the client's program on a pair's NAT end  |
+| `DispatcherSlotUnclaimed`                          | `Ready`               | No receiving device's XDP dispatcher runs a live public slot for a `local.tap` destination                |
+| `HandoffMTUTooSmall`                               | `Ready`               | A Local destination's MTU is below its receiving path's                                                   |
+| `HookUnsupported`                                  | `Ready`               | A hook runs in a mode the handoff cannot use, such as the NAT end's program in generic mode               |
 | `ReturnPathNotProgrammed`                          | `Ready`               | This node does not yet decapsulate the VPC's SID into the VPC's table                                     |
 
 Clients retry with exponential backoff from 200 ms to 30 s with full jitter.

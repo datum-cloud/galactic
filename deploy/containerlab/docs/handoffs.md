@@ -143,6 +143,12 @@ own owner) for the client's prefix and the routed link in both VRFs, which is
 what Worker programs for a Local destination; see
 [contract amendments](../../../docs/worker/contract.md#local-handoffs).
 
+Worker's Local module (`internal/worker/local`,
+[#1435](https://github.com/datum-cloud/galactic/issues/1435)) now programs the
+tc side of these handoffs as product code; its tests reuse the stand-ins for
+the gateway's and NAT's XDP programs (`localprog/localfixture`). See
+[the Local module](../../../docs/worker/contract.md#the-local-module).
+
 ## Cells
 
 Each cell builds one receiving device, places the prototypes in one mode, and
