@@ -80,7 +80,9 @@ scopes() {
 
 table() {
   local vrf
-  vrf=$(printf 'G%09sV' "$2")
+  # The VPC identifier is zero-padded to 9 characters; printf pads strings
+  # with spaces only.
+  vrf="G$(printf '%9s' "$2" | tr ' ' 0)V"
   docker exec "$1" ip -j -d link show dev "${vrf}" | jq -r '.[0].linkinfo.info_data.table'
 }
 
