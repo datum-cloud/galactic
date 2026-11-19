@@ -46,7 +46,9 @@ fixture afterwards with `task delete:ns80-tap`.
 
 ## Fixture
 
-`ns80-tap` (`resources/tenants/ns80-tap/`) runs on `dfw-worker` only:
+`ns80-tap` (`resources/tenants/ns80-tap/`) runs on `dfw-worker` only. Its pods
+select `node=compute`, and the lab-only taint on `dfw-worker4`, dfw's second
+compute node, keeps them off it:
 
 | Pod             | Network                                                                             | Role                                                       |
 | --------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------------- |
