@@ -1,0 +1,2403 @@
+[
+  {
+    "scenario": "cell/bond-generic-native-peer",
+    "check": "XDP attach",
+    "expect": "ok",
+    "got": "ok",
+    "result": "pass"
+  },
+  {
+    "scenario": "cell/bond-native",
+    "check": "XDP attach",
+    "expect": "ok",
+    "got": "ok",
+    "result": "pass"
+  },
+  {
+    "scenario": "cell/plain-generic",
+    "check": "XDP attach",
+    "expect": "ok",
+    "got": "ok",
+    "result": "pass"
+  },
+  {
+    "scenario": "cell/plain-generic-native-peer",
+    "check": "XDP attach",
+    "expect": "ok",
+    "got": "ok",
+    "result": "pass"
+  },
+  {
+    "scenario": "cell/plain-native",
+    "check": "XDP attach",
+    "expect": "ok",
+    "got": "ok",
+    "result": "pass"
+  },
+  {
+    "scenario": "cell/select",
+    "check": "xdpmode.Select on dfw-worker",
+    "expect": "native",
+    "got": "native",
+    "result": "pass"
+  },
+  {
+    "scenario": "cell/vlan-generic-native-peer",
+    "check": "XDP attach",
+    "expect": "ok",
+    "got": "ok",
+    "result": "pass"
+  },
+  {
+    "scenario": "cell/vlan-generic-redirect",
+    "check": "XDP attach",
+    "expect": "ok",
+    "got": "ok",
+    "result": "pass"
+  },
+  {
+    "scenario": "cell/vlan-lower-native",
+    "check": "XDP attach",
+    "expect": "ok",
+    "got": "ok",
+    "result": "pass"
+  },
+  {
+    "scenario": "cell/vlan-native",
+    "check": "XDP attach",
+    "expect": "unsupported",
+    "got": "unsupported",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "XDP metadata reaches tc",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "client gets tap80's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "client gets tap80's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "client gets tap81's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "client receives tap80's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "client receives tap81's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "denied TCP 9: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "denied TCP 9: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "denied UDP 9 reply: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "denied UDP 9 reply: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "policy left to tp_deliver: reaches the guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "policy left to tp_deliver: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "tap tc denies the reply on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "tap80 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "tap80 guest receives tap81's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "tap80's UDP listener answers inside the pod",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "tap80's wildcard UDP listener answers the client",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "tap81 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "tap81 guest receives tap80's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-generic-native-peer",
+    "check": "tc denies on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "XDP metadata reaches tc",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "client gets tap80's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "client gets tap80's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "client gets tap81's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "client receives tap80's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "client receives tap81's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "denied TCP 9: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "denied TCP 9: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "denied UDP 9 reply: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "denied UDP 9 reply: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "policy left to tp_deliver: reaches the guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "policy left to tp_deliver: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "tap tc denies the reply on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "tap80 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "tap80 guest receives tap81's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "tap80's UDP listener answers inside the pod",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "tap80's wildcard UDP listener answers the client",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "tap81 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "tap81 guest receives tap80's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/bond-native",
+    "check": "tc denies on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "XDP metadata reaches tc",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "client gets tap80's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "client gets tap80's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "client gets tap81's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "client receives tap80's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "client receives tap81's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "denied TCP 9: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "denied TCP 9: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "denied UDP 9 reply: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "denied UDP 9 reply: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "policy left to tp_deliver: reaches the guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "policy left to tp_deliver: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "tap tc denies the reply on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "tap80 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "tap80 guest receives tap81's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "tap80's UDP listener answers inside the pod",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "tap80's wildcard UDP listener answers the client",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "tap81 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "tap81 guest receives tap80's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic",
+    "check": "tc denies on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "XDP metadata reaches tc",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "client gets tap80's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "client gets tap80's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "client gets tap81's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "client receives tap80's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "client receives tap81's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "denied TCP 9: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "denied TCP 9: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "denied UDP 9 reply: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "denied UDP 9 reply: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "policy left to tp_deliver: reaches the guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "policy left to tp_deliver: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "tap tc denies the reply on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "tap80 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "tap80 guest receives tap81's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "tap80's UDP listener answers inside the pod",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "tap80's wildcard UDP listener answers the client",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "tap81 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "tap81 guest receives tap80's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-generic-native-peer",
+    "check": "tc denies on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "XDP metadata reaches tc",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "client gets tap80's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "client gets tap80's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "client gets tap81's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "client receives tap80's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "client receives tap81's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "denied TCP 9: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "denied TCP 9: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "denied UDP 9 reply: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "denied UDP 9 reply: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "policy left to tp_deliver: reaches the guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "policy left to tp_deliver: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "tap tc denies the reply on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "tap80 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "tap80 guest receives tap81's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "tap80's UDP listener answers inside the pod",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "tap80's wildcard UDP listener answers the client",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "tap81 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "tap81 guest receives tap80's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/plain-native",
+    "check": "tc denies on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "XDP metadata reaches tc",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "client gets tap80's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "client gets tap80's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "client gets tap81's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "client receives tap80's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "client receives tap81's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "denied TCP 9: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "denied TCP 9: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "denied UDP 9 reply: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "denied UDP 9 reply: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "policy left to tp_deliver: reaches the guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "policy left to tp_deliver: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "tap tc denies the reply on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "tap80 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "tap80 guest receives tap81's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "tap80's UDP listener answers inside the pod",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "tap80's wildcard UDP listener answers the client",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "tap81 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "tap81 guest receives tap80's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-native-peer",
+    "check": "tc denies on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "XDP metadata reaches tc",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "client gets tap80's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "client gets tap80's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "client gets tap81's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "client receives tap80's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "client receives tap81's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "denied TCP 9: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "denied TCP 9: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "denied UDP 9 reply: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "denied UDP 9 reply: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "policy left to tp_deliver: reaches the guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "policy left to tp_deliver: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "tap tc denies the reply on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "tap80 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "tap80 guest receives tap81's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "tap80's UDP listener answers inside the pod",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "tap80's wildcard UDP listener answers the client",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "tap81 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "tap81 guest receives tap80's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-generic-redirect",
+    "check": "tc denies on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "XDP metadata reaches tc",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "client gets tap80's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "client gets tap80's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "client gets tap81's UDP answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "client receives tap80's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "client receives tap81's answers from its VIP",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "denied TCP 9: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "denied TCP 9: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "denied UDP 9 reply: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "denied UDP 9 reply: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "policy left to tp_deliver: reaches the guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "policy left to tp_deliver: reaches the receiving device",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "tap tc denies the reply on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "tap80 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "tap80 guest receives tap81's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "tap80's UDP listener answers inside the pod",
+    "expect": "-",
+    "got": "yes",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "tap80's wildcard UDP listener answers the client",
+    "expect": "-",
+    "got": "no",
+    "result": "observed"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "tap81 guest receives its VIP's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "tap81 guest receives tap80's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h1/vlan-lower-native",
+    "check": "tc denies on the PublicService path",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "client receives tap80's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "client receives tap80's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "client receives tap81's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "client receives tap81's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "denied TCP 9 return: leaves the client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "denied TCP 9 return: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "denied TCP 9 return: reaches the pair's tenant end",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "denied UDP 9: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "denied UDP 9: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "pair peer XDP translates",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "tap80 gets the client's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "tap80 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "tap80 guest receives tap81's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "tap81 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-generic-native-peer",
+    "check": "tap81 guest receives tap80's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "client receives tap80's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "client receives tap80's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "client receives tap81's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "client receives tap81's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "denied TCP 9 return: leaves the client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "denied TCP 9 return: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "denied TCP 9 return: reaches the pair's tenant end",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "denied UDP 9: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "denied UDP 9: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "pair peer XDP translates",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "tap80 gets the client's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "tap80 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "tap80 guest receives tap81's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "tap81 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/bond-native",
+    "check": "tap81 guest receives tap80's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "client receives tap80's flow from its shard address",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "client receives tap80's flow untranslated",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "client receives tap81's flow from its shard address",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "client receives tap81's flow untranslated",
+    "expect": "-",
+    "got": "5",
+    "result": "observed"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "denied TCP 9 return: leaves the client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "denied TCP 9 return: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "denied TCP 9 return: reaches the pair's tenant end",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "denied UDP 9: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "denied UDP 9: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "pair peer XDP translates",
+    "expect": "no",
+    "got": "no",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "tap80 gets the client's TCP answer",
+    "expect": "no",
+    "got": "no",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "tap80 gets the client's UDP answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "tap80 guest receives tap81's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "tap81 gets the client's UDP answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic",
+    "check": "tap81 guest receives tap80's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "client receives tap80's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "client receives tap80's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "client receives tap81's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "client receives tap81's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "denied TCP 9 return: leaves the client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "denied TCP 9 return: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "denied TCP 9 return: reaches the pair's tenant end",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "denied UDP 9: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "denied UDP 9: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "pair peer XDP translates",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "tap80 gets the client's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "tap80 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "tap80 guest receives tap81's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "tap81 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-generic-native-peer",
+    "check": "tap81 guest receives tap80's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "client receives tap80's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "client receives tap80's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "client receives tap81's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "client receives tap81's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "denied TCP 9 return: leaves the client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "denied TCP 9 return: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "denied TCP 9 return: reaches the pair's tenant end",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "denied UDP 9: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "denied UDP 9: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "pair peer XDP translates",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "tap80 gets the client's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "tap80 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "tap80 guest receives tap81's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "tap81 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/plain-native",
+    "check": "tap81 guest receives tap80's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "client receives tap80's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "client receives tap80's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "client receives tap81's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "client receives tap81's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "denied TCP 9 return: leaves the client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "denied TCP 9 return: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "denied TCP 9 return: reaches the pair's tenant end",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "denied UDP 9: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "denied UDP 9: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "pair peer XDP translates",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "tap80 gets the client's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "tap80 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "tap80 guest receives tap81's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "tap81 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-native-peer",
+    "check": "tap81 guest receives tap80's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "client receives tap80's flow from its shard address",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "client receives tap80's flow untranslated",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "client receives tap81's flow from its shard address",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "client receives tap81's flow untranslated",
+    "expect": "-",
+    "got": "0",
+    "result": "observed"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "denied TCP 9 return: leaves the client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "denied TCP 9 return: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "denied TCP 9 return: reaches the pair's tenant end",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "denied UDP 9: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "denied UDP 9: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "pair peer XDP translates",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "tap80 gets the client's TCP answer",
+    "expect": "no",
+    "got": "no",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "tap80 gets the client's UDP answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "tap80 guest receives tap81's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "tap81 gets the client's UDP answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-generic-redirect",
+    "check": "tap81 guest receives tap80's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "client receives tap80's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "client receives tap80's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "client receives tap81's flow from its shard address",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "client receives tap81's flow untranslated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "denied TCP 9 return: leaves the client",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "denied TCP 9 return: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "denied TCP 9 return: reaches the pair's tenant end",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "denied UDP 9: leaves the guest",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "denied UDP 9: reaches no client",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "pair peer XDP translates",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "tap80 gets the client's TCP answer",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "tap80 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "tap80 guest receives tap81's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "tap81 gets the client's UDP answers",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h2/vlan-lower-native",
+    "check": "tap81 guest receives tap80's answers",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "denied TCP 9: crosses the routed link",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "denied TCP 9: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "link guard drops the spoofed source",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "physical members carry the probes",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "physical members carry them encapsulated",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "socket bound to vrf80 reads vpc80's guest",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "socket bound to vrf80 reads vpc81's guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "socket bound to vrf81 reads vpc80's guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "socket bound to vrf81 reads vpc81's guest",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "spoofed source: crosses the routed link",
+    "expect": "yes",
+    "got": "yes",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "spoofed source: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "unbound socket: gets no answer",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "unbound socket: reaches no guest",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "vpc80's guest is answered by the vrf80 socket",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "vpc80's guest receives vrf80's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "vpc80's guest receives vrf81's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "vpc81's guest is answered by the vrf81 socket",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "vpc81's guest receives vrf80's requests",
+    "expect": "0",
+    "got": "0",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "vpc81's guest receives vrf81's requests",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "vrf80 socket reads the guests' lines",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  },
+  {
+    "scenario": "h3",
+    "check": "vrf81 socket reads the guests' lines",
+    "expect": "5",
+    "got": "5",
+    "result": "pass"
+  }
+]

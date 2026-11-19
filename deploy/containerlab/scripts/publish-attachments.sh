@@ -9,8 +9,9 @@
 # reports once scheduled:
 #
 #   - vpc, vpcAttachment: the NAD's identifiers;
-#   - node, podName: where the pod using the NAD (as its
-#     v1.multus-cni.io/default-network) runs;
+#   - node, podName: where the pod using the NAD runs, as its
+#     v1.multus-cni.io/default-network or as a secondary network in its
+#     k8s.v1.cni.cncf.io/networks list (a TAP guest, ns80-tap);
 #   - hostInterface: the host side of its veth, G<vpc><vpcattachment>H
 #     (internal/plumbing/intf), which galactic-router's traffic policy
 #     reconciler binds the attachment's policies to.
@@ -60,16 +61,19 @@ spec:
 EOF
     fi
 
-    # The pod naming this NAD as its default network, by bare name or
-    # namespace/name: one that is running and not being deleted when there
-    # is one, so a rollout's old pod is never the one published.
+    # The pod naming this NAD as its default network or a secondary one, by
+    # bare name or namespace/name: one that is running and not being deleted
+    # when there is one, so a rollout's old pod is never the one published.
     pod=""
     for i in $(seq 1 60); do
       pod=$(docker exec "${cp}" kubectl get pods -n "${NS}" -o json |
         jq -r --arg nad "${nad}" --arg qualified "${NS}/${nad}" '
           [.items[]
-           | select(.metadata.annotations["v1.multus-cni.io/default-network"] as $n
-                    | $n == $nad or $n == $qualified)
+           | select((.metadata.annotations["v1.multus-cni.io/default-network"] as $n
+                     | $n == $nad or $n == $qualified)
+                    or ((.metadata.annotations["k8s.v1.cni.cncf.io/networks"] // "")
+                        | split(",") | map(gsub("^\\s+|\\s+$"; "") | split("@")[0])
+                        | any(. == $nad or . == $qualified)))
            | select(.spec.nodeName != null and .metadata.deletionTimestamp == null)]
           | (map(select(.status.phase == "Running")) + .)[0].metadata.name // empty')
       [ -n "${pod}" ] && break

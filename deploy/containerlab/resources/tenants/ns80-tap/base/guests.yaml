@@ -1,0 +1,200 @@
+# A TAP-backed guest in VPC 80. The pod's primary network is the cluster's,
+# so the runtime has a pod interface and the sandbox starts. vpc-a-tap is a
+# secondary attachment: galactic-tap creates the host tap G000000080082H in the VPC's
+# VRF and configures nothing in the pod. The vmm container plays the
+# hypervisor: it opens that tap and bridges it to tap0 in the pod, the
+# guest's interface, with socat.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tap-guest-a
+  labels:
+    app: vpc-a-tap
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vpc-a-tap
+  template:
+    metadata:
+      labels:
+        app: vpc-a-tap
+      annotations:
+        k8s.v1.cni.cncf.io/networks: vpc-a-tap
+    spec:
+      nodeSelector:
+        galactic.datumapis.com/node: compute
+      hostPID: true
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: vmm
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: TAP
+              value: G000000080082H
+            - name: GUEST
+              value: fd20:80:ff03::1:0:0/96
+            - name: GATEWAY
+              value: fd20:80:ff03::1
+            - name: VIP
+              value: "2001:db8:4144:a::80"
+            - name: PUBLIC
+              value: 2001:db8:4144::/48
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Name the node's network namespace for socat's netns= option. hostPID makes
+              # PID 1 the node's init.
+              [ -e /run/netns/host ] || ip netns attach host 1
+              i=0
+              until ip netns exec host ip link show "${TAP}" >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ "${i}" -ge 120 ]; then
+                  echo "vmm: host tap ${TAP} did not appear" >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+              socat -d TUN,tun-type=tap,tun-name="${TAP}",iff-no-pi,netns=host \
+                TUN,tun-type=tap,tun-name=tap0,iff-no-pi,iff-up &
+              bridge=$!
+              i=0
+              until ip link show tap0 >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ "${i}" -ge 100 ]; then
+                  echo "vmm: tap0 did not appear" >&2
+                  exit 1
+                fi
+                sleep 0.1
+              done
+              # Routes only after the bridge holds tap0, or the kernel drops them with it.
+              ip -6 addr replace "${GUEST}" dev tap0 nodad
+              ip -6 addr replace "${VIP}/128" dev lo
+              ip -6 route replace fd20:80::/32 via "${GATEWAY}" dev tap0 onlink
+              ip -6 route replace "${PUBLIC}" via "${GATEWAY}" dev tap0 onlink
+              touch /tmp/ready
+              wait "${bridge}"
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/ready && ip link show tap0 | grep -q LOWER_UP"]
+            periodSeconds: 2
+---
+# A TAP-backed guest in VPC 81. The pod's primary network is the cluster's,
+# so the runtime has a pod interface and the sandbox starts. vpc-b-tap is a
+# secondary attachment: galactic-tap creates the host tap G000000081082H in the VPC's
+# VRF and configures nothing in the pod. The vmm container plays the
+# hypervisor: it opens that tap and bridges it to tap0 in the pod, the
+# guest's interface, with socat.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tap-guest-b
+  labels:
+    app: vpc-b-tap
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vpc-b-tap
+  template:
+    metadata:
+      labels:
+        app: vpc-b-tap
+      annotations:
+        k8s.v1.cni.cncf.io/networks: vpc-b-tap
+    spec:
+      nodeSelector:
+        galactic.datumapis.com/node: compute
+      hostPID: true
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: vmm
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: TAP
+              value: G000000081082H
+            - name: GUEST
+              value: fd20:80:ff03::1:0:0/96
+            - name: GATEWAY
+              value: fd20:80:ff03::1
+            - name: VIP
+              value: "2001:db8:4144:a::81"
+            - name: PUBLIC
+              value: 2001:db8:4144::/48
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Name the node's network namespace for socat's netns= option. hostPID makes
+              # PID 1 the node's init.
+              [ -e /run/netns/host ] || ip netns attach host 1
+              i=0
+              until ip netns exec host ip link show "${TAP}" >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ "${i}" -ge 120 ]; then
+                  echo "vmm: host tap ${TAP} did not appear" >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+              socat -d TUN,tun-type=tap,tun-name="${TAP}",iff-no-pi,netns=host \
+                TUN,tun-type=tap,tun-name=tap0,iff-no-pi,iff-up &
+              bridge=$!
+              i=0
+              until ip link show tap0 >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ "${i}" -ge 100 ]; then
+                  echo "vmm: tap0 did not appear" >&2
+                  exit 1
+                fi
+                sleep 0.1
+              done
+              # Routes only after the bridge holds tap0, or the kernel drops them with it.
+              ip -6 addr replace "${GUEST}" dev tap0 nodad
+              ip -6 addr replace "${VIP}/128" dev lo
+              ip -6 route replace fd20:80::/32 via "${GATEWAY}" dev tap0 onlink
+              ip -6 route replace "${PUBLIC}" via "${GATEWAY}" dev tap0 onlink
+              touch /tmp/ready
+              wait "${bridge}"
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/ready && ip link show tap0 | grep -q LOWER_UP"]
+            periodSeconds: 2
+---
+# Stands in for an Envoy pod. The handoff run gives it a VRF per VPC and a
+# routed link from each to the host's VRF, and opens VRF-bound sockets in it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-standin
+  labels:
+    app: envoy-standin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy-standin
+  template:
+    metadata:
+      labels:
+        app: envoy-standin
+    spec:
+      nodeSelector:
+        galactic.datumapis.com/node: compute
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: envoy
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]

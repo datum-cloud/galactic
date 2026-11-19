@@ -1399,6 +1399,44 @@ tasks:
     cmds:
       - LAB={{.LAB}} ./scripts/baseline-twice.sh {{.CLI_ARGS}}
 
+  # The Local handoff checks (docs/handoffs.md). Not part of deploy or
+  # verify: handoff:twice deploys ns80-tap, observes twice, measures and
+  # removes ns80-tap again.
+  "deploy:ns80-tap":
+    desc: Deploy the Local handoff fixture (TAP guests in both ns80 VPCs and an Envoy stand-in) on dfw
+    cmds:
+      - ./scripts/handoff-fixture.sh up
+
+  "delete:ns80-tap":
+    desc: Remove the Local handoff fixture from dfw
+    cmds:
+      - ./scripts/handoff-fixture.sh down
+
+  "handoff:probe":
+    desc: Build handoff-probe (tests/handoffs) for the Local handoff checks
+    dir: ../..
+    cmds:
+      - task build:ebpf
+      - CGO_ENABLED=0 go build -o bin/handoff-probe ./tests/handoffs/cmd/handoff-probe
+
+  "handoff:observe":
+    desc: Prove the Local handoffs once, with captures (needs ns80-tap; OUTDIR via task handoff:observe -- DIR)
+    deps: ["handoff:probe"]
+    cmds:
+      - LAB={{.LAB}} ./scripts/handoff-observe.sh {{.CLI_ARGS | default "../../bin/handoffs/observe"}}
+
+  "handoff:measure":
+    desc: Measure the Local handoffs' MTU limits and offload behavior (needs ns80-tap)
+    deps: ["handoff:probe"]
+    cmds:
+      - LAB={{.LAB}} ./scripts/handoff-measure.sh {{.CLI_ARGS | default "../../bin/handoffs/measure"}}
+
+  "handoff:twice":
+    desc: Deploy ns80-tap, observe twice, measure, remove ns80-tap, and compare with handoffs/expected-results.json
+    deps: ["handoff:probe"]
+    cmds:
+      - LAB={{.LAB}} ./scripts/handoff-twice.sh {{.CLI_ARGS}}
+
   clean:
     desc: Destroy the lab and delete artifacts
     cmds:
