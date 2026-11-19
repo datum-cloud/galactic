@@ -73,10 +73,12 @@ listening() {
 stop_listener() {
   kc -n ns60 exec deploy/backend-a -- sh -c 'pkill -f "TCP6-LISTE[N]"'
 }
+# start_listener restarts the same responder resources/tenants/ns60/base/
+# backend.yaml runs, including its '!!'/dev/null (see the comment there).
 start_listener() {
   kc -n ns60 exec -i deploy/backend-a -- sh -s <<'EOF'
 reply='echo "$POD_NAME $SOCAT_PEERADDR"'
-setsid socat TCP6-LISTEN:80,reuseaddr,fork SYSTEM:"$reply" </dev/null >/dev/null 2>&1 &
+setsid socat TCP6-LISTEN:80,reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null </dev/null >/dev/null 2>&1 &
 EOF
 }
 
