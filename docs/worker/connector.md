@@ -100,6 +100,15 @@ The connector reuses the authority that exists:
   one fenced cannot open a gate, because the newer process owns the edge gate
   scope.
 
+## While Worker is down
+
+Forwarding never depends on Worker. galactic-edge connects to Worker when a
+call needs it, so it starts, renews gates and serves providers while Worker is
+down. An attachment that is `Programmed` on a link Worker registered stays
+`Programmed`: Worker keeps the link's rows while it is down and rebuilds them
+from its store when it restarts. A new attachment waits, reporting
+`WorkerUnavailable`, until Worker is back.
+
 ## Ownership transfer
 
 Each VPC on the node has two scopes in `internal/ownership` (D38):
