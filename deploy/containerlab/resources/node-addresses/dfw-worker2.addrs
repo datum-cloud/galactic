@@ -6,3 +6,6 @@ bond0 2001:db8:1:11::2/64
 bond1 alias dfw-worker-facing (compute) -- LACP bond of eth2 + eth4
 bond1 10.1.10.1/24
 bond1 2001:db8:1:10::1/64
+bond2 alias dfw-worker4-facing (second compute) -- LACP bond of eth5 + eth6
+bond2 10.1.14.1/24
+bond2 2001:db8:1:14::1/64

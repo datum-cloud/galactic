@@ -1,0 +1,74 @@
+# dfw's second guest in each VPC, on dfw-worker4, the site's second compute
+# node. With guest-a and guest-b on dfw-worker, each VPC has a guest on both
+# of dfw's compute workers, so a Worker claim on one toward the other's guest
+# resolves to Fabric inside one cell, and toward its own guest to Local.
+# Labelled vpc-a2/vpc-b2, not vpc-a/vpc-b, so selectors for the original
+# guests (scripts/baseline-observe.sh, scripts/verify-ns80.sh) still match
+# exactly one pod. The toleration admits them past dfw-worker4's lab-only
+# taint (node_files/dfw/config.yaml).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-a2
+  namespace: ns80
+  labels:
+    app: vpc-a2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vpc-a2
+  template:
+    metadata:
+      labels:
+        app: vpc-a2
+      annotations:
+        v1.multus-cni.io/default-network: ns80/vpc-a2
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker4
+      tolerations:
+        - key: lab.galactic.datumapis.com/compute
+          operator: Equal
+          value: secondary
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: guest
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-b2
+  namespace: ns80
+  labels:
+    app: vpc-b2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vpc-b2
+  template:
+    metadata:
+      labels:
+        app: vpc-b2
+      annotations:
+        v1.multus-cni.io/default-network: ns80/vpc-b2
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker4
+      tolerations:
+        - key: lab.galactic.datumapis.com/compute
+          operator: Equal
+          value: secondary
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: guest
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
