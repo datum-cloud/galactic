@@ -8,10 +8,12 @@ the epic implements against them on the `integration/galactic-worker` branch.
 
 Status: the service API, reconciliation core, client library and module
 interface are implemented by
-[#1433](https://github.com/datum-cloud/galactic/issues/1433). No delivery module
-is built in yet: Local ([#1435](https://github.com/datum-cloud/galactic/issues/1435))
-and Fabric ([#1436](https://github.com/datum-cloud/galactic/issues/1436)) add
-them, so every capability reports `ModuleNotRunning` until then.
+[#1433](https://github.com/datum-cloud/galactic/issues/1433). The Fabric module
+([#1436](https://github.com/datum-cloud/galactic/issues/1436)) serves
+`fabric.srv6` and `fabric.routes`, and is the only writer of the tenant routes
+of every VPC Worker owns. Local
+([#1435](https://github.com/datum-cloud/galactic/issues/1435)) is not built in
+yet, so the `local.*` capabilities report `ModuleNotRunning`.
 `examples/worker-client` is an independent client of the published API.
 [#1434](https://github.com/datum-cloud/galactic/issues/1434) makes Worker the
 owner of each node and VPC scope, with CNI writing that state under the fence
@@ -56,3 +58,6 @@ PR. "Confirmed" means the product owner approved the decision on the date given.
 | D21 | The peer check maps `SO_PEERCRED` to a pod by the cgroup path, so Worker needs `hostPID` and the host `/proc`                                     | Accepted             | [Contract](contract.md#transport-identity-and-access)       |
 | D22 | The allowlist is a YAML file passed with `--allowlist`                                                                                            | Accepted             | [Contract](contract.md#transport-identity-and-access)       |
 | D23 | Worker takes a scope over with `Takeover`, which fences and adopts under one lock, so no crash leaves a scope refusing CNI writes                 | Accepted             | [Ownership](ownership.md#bootstrap-adoption-and-transfer)   |
+| D24 | galactic-router hands Worker its tenant routes through `Routes.Sync` on the Worker socket, behind the `fabric.routes` capability, applying D8     | Accepted             | [Contract](contract.md#tenant-route-handoff)                |
+| D25 | Each destination reports `forward_ready` and `return_ready`; `ready` requires both                                                                | Accepted             | [Contract](contract.md#state-model)                         |
+| D26 | A destination's addresses come from its VPCAttachment's spec; one with none reports `DestinationAddressUnknown`                                   | Accepted             | [Contract](contract.md#trusted-sources)                     |
