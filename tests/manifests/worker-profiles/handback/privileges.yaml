@@ -1,0 +1,23 @@
+# Privileges the rendered manifests beside this file grant, checked by
+# hack/check-privileges in task test:manifests. Review every change.
+# Regenerate with check-privileges -write, then task lint-fix.
+bindings: {}
+roles: {}
+workloads:
+  Pod/galactic-system/galactic-worker-handback-REPLACE_WITH_NODE_NAME:
+    containers:
+      handback:
+        capabilities:
+          - BPF
+          - NET_ADMIN
+        dropsAll: true
+        hostPaths:
+          - /run/galactic-worker:rw
+          - /run/galactic:rw
+          - /sys/fs/bpf:rw
+          - /var/lib/galactic-edge/ownership:rw
+          - /var/lib/galactic-worker:rw
+        runAsGroup: image
+        runAsUser: "0"
+    hostNetwork: true
+    hostPID: true
