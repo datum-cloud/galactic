@@ -327,11 +327,12 @@ names them `G<VPC><key><role>` with the alias
 creates a routed link's pod end only in the pod Worker authenticated the
 claim's owner from: it finds a process of that pod through its cgroup, as the
 API's peer check does (D21), and refuses a pod on the host's network. A
-duplicate `Request` from the owner's new pod moves the link there, so a
-routed link serves one pod at a time: two pods that hold one claim move it
-back and forth, and each pod's link needs its own claim and attachment. The
-host end stays down until its guard is attached, and goes down again whenever
-the guard is missing.
+routed link serves one pod, so each pod's link needs its own claim and
+attachment. A call on the claim from another pod of its owner is refused
+with `FAILED_PRECONDITION`/`ClaimHeldByAnotherPod` while the pod the link
+serves runs; once that pod is gone, the call moves the link to the calling
+pod, as after a pod replacement. The host end stays down until its guard is
+attached, and goes down again whenever the guard is missing.
 
 A destination is programmed when the module's rows and filters are in place,
 confirmed by read-back. It is ready when, in addition:
@@ -390,16 +391,16 @@ away before it has planned every scope.
 
 ## Errors and retry
 
-| gRPC code             | Reasons                                                                                    | Client action                                               |
-| --------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
-| `INVALID_ARGUMENT`    | `MalformedSpec`, `WrongNode`                                                               | Fix the request. Do not retry.                              |
-| `UNAUTHENTICATED`     | `NoIdentity`, `IdentityExpired`                                                            | Refresh the credential, then retry.                         |
-| `PERMISSION_DENIED`   | `VPCNotAuthorized`, `AttachmentClaimedByAnotherCaller`, `NotOwner`, `CapabilityNotAllowed` | Do not retry until authority changes.                       |
-| `FAILED_PRECONDITION` | `UnsupportedVersion`, `ClaimExists`, `ClaimNotFound`, `GenerationConflict`                 | Re-read with `Observe`, then use the right operation.       |
-| `FAILED_PRECONDITION` | `NoSession`                                                                                | Call `GetCapabilities` for a new session, then retry.       |
-| `ABORTED`             | `StaleGeneration`                                                                          | Re-read with `Observe`; retry only with a newer generation. |
-| `UNAVAILABLE`         | `Resyncing`, `ShuttingDown`                                                                | Retry with backoff.                                         |
-| `RESOURCE_EXHAUSTED`  | `ClaimLimit`, `TableRangeExhausted`                                                        | Retry with backoff; report if it persists.                  |
+| gRPC code             | Reasons                                                                                             | Client action                                               |
+| --------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `INVALID_ARGUMENT`    | `MalformedSpec`, `WrongNode`                                                                        | Fix the request. Do not retry.                              |
+| `UNAUTHENTICATED`     | `NoIdentity`, `IdentityExpired`                                                                     | Refresh the credential, then retry.                         |
+| `PERMISSION_DENIED`   | `VPCNotAuthorized`, `AttachmentClaimedByAnotherCaller`, `NotOwner`, `CapabilityNotAllowed`          | Do not retry until authority changes.                       |
+| `FAILED_PRECONDITION` | `UnsupportedVersion`, `ClaimExists`, `ClaimNotFound`, `GenerationConflict`, `ClaimHeldByAnotherPod` | Re-read with `Observe`, then use the right operation.       |
+| `FAILED_PRECONDITION` | `NoSession`                                                                                         | Call `GetCapabilities` for a new session, then retry.       |
+| `ABORTED`             | `StaleGeneration`                                                                                   | Re-read with `Observe`; retry only with a newer generation. |
+| `UNAVAILABLE`         | `Resyncing`, `ShuttingDown`                                                                         | Retry with backoff.                                         |
+| `RESOURCE_EXHAUSTED`  | `ClaimLimit`, `TableRangeExhausted`                                                                 | Retry with backoff; report if it persists.                  |
 
 `Update` of a claim that does not exist, or is being withdrawn, gets
 `ClaimNotFound`.

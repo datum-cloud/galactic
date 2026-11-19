@@ -99,6 +99,28 @@ func (p *ProcPods) Open(podUID string) (netns.NsHandle, error) {
 
 var errOtherPod = errors.New("local: the process belongs to another pod")
 
+// Alive reports whether a process of the pod with podUID runs on this node.
+func (p *ProcPods) Alive(podUID string) bool {
+	if podUID == "" {
+		return false
+	}
+	entries, err := os.ReadDir(p.ProcRoot)
+	if err != nil {
+		// Unknown counts as alive, so a pod is never displaced on a guess.
+		return true
+	}
+	for _, e := range entries {
+		n, err := strconv.ParseInt(e.Name(), 10, 32)
+		if err != nil || n <= 0 {
+			continue
+		}
+		if uid, err := p.Pods.PodUID(int32(n)); err == nil && uid == podUID {
+			return true
+		}
+	}
+	return false
+}
+
 // openPID opens pid's network namespace when pid belongs to podUID, before
 // and after the open, so a process that exits and has its PID reused in
 // between is never mistaken for the pod's.

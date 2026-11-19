@@ -48,6 +48,7 @@ const (
 	gwSA     = "galactic-system/gateway"
 	otherSA  = "galactic-system/other"
 	routerSA = "galactic-system/galactic-router"
+	routedSA = "galactic-system/envoy-routed"
 
 	callerMD = "x-test-caller"
 	// podMD names the pod a test caller calls from.
@@ -63,6 +64,7 @@ var (
 		gwSA:     {workerv1alpha1.CapabilityLocalTap},
 		otherSA:  {workerv1alpha1.CapabilityLocalVethPair, workerv1alpha1.CapabilityFabricSRv6},
 		routerSA: {workerv1alpha1.CapabilityFabricRoutes},
+		routedSA: {workerv1alpha1.CapabilityLocalRoutedLink, workerv1alpha1.CapabilityLocalSocket},
 	}
 )
 
@@ -125,6 +127,8 @@ type env struct {
 	cfg      Config
 	clock    *clock
 	modules  func(*fake.Host) []module.Module
+	// podAlive is Deps.PodAlive.
+	podAlive func(string) bool
 	// hostState, when set, is the VPCs' canonical host state each
 	// incarnation reconciles.
 	hostState hostscope.Host
@@ -223,7 +227,7 @@ func (e *env) start() {
 		e.t.Fatal(err)
 	}
 	w, err := New(e.cfg, Deps{Store: e.store, Fence: e.fence, Sources: e.src, Modules: reg, Auth: metaAuth{},
-		Host: e.hostState, Routes: e.routes, Now: e.clock.Now})
+		Host: e.hostState, Routes: e.routes, Now: e.clock.Now, PodAlive: e.podAlive})
 	if err != nil {
 		e.t.Fatal(err)
 	}
