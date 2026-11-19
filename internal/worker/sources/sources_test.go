@@ -7,6 +7,7 @@ package sources
 import (
 	"context"
 	"net/netip"
+	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,6 +35,9 @@ func TestKube(t *testing.T) {
 	}
 	byUID := func(o client.Object) []string { return []string{string(o.GetUID())} }
 	va := &cloudv1alpha1.VPCAttachment{ObjectMeta: metav1.ObjectMeta{Name: "va", Namespace: "p", UID: uidVA},
+		Spec: cloudv1alpha1.VPCAttachmentSpec{Interface: cloudv1alpha1.VPCAttachmentInterface{
+			Addresses: []cloudv1alpha1.IPAddress{"2001:db8:10::5/64", "192.0.2.5/24"},
+		}},
 		Status: cloudv1alpha1.VPCAttachmentStatus{VPC: vpcA, Node: nodeA}}
 	admitted := &galacticv1alpha1.EdgeAttachment{ObjectMeta: metav1.ObjectMeta{Name: "ea", Namespace: "p", UID: uidEA},
 		Status: galacticv1alpha1.EdgeAttachmentStatus{VPC: vpcA, NodeName: nodeA, Conditions: []metav1.Condition{{
@@ -54,12 +58,13 @@ func TestKube(t *testing.T) {
 	ctx := context.Background()
 
 	for uid, want := range map[string]Attachment{
-		uidVA: {UID: uidVA, Kind: KindVPCAttachment, VPC: vpcA, Node: nodeA, Admitted: true},
+		uidVA: {UID: uidVA, Kind: KindVPCAttachment, VPC: vpcA, Node: nodeA, Admitted: true,
+			Addresses: []netip.Addr{netip.MustParseAddr("2001:db8:10::5"), netip.MustParseAddr("192.0.2.5")}},
 		uidEA: {UID: uidEA, Kind: KindEdgeAttachment, VPC: vpcA, Node: nodeA, Admitted: true},
 		uidEB: {UID: uidEB, Kind: KindEdgeAttachment, VPC: vpcA, Node: nodeA, Admitted: false},
 	} {
 		got, ok, err := k.Attachment(ctx, uid)
-		if err != nil || !ok || got != want {
+		if err != nil || !ok || !reflect.DeepEqual(got, want) {
 			t.Errorf("Attachment(%s) = %+v, %t, %v; want %+v", uid, got, ok, err, want)
 		}
 	}

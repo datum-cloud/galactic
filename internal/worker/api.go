@@ -25,8 +25,11 @@ import (
 // servedVersions are the API versions this Worker serves, oldest first.
 var servedVersions = []string{workerv1alpha1.Version}
 
-// Register registers the Worker service on s.
-func (w *Worker) Register(s *grpc.Server) { workerv1alpha1.RegisterWorkerServer(s, w) }
+// Register registers the Worker and Routes services on s.
+func (w *Worker) Register(s *grpc.Server) {
+	workerv1alpha1.RegisterWorkerServer(s, w)
+	workerv1alpha1.RegisterRoutesServer(s, &routesServer{w: w})
+}
 
 // GetCapabilities implements workerv1alpha1.WorkerServer.
 func (w *Worker) GetCapabilities(ctx context.Context, req *workerv1alpha1.GetCapabilitiesRequest) (

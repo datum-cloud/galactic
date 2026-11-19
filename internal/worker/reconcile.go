@@ -89,10 +89,7 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 		if w.d.Host != nil {
 			return w.reconcileHost(ctx, vpc)
 		}
-		w.mu.Lock()
-		delete(w.scopes, vpc)
-		w.mu.Unlock()
-		return nil
+		return w.reconcileUnclaimed(ctx, vpc)
 	}
 
 	evals, desired, err := w.resolve(ctx, vpc, claims)
@@ -117,17 +114,10 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 		return err
 	}
 
-	mods := w.d.Modules.Modules()
-	changes := make([]module.Change, len(mods))
-	empty := true
-	for i, m := range mods {
-		ch, err := m.Plan(ctx, scope, desired[m.Mode()])
-		if err != nil {
-			w.reportFailure(evals, workerv1alpha1.ReasonProgrammingFailed, err)
-			return fmt.Errorf("plan %s: %w", m.Name(), err)
-		}
-		changes[i] = ch
-		empty = empty && ch.Empty()
+	mods, changes, empty, err := w.planModules(ctx, scope, desired)
+	if err != nil {
+		w.reportFailure(evals, workerv1alpha1.ReasonProgrammingFailed, err)
+		return err
 	}
 	if !empty || ensure || t.Resync {
 		mutate := func() error {
@@ -138,15 +128,7 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 					return fmt.Errorf("ensure host state: %w", err)
 				}
 			}
-			for i, m := range mods {
-				if changes[i].Empty() {
-					continue
-				}
-				if err := m.Apply(ctx, scope, changes[i]); err != nil {
-					return fmt.Errorf("apply %s: %w", m.Name(), err)
-				}
-			}
-			return nil
+			return applyModules(ctx, scope, mods, changes)
 		}
 		// Every change carries the complete desired state of the scope, so
 		// a snapshot commit is always correct; an incremental commit is used
@@ -224,7 +206,8 @@ func (w *Worker) reconcileHost(ctx context.Context, vpc string) error {
 	}
 	reclaim := w.unusedFor(vpc, hp.Referenced())
 
-	t, err := w.acquire(module.Scope{VPC: vpc})
+	scope := module.Scope{VPC: vpc}
+	t, err := w.acquire(scope)
 	if errors.Is(err, errOwnedElsewhere) || errors.Is(err, ownership.ErrTransitioning) ||
 		errors.Is(err, ownership.ErrNotOwner) {
 		w.log.Debug("leaving host state of a VPC another writer owns", "vpc", vpc, "reason", err)
@@ -233,11 +216,20 @@ func (w *Worker) reconcileHost(ctx context.Context, vpc string) error {
 	if err != nil {
 		return err
 	}
-	if !reclaim && !t.Resync {
+	// A module can hold state for a scope with no claims, such as the
+	// tenant routes the Fabric module writes for every VPC on the node.
+	mods, changes, empty, err := w.planModules(ctx, scope, nil)
+	if err != nil {
+		return err
+	}
+	if !reclaim && !t.Resync && empty {
 		return nil
 	}
 	gone := false
 	mutate := func() error {
+		if err := applyModules(ctx, scope, mods, changes); err != nil {
+			return err
+		}
 		// A claim accepted since the plan keeps the state; its own
 		// reconcile follows this one.
 		if !reclaim || w.hasClaims(vpc) {
@@ -257,6 +249,72 @@ func (w *Worker) reconcileHost(ctx context.Context, vpc string) error {
 	if gone {
 		w.log.Info("reclaimed unused VPC host state", "vpc", vpc)
 		w.forgetScope(vpc)
+	}
+	return nil
+}
+
+// reconcileUnclaimed reconciles a scope Worker holds no claims in when it
+// manages no host state: it commits whatever the modules hold for the scope
+// without claims, and stops tracking a scope that needs nothing.
+func (w *Worker) reconcileUnclaimed(ctx context.Context, vpc string) error {
+	scope := module.Scope{VPC: vpc}
+	mods, changes, empty, err := w.planModules(ctx, scope, nil)
+	if err != nil {
+		return err
+	}
+	if empty {
+		w.mu.Lock()
+		if !w.hasClaimsLocked(vpc) {
+			delete(w.scopes, vpc)
+		}
+		w.mu.Unlock()
+		return nil
+	}
+	t, err := w.acquire(scope)
+	if errors.Is(err, errOwnedElsewhere) || errors.Is(err, ownership.ErrTransitioning) ||
+		errors.Is(err, ownership.ErrNotOwner) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	commit := w.d.Fence.Commit
+	if t.Resync {
+		commit = w.d.Fence.CommitSnapshot
+	}
+	if _, err := commit(t, func() error { return applyModules(ctx, scope, mods, changes) }); err != nil {
+		return fmt.Errorf("commit %s: %w", scope.Name(), err)
+	}
+	return nil
+}
+
+// planModules plans every module for scope against desired, by mode, and
+// reports whether every change is empty.
+func (w *Worker) planModules(ctx context.Context, scope module.Scope,
+	desired map[workerv1alpha1.Mode][]module.Claim) ([]module.Module, []module.Change, bool, error) {
+	mods := w.d.Modules.Modules()
+	changes := make([]module.Change, len(mods))
+	empty := true
+	for i, m := range mods {
+		ch, err := m.Plan(ctx, scope, desired[m.Mode()])
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("plan %s: %w", m.Name(), err)
+		}
+		changes[i] = ch
+		empty = empty && ch.Empty()
+	}
+	return mods, changes, empty, nil
+}
+
+// applyModules applies every non-empty change. It runs inside a fence commit.
+func applyModules(ctx context.Context, scope module.Scope, mods []module.Module, changes []module.Change) error {
+	for i, m := range mods {
+		if changes[i].Empty() {
+			continue
+		}
+		if err := m.Apply(ctx, scope, changes[i]); err != nil {
+			return fmt.Errorf("apply %s: %w", m.Name(), err)
+		}
 	}
 	return nil
 }
@@ -307,6 +365,11 @@ func (w *Worker) unusedFor(vpc string, referenced bool) bool {
 func (w *Worker) hasClaims(vpc string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.hasClaimsLocked(vpc)
+}
+
+// hasClaimsLocked is hasClaims with w.mu held.
+func (w *Worker) hasClaimsLocked(vpc string) bool {
 	for k := range w.claims {
 		if k.VPC == vpc {
 			return true
@@ -448,7 +511,8 @@ func (w *Worker) resolveDestination(ctx context.Context, vpc string, own netip.P
 		return module.Destination{}, nil
 	}
 	de.mode, de.resolved = mode, true
-	return module.Destination{ID: de.id, Ref: d, Mode: mode, VPC: att.VPC, Node: att.Node, Locator: loc}, nil
+	return module.Destination{ID: de.id, Ref: d, Mode: mode, VPC: att.VPC, Node: att.Node, Locator: loc,
+		Addresses: slices.Clone(att.Addresses)}, nil
 }
 
 func modeName(m workerv1alpha1.Mode) string {
@@ -584,6 +648,7 @@ func (w *Worker) applyStatus(c *claim, e *claimEval, state map[workerv1alpha1.Mo
 			default:
 				ds.Programmed = true
 				ds.Ready = got.Ready
+				ds.ForwardReady, ds.ReturnReady = got.ForwardReady, got.ReturnReady
 				if !got.Ready {
 					ds.Reason, ds.Message = got.Reason, got.Message
 					ready = false

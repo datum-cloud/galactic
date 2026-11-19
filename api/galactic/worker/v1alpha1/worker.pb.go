@@ -449,7 +449,7 @@ func (x *GetCapabilitiesResponse) GetNode() string {
 type Capability struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// name is one of local.tap, local.veth_pair, local.routed_link,
-	// local.socket and fabric.srv6.
+	// local.socket, fabric.srv6 and fabric.routes.
 	Name  string          `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	State CapabilityState `protobuf:"varint,2,opt,name=state,proto3,enum=galactic.worker.v1alpha1.CapabilityState" json:"state,omitempty"`
 	// reason is a machine reason when the capability is unavailable, such as
@@ -1381,11 +1381,20 @@ type DestinationStatus struct {
 	Mode       Mode `protobuf:"varint,2,opt,name=mode,proto3,enum=galactic.worker.v1alpha1.Mode" json:"mode,omitempty"`
 	Resolved   bool `protobuf:"varint,3,opt,name=resolved,proto3" json:"resolved,omitempty"`
 	Programmed bool `protobuf:"varint,4,opt,name=programmed,proto3" json:"programmed,omitempty"`
-	Ready      bool `protobuf:"varint,5,opt,name=ready,proto3" json:"ready,omitempty"`
+	// ready is true when both forward_ready and return_ready are true.
+	Ready bool `protobuf:"varint,5,opt,name=ready,proto3" json:"ready,omitempty"`
 	// reason explains the first of resolved, programmed and ready that is
 	// false.
-	Reason        string `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`
-	Message       string `protobuf:"bytes,7,opt,name=message,proto3" json:"message,omitempty"`
+	Reason  string `protobuf:"bytes,6,opt,name=reason,proto3" json:"reason,omitempty"`
+	Message string `protobuf:"bytes,7,opt,name=message,proto3" json:"message,omitempty"`
+	// forward_ready is true when traffic from the handoff can reach the
+	// destination: for a Fabric destination, a route toward the destination's
+	// locator covers each of its addresses and the underlay next hop resolves.
+	ForwardReady bool `protobuf:"varint,8,opt,name=forward_ready,json=forwardReady,proto3" json:"forward_ready,omitempty"`
+	// return_ready is true when traffic from the destination can come back to
+	// the handoff: for a Fabric destination, this node decapsulates the VPC's
+	// SID into the VPC's table.
+	ReturnReady   bool `protobuf:"varint,9,opt,name=return_ready,json=returnReady,proto3" json:"return_ready,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1467,6 +1476,20 @@ func (x *DestinationStatus) GetMessage() string {
 		return x.Message
 	}
 	return ""
+}
+
+func (x *DestinationStatus) GetForwardReady() bool {
+	if x != nil {
+		return x.ForwardReady
+	}
+	return false
+}
+
+func (x *DestinationStatus) GetReturnReady() bool {
+	if x != nil {
+		return x.ReturnReady
+	}
+	return false
 }
 
 // ClaimStatus is a complete snapshot of one claim. A client drops a
@@ -1654,7 +1677,7 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12A\n" +
 	"\x06status\x18\x02 \x01(\x0e2).galactic.worker.v1alpha1.ConditionStatusR\x06status\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x18\n" +
-	"\amessage\x18\x04 \x01(\tR\amessage\"\x94\x02\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\xdc\x02\n" +
 	"\x11DestinationStatus\x12G\n" +
 	"\vdestination\x18\x01 \x01(\v2%.galactic.worker.v1alpha1.DestinationR\vdestination\x122\n" +
 	"\x04mode\x18\x02 \x01(\x0e2\x1e.galactic.worker.v1alpha1.ModeR\x04mode\x12\x1a\n" +
@@ -1664,7 +1687,9 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"programmed\x12\x14\n" +
 	"\x05ready\x18\x05 \x01(\bR\x05ready\x12\x16\n" +
 	"\x06reason\x18\x06 \x01(\tR\x06reason\x12\x18\n" +
-	"\amessage\x18\a \x01(\tR\amessage\"\xb8\x03\n" +
+	"\amessage\x18\a \x01(\tR\amessage\x12#\n" +
+	"\rforward_ready\x18\b \x01(\bR\fforwardReady\x12!\n" +
+	"\freturn_ready\x18\t \x01(\bR\vreturnReady\"\xb8\x03\n" +
 	"\vClaimStatus\x124\n" +
 	"\x03key\x18\x01 \x01(\v2\".galactic.worker.v1alpha1.ClaimKeyR\x03key\x12\x1e\n" +
 	"\n" +
