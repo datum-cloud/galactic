@@ -62,6 +62,14 @@ internal/plumbing/ebpf/xmitdrops/xmitdrops_bpfel.go
 internal/plumbing/ebpf/xmitdrops/xmitdrops_bpfel.o
 internal/plumbing/ebpf/xmitdrops/xmitdrops_bpfeb.go
 internal/plumbing/ebpf/xmitdrops/xmitdrops_bpfeb.o
+internal/plumbing/ebpf/localprog/local_bpfel.go
+internal/plumbing/ebpf/localprog/local_bpfel.o
+internal/plumbing/ebpf/localprog/local_bpfeb.go
+internal/plumbing/ebpf/localprog/local_bpfeb.o
+internal/plumbing/ebpf/localprog/localfixture/fixture_bpfel.go
+internal/plumbing/ebpf/localprog/localfixture/fixture_bpfel.o
+internal/plumbing/ebpf/localprog/localfixture/fixture_bpfeb.go
+internal/plumbing/ebpf/localprog/localfixture/fixture_bpfeb.o
 tests/handoffs/probe/handoff_bpfel.go
 tests/handoffs/probe/handoff_bpfel.o
 tests/handoffs/probe/handoff_bpfeb.go

@@ -59,6 +59,10 @@ type Destination struct {
 	// They are empty when the attachment records none, such as for a guest
 	// that manages its own addressing.
 	Addresses []netip.Addr
+	// HostInterface is the host-side link of the destination's attachment,
+	// from its trusted source, which a Local destination is delivered
+	// through. It is empty until CNI has attached it.
+	HostInterface string
 }
 
 // DestinationID is the identity of a destination within a claim.
@@ -82,6 +86,12 @@ type Claim struct {
 	Owner      string
 	Generation uint64
 	Handoff    workerv1alpha1.Handoff
+	// OwnerPod is the UID of the pod the owner last called from, which a
+	// routed link's pod end is created in.
+	OwnerPod string
+	// Addresses are the addresses of the claim's own attachment, from its
+	// trusted source: for a routed link, the sources its pod end may use.
+	Addresses []netip.Addr
 	// Destinations are the claim's resolved destinations for the module's
 	// mode, each with an available capability.
 	Destinations []Destination
@@ -150,6 +160,23 @@ type Module interface {
 	Apply(ctx context.Context, scope Scope, change Change) error
 	// Read reads the scope's programmed and observed state from the host.
 	Read(ctx context.Context, scope Scope) (State, error)
+}
+
+// HandoffInterface is an interface a module created for a claim's handoff,
+// reported to the claim's owner.
+type HandoffInterface struct {
+	// Role is one of the workerv1alpha1.HandoffRole* values.
+	Role    string
+	Name    string
+	Ifindex int32
+}
+
+// HandoffReporter is implemented by a module that creates interfaces for a
+// claim's handoff. Worker reports them in the claim's status.
+type HandoffReporter interface {
+	// HandoffInterfaces returns the interfaces the module has created for
+	// each claim of scope, as of its last Read.
+	HandoffInterfaces(scope Scope) map[ClaimKey][]HandoffInterface
 }
 
 // Registry is the set of modules Worker runs and the capability status it

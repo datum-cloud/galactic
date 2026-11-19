@@ -249,7 +249,19 @@ func (w *Worker) put(ctx context.Context, caller auth.Caller, key *workerv1alpha
 	noop, err := decide(c, caller.ServiceAccount, gen, hash, update)
 	if err == nil && noop {
 		st := proto.Clone(c.status).(*workerv1alpha1.ClaimStatus)
+		moved := caller.PodUID != "" && c.rec.PodUID != caller.PodUID
+		rec := c.rec
 		w.mu.Unlock()
+		if moved {
+			// The owner calls from a new pod, as after its pod was
+			// replaced. Nothing else changes, but a routed link follows
+			// the pod.
+			if err := w.repod(k, rec, caller.PodUID); err != nil {
+				w.log.Error("record the claim's new pod", "error", err)
+				return nil, refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing,
+					"cannot record the claim durably", nil)
+			}
+		}
 		return st, nil
 	}
 	if err == nil {
@@ -280,7 +292,7 @@ func (w *Worker) put(ctx context.Context, caller auth.Caller, key *workerv1alpha
 		return nil, refusal.New(codes.Internal, workerv1alpha1.ReasonMalformedSpec, "encode spec", nil)
 	}
 	rec := store.Record{Node: k.Node, VPC: k.VPC, AttachmentUID: k.AttachmentUID, Owner: caller.ServiceAccount,
-		Capabilities: caller.Capabilities, Generation: gen, SpecHash: hash, Spec: raw}
+		PodUID: caller.PodUID, Capabilities: caller.Capabilities, Generation: gen, SpecHash: hash, Spec: raw}
 	if err := w.d.Store.Put(rec); err != nil {
 		w.log.Error("record claim", "error", err)
 		return nil, refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "cannot record the claim durably", nil)
@@ -308,6 +320,23 @@ func (w *Worker) put(ctx context.Context, caller auth.Caller, key *workerv1alpha
 	updateClaimGauge(w)
 	w.queue.Add(k.VPC)
 	return st, nil
+}
+
+// repod records podUID as the pod the owner of the claim at k calls from,
+// when the claim is still rec, and requeues its scope. The caller holds k's
+// key lock.
+func (w *Worker) repod(k module.ClaimKey, rec store.Record, podUID string) error {
+	rec.PodUID = podUID
+	if err := w.d.Store.Put(rec); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	if c := w.claims[k]; c != nil && c.rec.Generation == rec.Generation && !c.rec.Releasing {
+		c.rec.PodUID = podUID
+	}
+	w.mu.Unlock()
+	w.queue.Add(k.VPC)
+	return nil
 }
 
 // countOwned counts the live claims of caller. w.mu must be held.
