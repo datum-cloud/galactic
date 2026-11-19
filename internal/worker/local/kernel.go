@@ -20,6 +20,7 @@ import (
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/localprog"
@@ -68,6 +69,26 @@ const (
 
 // errDirty stops a dry run at the first change it would make.
 var errDirty = errors.New("local: the host differs from desired")
+
+// dirtyError is errDirty naming the change a dry run stopped at.
+type dirtyError struct{ detail string }
+
+func (e *dirtyError) Error() string { return errDirty.Error() + ": " + e.detail }
+
+func (e *dirtyError) Is(target error) bool { return target == errDirty }
+
+// dirty returns errDirty naming the change a dry run stopped at.
+func dirty(format string, args ...any) error {
+	return &dirtyError{detail: fmt.Sprintf(format, args...)}
+}
+
+// dirtyDetail returns the change err names, or "" for a bare errDirty.
+func dirtyDetail(err error) string {
+	if d, ok := errors.AsType[*dirtyError](err); ok {
+		return d.detail
+	}
+	return ""
+}
 
 // Kernel is the Local module's host access, in the calling thread's network
 // namespace, which must be the host's.
@@ -193,7 +214,7 @@ func (k *Kernel) ensureFilter(link netlink.Link, name string, dry bool) error {
 		return err
 	}
 	if dry {
-		return errDirty
+		return dirty("filter %s is not current on %s", name, link.Attrs().Name)
 	}
 	if err := attach.AttachLocal(k.program(name), link.Attrs().Name, name); err != nil {
 		return fmt.Errorf("local: attach %s to %s: %w", name, link.Attrs().Name, err)
@@ -217,6 +238,23 @@ func TableID(vpc string) (uint32, int, bool, error) {
 		return 0, 0, false, fmt.Errorf("local: %s is not a VRF", l.Attrs().Name)
 	}
 	return v.Table, v.Attrs().Index, true, nil
+}
+
+// vpcForms returns vpc and every other spelling of the same VPC scope that
+// a Local link's alias on the host uses, sorted.
+func (k *Kernel) vpcForms(vpc string) ([]string, error) {
+	h, err := readHost()
+	if err != nil {
+		return nil, err
+	}
+	forms := map[string]struct{}{vpc: {}}
+	want := ownership.VPCScope(vpc)
+	for _, l := range h.all {
+		if v, _, ok := parseAlias(l.Attrs().Alias); ok && ownership.VPCScope(v) == want {
+			forms[v] = struct{}{}
+		}
+	}
+	return sortedKeys(forms), nil
 }
 
 // host is what one pass read of the links on the host.
@@ -305,7 +343,7 @@ func (k *Kernel) ensurePair(h *host, p pairWant, vrfIdx int, dry bool) (pair, er
 	got, ok := h.readPair(p)
 	if !ok {
 		if dry {
-			return pair{}, errDirty
+			return pair{}, dirty("pair %s is missing", p.nat)
 		}
 		var err error
 		if got, err = k.createPair(h, p); err != nil {
@@ -432,7 +470,7 @@ func ensureFeatures(name string, dry bool) error {
 		return nil
 	}
 	if dry {
-		return errDirty
+		return dirty("offload features of %s differ", name)
 	}
 	if err := et.Change(name, change); err != nil {
 		return fmt.Errorf("local: set features %v on %s: %w", change, name, err)
@@ -507,7 +545,7 @@ func deleteRow(mp *ebpf.Map, idx uint32, dry bool) error {
 		return nil
 	}
 	if dry {
-		return errDirty
+		return dirty("stale row %d in %s", idx, mp.String())
 	}
 	return ignoreMissing(mp.Delete(idx))
 }
@@ -711,7 +749,7 @@ func (k *Kernel) ensureReceivers(want, dry bool) error {
 			}
 		}
 		if dry {
-			return errDirty
+			return dirty("filter %s is left on %s, no longer a receiving device", filterRx, name)
 		}
 		if err := attach.DetachLocal(name); err != nil {
 			return err

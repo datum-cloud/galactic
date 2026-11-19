@@ -39,6 +39,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
 	"go.datum.net/galactic/internal/worker"
 	"go.datum.net/galactic/internal/worker/auth"
+	"go.datum.net/galactic/internal/worker/diag"
 	"go.datum.net/galactic/internal/worker/fabric"
 	"go.datum.net/galactic/internal/worker/hostscope"
 	"go.datum.net/galactic/internal/worker/local"
@@ -81,6 +82,7 @@ type options struct {
 	localPinDir    string
 	dispatchDir    string
 	hostGrace      time.Duration
+	statusFile     string
 }
 
 func (o *options) validate() error {
@@ -200,6 +202,7 @@ func run(o *options) error {
 	w, err := worker.New(worker.Config{
 		Node: o.nodeName, Lease: o.lease, RenewInterval: o.renewInterval,
 		ClaimLimit: o.claimLimit, ResyncInterval: o.resyncInterval, HostGrace: o.hostGrace,
+		StatusFile: o.statusFile,
 	}, worker.Deps{
 		Store:   st,
 		Fence:   fence,
@@ -339,8 +342,11 @@ func newRootCommand() *cobra.Command {
 		"bpffs directory of the shared XDP dispatcher, read to find public receiving devices")
 	f.DurationVar(&o.hostGrace, "host-grace", worker.DefaultHostGrace,
 		"How long a VPC's host state must go unused before Worker reclaims it")
+	f.StringVar(&o.statusFile, "status-file", diag.DefaultPath,
+		"Root-only status snapshot that galactic-worker inspect prints; empty writes none")
 	f.Bool("build-info", false, "Print build information and exit")
 	f.BoolP("version", "V", false, "Print version and exit")
 	logOpts.BindFlags(cmd.PersistentFlags())
+	cmd.AddCommand(newInspectCommand(), newHandbackCommand())
 	return cmd
 }

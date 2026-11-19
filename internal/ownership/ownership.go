@@ -451,6 +451,28 @@ func (a *Authority) Read(scope string) (Record, error) {
 	return out, err
 }
 
+// Peek returns scope's record as last written, without taking the scope's
+// lock, for diagnostics that must never delay a writer. Records are replaced
+// atomically, so Peek sees a whole record, which may be stale by the time it
+// returns. A writer decides only with Read or under the lock.
+func (a *Authority) Peek(scope string) (Record, error) {
+	var r Record
+	if !scopeName.MatchString(scope) {
+		return r, fmt.Errorf("ownership: invalid scope name %q", scope)
+	}
+	b, err := os.ReadFile(filepath.Join(a.dir, scope+".json"))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return r, nil
+	case err != nil:
+		return r, fmt.Errorf("ownership: read %s: %w", scope, err)
+	}
+	if err := json.Unmarshal(b, &r); err != nil {
+		return r, fmt.Errorf("ownership: decode %s: %w", scope, err)
+	}
+	return r, nil
+}
+
 func ticket(scope string, r Record) Ticket {
 	return Ticket{Scope: scope, Owner: r.Owner, Generation: r.Generation, Revision: r.Revision, Resync: r.resync()}
 }
