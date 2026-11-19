@@ -149,3 +149,29 @@ After a deliberate change to the fixture or to an expectation, rerun with
 `BASELINE_WRITE_REFERENCE=1 task baseline:twice`. The reference is replaced
 only when both runs pass and agree. Commit the new
 `baseline/reference-results.json` with the change that caused it.
+
+## Running Galactic Worker on the fixture
+
+`scripts/worker-fabric.sh start` builds this checkout's `galactic-worker` and
+runs it as a process on `dfw-worker` and `sjc-worker`, with the cluster's
+admin kubeconfig and an allowlist that grants galactic-router
+`fabric.routes`. It is lab-only: Worker has no manifests yet. galactic-router
+finds Worker through `GALACTIC_ROUTER_WORKER_SOCKET`, and Worker's Fabric
+module then writes the tenant routes of every VPC on the node.
+
+| Command                         | Prints or does                                       |
+| ------------------------------- | ---------------------------------------------------- |
+| `worker-fabric.sh scopes NODE`  | The node's VPC fence records, with their owners      |
+| `worker-fabric.sh table NODE V` | The kernel table of VPC `V`'s VRF on the node        |
+| `worker-fabric.sh dump NODE V`  | VPC `V`'s `egress_route_table` entries, one per line |
+| `worker-fabric.sh stop`         | Stops Worker on both nodes                           |
+
+Worker takes over every VPC scope on its node and never hands one back, so
+after `stop` the router leaves those VPCs' tenant routes to a Worker that is
+gone. Run `task destroy` and `task deploy` before reusing the lab.
+
+The fixture's workers belong to different clusters, and Worker resolves a
+claim's destinations only within its own cluster. A claim on one worker
+toward a guest on the other therefore reports `DestinationNotFound`, so the
+fixture shows Fabric's tenant routes and traffic, not claim readiness across
+the two workers.

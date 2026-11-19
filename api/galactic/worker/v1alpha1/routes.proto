@@ -1,0 +1,73 @@
+// Copyright 2026 Datum Cloud, Inc.
+//
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+// The tenant route handoff from galactic-router to Galactic Worker.
+// docs/worker/contract.md describes it under "Tenant route handoff".
+//
+// galactic-router keeps learning tenant routes from EVPN and hands each one
+// to Worker, whose Fabric module writes it into the datapath. The service
+// shares the Worker socket, authentication and sessions; only a caller
+// allowed the fabric.routes capability may call it.
+
+syntax = "proto3";
+
+package galactic.worker.v1alpha1;
+
+option go_package = "go.datum.net/galactic/api/galactic/worker/v1alpha1;workerv1alpha1";
+
+// Routes takes the tenant routes galactic-router learns. The contract names
+// the service Routes.
+// buf:lint:ignore SERVICE_SUFFIX
+service Routes {
+  // Sync is a stream of route changes. Worker answers each request once it
+  // has recorded it. An open stream renews the session lease. A client sends
+  // every route it holds after it opens a stream, because Worker keeps routes
+  // only in memory.
+  rpc Sync(stream RoutesSyncRequest) returns (stream RoutesSyncResponse);
+}
+
+// TenantRoute is one tenant route: a prefix in a VPC's table, encapsulated
+// toward a SID.
+message TenantRoute {
+  // vpc is the base62 identifier of the VPC whose route target imported the
+  // route.
+  string vpc = 1;
+  // table_id is the kernel VRF table the caller resolved for vpc. Worker
+  // programs the route only while it equals the VPC's current table.
+  uint32 table_id = 2;
+  // prefix is the route's destination, in CIDR form.
+  string prefix = 3;
+  // sid is the IPv6 SID the route encapsulates toward.
+  string sid = 4;
+}
+
+// TenantRouteKey names a tenant route.
+message TenantRouteKey {
+  string vpc = 1;
+  // prefix is the route's destination, in CIDR form.
+  string prefix = 2;
+}
+
+message RoutesSyncRequest {
+  // sequence is chosen by the client and echoed in the response.
+  uint64 sequence = 1;
+  // upserts add routes or replace the route with the same key.
+  repeated TenantRoute upserts = 2;
+  // withdrawals remove routes. Withdrawing an unknown route succeeds.
+  repeated TenantRouteKey withdrawals = 3;
+}
+
+message RoutesSyncResponse {
+  // sequence is the request's sequence.
+  uint64 sequence = 1;
+  // rejected lists the routes of the request Worker did not record, with a
+  // machine reason. Every other route of the request is recorded.
+  repeated RejectedRoute rejected = 2;
+}
+
+message RejectedRoute {
+  TenantRouteKey key = 1;
+  string reason = 2;
+  string message = 3;
+}

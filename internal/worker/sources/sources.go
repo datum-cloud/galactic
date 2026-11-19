@@ -42,6 +42,10 @@ type Attachment struct {
 	// Admitted is false for an attachment being deleted, and for an
 	// EdgeAttachment whose Admitted condition is not True.
 	Admitted bool
+	// Addresses are the attachment's interface addresses from its spec,
+	// without their prefix lengths. A VPCAttachment whose guest manages its
+	// own addressing records none, and neither does an EdgeAttachment.
+	Addresses []netip.Addr
 }
 
 // Sources answers Worker's trusted-source lookups.
@@ -86,7 +90,7 @@ func (k Kube) Attachment(ctx context.Context, uid string) (Attachment, bool, err
 	if len(vas.Items) == 1 {
 		a := vas.Items[0]
 		return Attachment{UID: uid, Kind: KindVPCAttachment, VPC: a.Status.VPC, Node: a.Status.Node,
-			Admitted: a.DeletionTimestamp.IsZero()}, true, nil
+			Admitted: a.DeletionTimestamp.IsZero(), Addresses: interfaceAddresses(a.Spec.Interface.Addresses)}, true, nil
 	}
 	var eas galacticv1alpha1.EdgeAttachmentList
 	if err := k.Reader.List(ctx, &eas, client.MatchingFields{uidIndex: uid}); err != nil {
@@ -100,6 +104,21 @@ func (k Kube) Attachment(ctx context.Context, uid string) (Attachment, bool, err
 			Admitted: admitted}, true, nil
 	}
 	return Attachment{}, false, nil
+}
+
+// interfaceAddresses returns the addresses of CIDR-notation interface
+// addresses, skipping any that do not parse. Admission validates them, so a
+// skipped one is a value admission would refuse.
+func interfaceAddresses(in []cloudv1alpha1.IPAddress) []netip.Addr {
+	var out []netip.Addr
+	for _, a := range in {
+		if p, err := netip.ParsePrefix(string(a)); err == nil {
+			out = append(out, p.Addr().Unmap())
+		} else if addr, err := netip.ParseAddr(string(a)); err == nil {
+			out = append(out, addr.Unmap())
+		}
+	}
+	return out
 }
 
 // Locator implements Sources.

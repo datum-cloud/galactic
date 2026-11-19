@@ -55,6 +55,10 @@ type Destination struct {
 	Node string
 	// Locator is the SRv6 locator of the destination's node.
 	Locator netip.Prefix
+	// Addresses are the destination's addresses, from its trusted source.
+	// They are empty when the attachment records none, such as for a guest
+	// that manages its own addressing.
+	Addresses []netip.Addr
 }
 
 // DestinationID is the identity of a destination within a claim.
@@ -91,8 +95,15 @@ type DestinationState struct {
 	// the host, confirmed by read-back.
 	Programmed bool
 	// Ready is true when observed state, which the module did not write,
-	// shows the handoff can carry traffic.
+	// shows the handoff can carry traffic. It equals ForwardReady and
+	// ReturnReady both being true.
 	Ready bool
+	// ForwardReady is true when traffic from the handoff can reach the
+	// destination.
+	ForwardReady bool
+	// ReturnReady is true when traffic from the destination can come back to
+	// the handoff.
+	ReturnReady bool
 	// Reason explains Programmed or Ready being false, with a contract
 	// reason such as HandoffInterfaceMissing.
 	Reason  string

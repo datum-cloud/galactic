@@ -40,13 +40,16 @@ const (
 	CapabilityLocalRoutedLink = "local.routed_link"
 	CapabilityLocalSocket     = "local.socket"
 	CapabilityFabricSRv6      = "fabric.srv6"
+	// CapabilityFabricRoutes allows a caller to hand Worker tenant routes
+	// through the Routes service. Only galactic-router is granted it.
+	CapabilityFabricRoutes = "fabric.routes"
 )
 
 // Capabilities lists every capability in the order GetCapabilities reports
 // them.
 var Capabilities = []string{
 	CapabilityLocalTap, CapabilityLocalVethPair, CapabilityLocalRoutedLink,
-	CapabilityLocalSocket, CapabilityFabricSRv6,
+	CapabilityLocalSocket, CapabilityFabricSRv6, CapabilityFabricRoutes,
 }
 
 // HandoffCapability is the Local capability a handoff kind needs, or "" for
@@ -115,4 +118,32 @@ const (
 	ReasonAuthorizationRevoked       = "AuthorizationRevoked"
 	ReasonLeaseExpired               = "LeaseExpired"
 	ReasonReleased                   = "Released"
+	// ReasonDestinationAddressUnknown is a destination whose attachment
+	// records no address, such as a guest that manages its own addressing.
+	ReasonDestinationAddressUnknown = "DestinationAddressUnknown"
+	// ReasonForwardRouteMissing is a destination address no tenant route
+	// covers.
+	ReasonForwardRouteMissing = "ForwardRouteMissing"
+	// ReasonRouteWithdrawn is a destination address whose tenant route was
+	// withdrawn.
+	ReasonRouteWithdrawn = "RouteWithdrawn"
+	// ReasonRouteMismatch is a destination address whose covering route
+	// leads to another node's locator, or does not encapsulate.
+	ReasonRouteMismatch = "RouteMismatch"
+	// ReasonUnderlayUnreachable is a destination whose locator has no
+	// underlay route over an SRv6 uplink.
+	ReasonUnderlayUnreachable = "UnderlayUnreachable"
+	// ReasonNeighborUnresolved is a destination whose underlay next hop has
+	// no resolved neighbor, or whose programmed next hop is out of date.
+	ReasonNeighborUnresolved = "NeighborUnresolved"
+	// ReasonReturnPathNotProgrammed is a destination whose return traffic
+	// this node cannot yet decapsulate into the VPC's table.
+	ReasonReturnPathNotProgrammed = "ReturnPathNotProgrammed"
+)
+
+// Route rejection reasons, carried in RejectedRoute.
+const (
+	// ReasonMalformedRoute is a route whose VPC, prefix or SID does not
+	// parse.
+	ReasonMalformedRoute = "MalformedRoute"
 )

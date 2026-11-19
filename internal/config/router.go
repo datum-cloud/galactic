@@ -88,6 +88,16 @@ const (
 	// embedded GoBGP server's API in, read-only, as a unix socket for the
 	// gobgp CLI. Empty, the default, serves no API.
 	EnvRouterGoBGPAPIDir = "GALACTIC_ROUTER_GOBGP_API_DIR"
+
+	// EnvRouterWorkerSocket is Galactic Worker's socket, which galactic-router
+	// hands its tenant routes to. Empty, the default, hands Worker nothing.
+	EnvRouterWorkerSocket = "GALACTIC_ROUTER_WORKER_SOCKET"
+	// EnvRouterWorkerTokenFile is the projected ServiceAccount token
+	// galactic-router presents to Worker.
+	EnvRouterWorkerTokenFile = "GALACTIC_ROUTER_WORKER_TOKEN_FILE"
+	// DefaultRouterWorkerTokenFile is EnvRouterWorkerTokenFile's default, the
+	// path a pod mounts its Worker token at by convention.
+	DefaultRouterWorkerTokenFile = "/var/run/secrets/galactic-worker/token"
 )
 
 // --- RouterConfig ----------------------------------------------------------
@@ -130,6 +140,11 @@ type RouterConfig struct {
 
 	// GoBGPAPIDir is EnvRouterGoBGPAPIDir.
 	GoBGPAPIDir string
+
+	// WorkerSocket is EnvRouterWorkerSocket.
+	WorkerSocket string
+	// WorkerTokenFile is EnvRouterWorkerTokenFile.
+	WorkerTokenFile string
 }
 
 // NewRouterConfig creates a config resolver reading the GALACTIC_ROUTER
@@ -155,6 +170,8 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault("bmp_policy", DefaultRouterBMPPolicy)
 	v.SetDefault("bmp_statistics_interval", DefaultRouterBMPStatisticsInterval.String())
 	v.SetDefault("gobgp_api_dir", "")
+	v.SetDefault("worker_socket", "")
+	v.SetDefault("worker_token_file", DefaultRouterWorkerTokenFile)
 
 	cfg := &RouterConfig{
 		v:      v,
@@ -186,6 +203,8 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"bmp-policy", "bmp_policy"},
 		{"bmp-statistics-interval", "bmp_statistics_interval"},
 		{"gobgp-api-dir", "gobgp_api_dir"},
+		{"worker-socket", "worker_socket"},
+		{"worker-token-file", "worker_token_file"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -215,6 +234,8 @@ func (c *RouterConfig) readFields() {
 	c.BMPPolicy = c.v.GetString("bmp_policy")
 	c.BMPStatisticsInterval = c.v.GetDuration("bmp_statistics_interval")
 	c.GoBGPAPIDir = c.v.GetString("gobgp_api_dir")
+	c.WorkerSocket = c.v.GetString("worker_socket")
+	c.WorkerTokenFile = c.v.GetString("worker_token_file")
 }
 
 // Validate checks that the required configuration fields are set and within

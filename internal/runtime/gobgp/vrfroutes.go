@@ -6,6 +6,7 @@ package gobgp
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"maps"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.miloapis.com/instrumentation/metrics"
 
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
@@ -57,6 +59,29 @@ func installFailingReporter(router, kind string) func(int) {
 	return func(n int) { gauge.Set(float64(n)) }
 }
 
+// TenantRouteSink receives every tenant route the router installs or
+// withdraws, by VPC. galactic-worker's route handoff implements it.
+type TenantRouteSink interface {
+	Upsert(vpc string, tableID uint32, prefix netip.Prefix, sid net.IP)
+	Withdraw(vpc string, prefix netip.Prefix)
+	// ForgetTable withdraws every route of vpc it holds in tableID, for a VRF
+	// removed or moved to another table.
+	ForgetTable(vpc string, tableID uint32)
+}
+
+// VPCFence runs mutate under vpc's write fence. It returns an error wrapping
+// ownership.ErrWorkerOwned, and runs nothing, when a galactic-worker
+// incarnation owns vpc's scope; Worker then writes the VPC's tenant routes
+// from what the sink handed it.
+type VPCFence func(vpc string, mutate func() error) error
+
+// OwnershipFence returns the VPCFence of auth, the node's VPC write fence.
+func OwnershipFence(auth *ownership.Authority) VPCFence {
+	return func(vpc string, mutate func() error) error {
+		return auth.ExclusiveIf(ownership.VPCScope(vpc), ownership.RefuseWorkerOwned, mutate)
+	}
+}
+
 // vrfRouteKey names one tenant route: its prefix in one VRF's table.
 type vrfRouteKey struct {
 	tableID uint32
@@ -81,6 +106,17 @@ type vrfRoutes struct {
 	mu sync.Mutex
 	// pending maps each route whose last install failed to its gateway.
 	pending map[vrfRouteKey]net.IP
+	// pendingDel holds each route whose last removal failed.
+	pendingDel map[vrfRouteKey]struct{}
+
+	// vpcOf names the VPC whose VRF uses a table, or "" when it is unknown.
+	// sink, when set, is handed every route installed or withdrawn. fence,
+	// when set, guards every write; a write it refuses because Worker owns
+	// the VPC is Worker's to make. Each is nil when the router runs without
+	// Worker or the fence.
+	vpcOf func(tableID uint32) string
+	sink  TenantRouteSink
+	fence VPCFence
 
 	// report, when non-nil, is given len(pending) after every change.
 	report func(int)
@@ -93,10 +129,11 @@ type vrfRoutes struct {
 
 func newVRFRoutes(report func(int)) *vrfRoutes {
 	return &vrfRoutes{
-		pending:  make(map[vrfRouteKey]net.IP),
-		report:   report,
-		retry:    vrfRouteRetry,
-		debounce: vrfRouteDebounce,
+		pending:    make(map[vrfRouteKey]net.IP),
+		pendingDel: make(map[vrfRouteKey]struct{}),
+		report:     report,
+		retry:      vrfRouteRetry,
+		debounce:   vrfRouteDebounce,
 	}
 }
 
@@ -107,7 +144,8 @@ func (v *vrfRoutes) install(key vrfRouteKey, gw net.IP) {
 	v.installLocked(key, gw)
 }
 
-// withdraw stops retrying key and removes its route.
+// withdraw stops retrying key and removes its route. A removal that fails is
+// retried with the pending installs.
 func (v *vrfRoutes) withdraw(key vrfRouteKey) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -115,18 +153,60 @@ func (v *vrfRoutes) withdraw(key vrfRouteKey) error {
 		delete(v.pending, key)
 		v.reportLocked()
 	}
-	return vrfRouteDel(prefixToIPNet(key.prefix), key.tableID)
+	vpc := v.vpc(key.tableID)
+	if v.sink != nil && vpc != "" {
+		v.sink.Withdraw(vpc, key.prefix)
+	}
+	err := v.write(vpc, func() error { return vrfRouteDel(prefixToIPNet(key.prefix), key.tableID) })
+	if err != nil {
+		v.pendingDel[key] = struct{}{}
+		return err
+	}
+	delete(v.pendingDel, key)
+	return nil
 }
 
-// forgetTable stops retrying every route in tableID, for a VRF being removed.
-func (v *vrfRoutes) forgetTable(tableID uint32) {
+// vpc returns the VPC of tableID, or "".
+func (v *vrfRoutes) vpc(tableID uint32) string {
+	if v.vpcOf == nil {
+		return ""
+	}
+	return v.vpcOf(tableID)
+}
+
+// write runs mutate under vpc's fence. A write the fence refuses because
+// Worker owns the VPC succeeds without running, since Worker writes it from
+// what the sink was handed.
+func (v *vrfRoutes) write(vpc string, mutate func() error) error {
+	if v.fence == nil || vpc == "" {
+		return mutate()
+	}
+	err := v.fence(vpc, mutate)
+	if errors.Is(err, ownership.ErrWorkerOwned) {
+		slog.Debug("vrfRoutes: galactic-worker owns the VPC; leaving the route to it", "vpc", vpc)
+		return nil
+	}
+	return err
+}
+
+// forgetTable stops retrying every route in tableID, for a VRF of vpc being
+// removed or moved, and withdraws the routes handed to the sink for it.
+func (v *vrfRoutes) forgetTable(vpc string, tableID uint32) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.sink != nil && vpc != "" {
+		v.sink.ForgetTable(vpc, tableID)
+	}
 	changed := false
 	for key := range v.pending {
 		if key.tableID == tableID {
 			delete(v.pending, key)
 			changed = true
+		}
+	}
+	for key := range v.pendingDel {
+		if key.tableID == tableID {
+			delete(v.pendingDel, key)
 		}
 	}
 	if changed {
@@ -137,7 +217,14 @@ func (v *vrfRoutes) forgetTable(tableID uint32) {
 // installLocked logs the start and end of a failure rather than every attempt.
 func (v *vrfRoutes) installLocked(key vrfRouteKey, gw net.IP) {
 	_, wasFailing := v.pending[key]
-	if err := vrfRouteAdd(prefixToIPNet(key.prefix), gw, key.tableID); err != nil {
+	delete(v.pendingDel, key)
+	vpc := v.vpc(key.tableID)
+	if v.sink != nil && vpc != "" {
+		v.sink.Upsert(vpc, key.tableID, key.prefix, gw)
+	}
+	if err := v.write(vpc, func() error {
+		return vrfRouteAdd(prefixToIPNet(key.prefix), gw, key.tableID)
+	}); err != nil {
 		if !wasFailing {
 			slog.Warn("vrfRoutes: route install failed; retrying as the underlay changes",
 				"prefix", key.prefix, "gw", gw, "table", key.tableID, "err", err)
@@ -174,6 +261,21 @@ func (v *vrfRoutes) retryPending() {
 		v.mu.Lock()
 		if current, ok := v.pending[key]; ok && current.Equal(gw) {
 			v.installLocked(key, gw)
+		}
+		v.mu.Unlock()
+	}
+
+	v.mu.Lock()
+	deletes := maps.Clone(v.pendingDel)
+	v.mu.Unlock()
+	for key := range deletes {
+		v.mu.Lock()
+		if _, ok := v.pendingDel[key]; ok {
+			if err := v.write(v.vpc(key.tableID), func() error {
+				return vrfRouteDel(prefixToIPNet(key.prefix), key.tableID)
+			}); err == nil {
+				delete(v.pendingDel, key)
+			}
 		}
 		v.mu.Unlock()
 	}
