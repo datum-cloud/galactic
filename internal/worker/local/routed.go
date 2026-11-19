@@ -36,11 +36,10 @@ func (p *pass) ensureRouted(r routedWant, entries map[netip.Prefix]egressroutema
 			return err
 		}
 	}
+	// The host end comes up only once its guard is in place: up without
+	// it, the pod could send any source into the VPC.
 	hl := got.host
-	if err := placeInVRF(hl, p.vrfIdx, p.dry); err != nil {
-		return err
-	}
-	if err := p.ensureRoutes(r, hl.Attrs().Index, entries); err != nil {
+	if err := enslave(hl, p.vrfIdx, p.dry); err != nil {
 		return err
 	}
 	gv := localprog.LocalLtGuardValue{Count: uint32(len(r.addrs))}
@@ -50,7 +49,25 @@ func (p *pass) ensureRouted(r routedWant, entries map[netip.Prefix]egressroutema
 	if err := putRow(p.objs.Maps.Guard, uint32(hl.Attrs().Index), gv, p.dry, "guard of "+r.host); err != nil {
 		return err
 	}
-	return p.k.ensureFilter(hl, filterLinkGuard, p.dry)
+	guarded, err := p.k.filterCurrent(hl.Attrs().Index, filterLinkGuard)
+	if err != nil {
+		return err
+	}
+	if !guarded && !p.dry && hl.Attrs().Flags&net.FlagUp != 0 {
+		if err := netlink.LinkSetDown(hl); err != nil {
+			return fmt.Errorf("local: set unguarded %s down: %w", r.host, err)
+		}
+		if hl, err = netlink.LinkByName(r.host); err != nil {
+			return err
+		}
+	}
+	if err := p.k.ensureFilter(hl, filterLinkGuard, p.dry); err != nil {
+		return err
+	}
+	if err := setUp(hl, p.dry); err != nil {
+		return err
+	}
+	return p.ensureRoutes(r, hl.Attrs().Index, entries)
 }
 
 // createRouted creates r's link, its host end in the calling namespace and
@@ -65,30 +82,47 @@ func (k *Kernel) createRouted(h *host, r routedWant, podNS netns.NsHandle) (rout
 			return routedLink{}, fmt.Errorf("local: delete routed link %s: %w", r.host, err)
 		}
 	}
+	// The kernel takes no alias when it creates a link, so the host end is
+	// marked after; it comes up only once its guard is attached. A failure
+	// before the pod end is in place removes the link, and an unmarked link
+	// a crash left in between is Local's to replace (collision).
 	v := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: r.host, MTU: k.mtu()}, PeerName: r.pod}
 	if err := netlink.LinkAdd(v); err != nil {
 		return routedLink{}, fmt.Errorf("local: create routed link %s: %w", r.host, err)
+	}
+	got, err := movePodEnd(r, podNS)
+	if err != nil {
+		if l, lerr := netlink.LinkByName(r.host); lerr == nil {
+			_ = netlink.LinkDel(l)
+		}
+		return routedLink{}, err
+	}
+	return got, nil
+}
+
+// movePodEnd moves a new routed link's pod end into podNS, marks it and sets
+// it up there, and returns the link.
+func movePodEnd(r routedWant, podNS netns.NsHandle) (routedLink, error) {
+	hl, err := netlink.LinkByName(r.host)
+	if err != nil {
+		return routedLink{}, fmt.Errorf("local: look up new routed link %s: %w", r.host, err)
+	}
+	if err := netlink.LinkSetAlias(hl, alias(r.key)); err != nil {
+		return routedLink{}, fmt.Errorf("local: mark routed link %s: %w", r.host, err)
 	}
 	pl, err := netlink.LinkByName(r.pod)
 	if err != nil {
 		return routedLink{}, fmt.Errorf("local: look up new pod end %s: %w", r.pod, err)
 	}
 	if err := netlink.LinkSetNsFd(pl, int(podNS)); err != nil {
-		_ = netlink.LinkDel(pl)
 		return routedLink{}, fmt.Errorf("local: move %s into the pod: %w", r.pod, err)
-	}
-	l, err := netlink.LinkByName(r.host)
-	if err != nil {
-		return routedLink{}, fmt.Errorf("local: look up new routed link %s: %w", r.host, err)
-	}
-	if err := netlink.LinkSetAlias(l, alias(r.key)); err != nil {
-		return routedLink{}, fmt.Errorf("local: mark routed link %s: %w", r.host, err)
 	}
 	if err := setUpInPod(podNS, r.pod, alias(r.key)); err != nil {
 		return routedLink{}, err
 	}
-	if l, err = netlink.LinkByName(r.host); err != nil {
-		return routedLink{}, err
+	l, err := netlink.LinkByName(r.host)
+	if err != nil {
+		return routedLink{}, fmt.Errorf("local: look up new routed link %s: %w", r.host, err)
 	}
 	peer, err := netlink.VethPeerIndex(l.(*netlink.Veth))
 	if err != nil {
@@ -97,20 +131,21 @@ func (k *Kernel) createRouted(h *host, r routedWant, podNS netns.NsHandle) (rout
 	return routedLink{host: l, podIndex: peer}, nil
 }
 
-// placeInVRF enslaves l to vrfIdx and sets it up.
-func placeInVRF(l netlink.Link, vrfIdx int, dry bool) error {
-	name := l.Attrs().Name
-	if err := fix(dry, l.Attrs().MasterIndex != vrfIdx, func() error {
+// enslave enslaves l to vrfIdx.
+func enslave(l netlink.Link, vrfIdx int, dry bool) error {
+	return fix(dry, l.Attrs().MasterIndex != vrfIdx, func() error {
 		if err := netlink.LinkSetMasterByIndex(l, vrfIdx); err != nil {
-			return fmt.Errorf("local: enslave %s: %w", name, err)
+			return fmt.Errorf("local: enslave %s: %w", l.Attrs().Name, err)
 		}
 		return nil
-	}); err != nil {
-		return err
-	}
+	})
+}
+
+// setUp sets l up.
+func setUp(l netlink.Link, dry bool) error {
 	return fix(dry, l.Attrs().Flags&net.FlagUp == 0, func() error {
 		if err := netlink.LinkSetUp(l); err != nil {
-			return fmt.Errorf("local: set %s up: %w", name, err)
+			return fmt.Errorf("local: set %s up: %w", l.Attrs().Name, err)
 		}
 		return nil
 	})

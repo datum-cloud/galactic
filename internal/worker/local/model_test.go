@@ -6,6 +6,7 @@ package local
 
 import (
 	"net/netip"
+	"strconv"
 	"testing"
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
@@ -80,5 +81,34 @@ func TestDesire(t *testing.T) {
 	}
 	if !desire("v", nil).empty() {
 		t.Error("no claims want state")
+	}
+}
+
+// TestDesireReportsLinkKeyCollisions checks that when two claims of a VPC
+// derive the same link names, the first in claim key order gets the links
+// and the other is reported, rather than one silently taking the other's.
+func TestDesireReportsLinkKeyCollisions(t *testing.T) {
+	seen := map[string]string{}
+	var a, b string
+	for i := 0; a == ""; i++ {
+		uid := "uid-" + strconv.Itoa(i)
+		k := linkKey(uid)
+		if prev, ok := seen[k]; ok {
+			a, b = prev, uid
+		}
+		seen[k] = uid
+	}
+	if a > b {
+		a, b = b, a
+	}
+	for _, h := range []workerv1alpha1.Handoff{workerv1alpha1.Handoff_HANDOFF_VETH_PAIR,
+		workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK} {
+		ka := module.ClaimKey{VPC: "v", AttachmentUID: a}
+		kb := module.ClaimKey{VPC: "v", AttachmentUID: b}
+		m := desire("v", []module.Claim{{Key: kb, Handoff: h}, {Key: ka, Handoff: h}})
+		if len(m.pairs)+len(m.routed) != 1 || m.collisions[kb] != ka {
+			t.Fatalf("%s: links %d, collisions %v; want %s's links and %s reported", h,
+				len(m.pairs)+len(m.routed), m.collisions, a, b)
+		}
 	}
 }

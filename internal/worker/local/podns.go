@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -68,12 +69,17 @@ func (p *ProcPods) Open(podUID string) (netns.NsHandle, error) {
 	if err != nil {
 		return netns.None(), fmt.Errorf("local: read %s: %w", p.ProcRoot, err)
 	}
+	// The pod's lowest PID is its sandbox's first process, whose namespace
+	// is the pod's; a later process may have unshared its own.
+	var pids []int32
 	for _, e := range entries {
-		n, err := strconv.ParseInt(e.Name(), 10, 32)
-		if err != nil || n <= 0 {
-			continue
+		if n, err := strconv.ParseInt(e.Name(), 10, 32); err == nil && n > 0 {
+			pids = append(pids, int32(n))
 		}
-		h, err := p.openPID(podUID, int32(n))
+	}
+	slices.Sort(pids)
+	for _, n := range pids {
+		h, err := p.openPID(podUID, n)
 		if errors.Is(err, errOtherPod) {
 			continue
 		}
@@ -84,7 +90,7 @@ func (p *ProcPods) Open(podUID string) (netns.NsHandle, error) {
 		if p.last == nil {
 			p.last = map[string]int32{}
 		}
-		p.last[podUID] = int32(n)
+		p.last[podUID] = n
 		p.mu.Unlock()
 		return h, nil
 	}

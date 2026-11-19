@@ -52,7 +52,13 @@ static long (*lt_check_mtu)(void *ctx, __u32 ifindex, __u32 *mtu_len, __s32 len_
 #define LT_ETH_P_IPV6 0x86DD
 #define LT_IPPROTO_TCP 6
 #define LT_IPPROTO_UDP 17
+#define LT_IPPROTO_HOPOPTS 0
+#define LT_IPPROTO_ROUTING 43
 #define LT_IPPROTO_FRAGMENT 44
+#define LT_IPPROTO_DSTOPTS 60
+// LT_EXT_HDRS is how many extension headers lt_fragment walks before a
+// fragment header.
+#define LT_EXT_HDRS 4
 #define LT_IPPROTO_ICMPV6 58
 // BPF_MTU_CHK_SEGS: check each segment of a GSO packet against the MTU.
 #define LT_MTU_CHK_SEGS 1
@@ -84,6 +90,7 @@ enum lt_stat {
 	LT_STAT_PAIR_DELIVER,
 	LT_STAT_GUARD_PASS,
 	LT_STAT_GUARD_DROP,
+	LT_STAT_LINK_TOO_BIG,
 	LT_STAT_COUNT = 32,
 };
 
@@ -275,6 +282,32 @@ static LT_INLINE void lt_ports(struct __sk_buff *skb, struct usid_ip6hdr *ip6, _
 	}
 }
 
+// lt_fragment reports whether the IPv6 packet ip6 heads is a fragment: a
+// fragment header first, or after up to LT_EXT_HDRS hop-by-hop, routing or
+// destination options headers. A chain longer than that counts as one, so
+// it is refused rather than delivered unchecked.
+static LT_INLINE int lt_fragment(struct __sk_buff *skb, struct usid_ip6hdr *ip6)
+{
+	__u8 next = ip6->nexthdr;
+	__u32 off = sizeof(struct usid_ethhdr) + sizeof(struct usid_ip6hdr);
+
+#pragma unroll
+	for (int i = 0; i < LT_EXT_HDRS; i++) {
+		if (next == LT_IPPROTO_FRAGMENT)
+			return 1;
+		if (next != LT_IPPROTO_HOPOPTS && next != LT_IPPROTO_ROUTING && next != LT_IPPROTO_DSTOPTS)
+			return 0;
+		__u8 hdr[2];
+
+		if (bpf_skb_load_bytes(skb, off, hdr, sizeof(hdr)))
+			return 1;
+		next = hdr[0];
+		off += ((__u32) hdr[1] + 1) * 8;
+	}
+	return next == LT_IPPROTO_FRAGMENT || next == LT_IPPROTO_HOPOPTS || next == LT_IPPROTO_ROUTING ||
+	       next == LT_IPPROTO_DSTOPTS;
+}
+
 // lt_fits reports whether skb fits ifindex's MTU, segment by segment for a
 // GSO packet. A redirect does not enforce the receiver's MTU itself.
 static LT_INLINE int lt_fits(struct __sk_buff *skb, __u32 ifindex)
@@ -318,10 +351,13 @@ int local_rx(struct __sk_buff *skb)
 		lt_count(LT_STAT_RX_NOT_IPV6);
 		return TC_ACT_SHOT;
 	}
-	if (ip6->nexthdr == LT_IPPROTO_FRAGMENT) {
+	if (lt_fragment(skb, ip6)) {
 		lt_count(LT_STAT_RX_FRAGMENT);
 		return TC_ACT_SHOT;
 	}
+	ip6 = lt_ip6(skb);
+	if (!ip6)
+		return TC_ACT_SHOT;
 
 	struct lt_flow_key fk = {};
 	struct lt_flow_value fv = {};
@@ -411,6 +447,10 @@ int local_link_rx(struct __sk_buff *skb)
 	if (fv) {
 		__u32 rx = fv->rx_ifindex;
 
+		if (!lt_fits(skb, rx)) {
+			lt_count(LT_STAT_LINK_TOO_BIG);
+			return TC_ACT_SHOT;
+		}
 		tp_capture(skb, TP_DIR_EGRESS, ifindex, 0);
 		if (tp_decide(ifindex, TP_DIR_EGRESS, TP_PATH_PUBLIC_SERVICE)) {
 			lt_count(LT_STAT_LINK_REPLY_DENY);
@@ -425,6 +465,10 @@ int local_link_rx(struct __sk_buff *skb)
 	__builtin_memcpy(dst, ip6->daddr, 16);
 	if (!pair || !lt_nat_route(table, dst))
 		return TC_ACT_UNSPEC;
+	if (!lt_fits(skb, pair)) {
+		lt_count(LT_STAT_LINK_TOO_BIG);
+		return TC_ACT_SHOT;
+	}
 
 	tp_capture(skb, TP_DIR_EGRESS, ifindex, 0);
 	if (tp_decide(ifindex, TP_DIR_EGRESS, TP_PATH_PUBLIC_NAT)) {
@@ -469,10 +513,13 @@ int local_pair_rx(struct __sk_buff *skb)
 		lt_count(LT_STAT_PAIR_NOT_IPV6);
 		return TC_ACT_SHOT;
 	}
-	if (ip6->nexthdr == LT_IPPROTO_FRAGMENT) {
+	if (lt_fragment(skb, ip6)) {
 		lt_count(LT_STAT_PAIR_FRAGMENT);
 		return TC_ACT_SHOT;
 	}
+	ip6 = lt_ip6(skb);
+	if (!ip6)
+		return TC_ACT_SHOT;
 	__builtin_memcpy(gk.addr, ip6->daddr, 16);
 
 	struct lt_guest_value *gv = bpf_map_lookup_elem(&lt_guest, &gk);
@@ -503,10 +550,19 @@ int local_pair_rx(struct __sk_buff *skb)
 	return bpf_redirect_neigh(link, &p, sizeof(p), 0);
 }
 
+// lt_link_scoped reports whether addr is link-local unicast or multicast:
+// an address that never leaves the link the packet is on.
+static LT_INLINE int lt_link_scoped(const __u8 *addr)
+{
+	return addr[0] == 0xff || (addr[0] == 0xfe && (addr[1] & 0xc0) == 0x80);
+}
+
 // local_link_guard runs on the host end of a pod-to-host routed link. The link
 // joins the pod to the tenant VRF, so a source it was not given would let the
-// pod speak as any address in the VPC. Link-local and unspecified sources
-// carry Neighbor Discovery on the link itself; anything else not IPv6 is
+// pod speak as any address in the VPC. A link-local source is admitted only
+// toward a link-local or multicast destination, and the unspecified source
+// only for ICMPv6 toward one, which is how Neighbor Discovery and MLD use
+// them; neither is forwarded into the VPC. Anything else not IPv6 is
 // dropped.
 SEC("tc")
 int local_link_guard(struct __sk_buff *skb)
@@ -526,7 +582,10 @@ int local_link_guard(struct __sk_buff *skb)
 		lt_count(LT_STAT_GUARD_DROP);
 		return TC_ACT_SHOT;
 	}
-	if ((ip6->saddr[0] == 0xfe && (ip6->saddr[1] & 0xc0) == 0x80) || lt_zero16(ip6->saddr)) {
+	int link_dst = lt_link_scoped(ip6->daddr);
+
+	if (link_dst && ((ip6->saddr[0] == 0xfe && (ip6->saddr[1] & 0xc0) == 0x80) ||
+			 (lt_zero16(ip6->saddr) && ip6->nexthdr == LT_IPPROTO_ICMPV6))) {
 		lt_count(LT_STAT_GUARD_PASS);
 		return TC_ACT_UNSPEC;
 	}
