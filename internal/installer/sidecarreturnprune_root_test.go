@@ -19,14 +19,18 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 // The fixture TestPruneRetiredSidecarReturn writes: a retired row whose VPC
-// resolves, a retired row whose VPC does not, a CNI row in a host table, and
-// an infra row no retired route names.
+// resolves and has no VRF, a retired row whose VPC resolves and still has its
+// host VRF, a retired row whose VPC does not resolve, a CNI row in a host
+// table, and an infra row no retired route names.
 const (
 	pruneTestBlock      = uint64(0x20010db88002)
 	pruneTestRetired    = uint16(5)
+	pruneTestRestored   = uint16(8)
+	pruneTestVRFTable   = 200
 	pruneTestUnknown    = uint16(7)
 	pruneTestCNI        = uint16(6)
 	pruneTestHostTable  = 100
@@ -105,6 +109,7 @@ func TestPruneRetiredSidecarReturn(t *testing.T) {
 		table    uint32
 	}{
 		{pruneTestRetired, sidecarReturnTableBase + uint32(pruneTestRetired)},
+		{pruneTestRestored, sidecarReturnTableBase + uint32(pruneTestRestored)},
 		{pruneTestUnknown, sidecarReturnTableBase + uint32(pruneTestUnknown)},
 		{pruneTestCNI, pruneTestHostTable},
 	} {
@@ -118,12 +123,25 @@ func TestPruneRetiredSidecarReturn(t *testing.T) {
 		}
 	}
 
-	vpcOf := func(argument uint16) (string, bool) { return "vpcone", argument == pruneTestRetired }
+	// vpctwo's host VRF still exists, so its row must point at that VRF again.
+	if err := netlink.LinkAdd(&netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: intf.GenerateInterfaceNameVRF("vpctwo")},
+		Table: pruneTestVRFTable}); err != nil {
+		t.Fatal(err)
+	}
+	vpcOf := func(argument uint16) (string, bool) {
+		switch argument {
+		case pruneTestRetired:
+			return "vpcone", true
+		case pruneTestRestored:
+			return "vpctwo", true
+		}
+		return "", false
+	}
 	pruned, err := pruneRetiredSidecarReturn(context.Background(), pinDir, vpcOf)
 	if err != nil {
 		t.Fatalf("pruneRetiredSidecarReturn: %v", err)
 	}
-	want := retiredSidecarReturnPruned{vrfRows: 1, routes: 1, neighbors: 1, infraRows: 1, vrfRowsKept: 1}
+	want := retiredSidecarReturnPruned{vrfRows: 2, routes: 1, neighbors: 1, infraRows: 1, vrfRowsKept: 1}
 	if pruned != want {
 		t.Errorf("pruned = %+v, want %+v", pruned, want)
 	}
@@ -146,6 +164,11 @@ func checkRetiredSidecarReturnPruned(
 	t.Helper()
 	if _, ok, _ := registry.VRF.Get(pruneTestBlock, pruneTestRetired); ok {
 		t.Error("retired vrf_table row kept")
+	}
+	if row, ok, err := registry.VRF.Get(pruneTestBlock, pruneTestRestored); err != nil || !ok ||
+		row.VRFTableID != pruneTestVRFTable || row.EgressKind != usidmap.EgressKindVeth {
+		t.Errorf("retired row of a VPC with a VRF = %+v (present %t, err %v), want it pointed at table %d",
+			row, ok, err, pruneTestVRFTable)
 	}
 	for _, a := range []uint16{pruneTestUnknown, pruneTestCNI} {
 		if _, ok, err := registry.VRF.Get(pruneTestBlock, a); err != nil || !ok {
