@@ -44,6 +44,7 @@ import (
 	"go.datum.net/galactic/internal/reconcile"
 	galacticruntime "go.datum.net/galactic/internal/runtime"
 	"go.datum.net/galactic/internal/runtime/gobgp"
+	"go.datum.net/galactic/internal/runtime/workerroutes"
 	"go.datum.net/galactic/internal/serviceroute"
 	tpnode "go.datum.net/galactic/internal/trafficpolicy/node"
 	"go.datum.net/galactic/pkg/serviceplan"
@@ -87,6 +88,27 @@ func prepareGoBGPAPIDir(dir string) error {
 		return fmt.Errorf("%s: %w", config.EnvRouterGoBGPAPIDir, err)
 	}
 	return nil
+}
+
+// workerHandoff returns where tenant routes go besides the datapath. Every
+// route is written under its VPC's write fence, which leaves a VPC
+// galactic-worker owns to Worker; without the fence directory the router
+// writes directly, as before Worker existed. With a Worker socket configured,
+// every route is also handed to Worker, by a handoff that runs until ctx is
+// done.
+func workerHandoff(ctx context.Context, cfg *config.RouterConfig) (gobgp.TenantRouteSink, gobgp.VPCFence) {
+	var fence gobgp.VPCFence
+	if auth, err := ownership.Open(ownership.DefaultDir); err != nil {
+		ctrl.Log.Error(err, "VPC write fence unavailable: tenant routes are written without it")
+	} else {
+		fence = gobgp.OwnershipFence(auth)
+	}
+	if cfg.WorkerSocket == "" {
+		return nil, fence
+	}
+	h := workerroutes.New(cfg.WorkerSocket, cfg.WorkerTokenFile)
+	go h.Run(ctx)
+	return h, fence
 }
 
 // runCmd contains the application startup logic. It reads configuration from
@@ -217,7 +239,7 @@ func runCmd(cfg *config.RouterConfig) error {
 		return err
 	}
 	factory := gobgp.NewRuntimeFactory(int32(bgpListenPort), cfg.Reflector, bgpLocalAddr, peerEventEmitter, bmpCfg,
-		gobgp.WithAPIDir(cfg.GoBGPAPIDir))
+		gobgp.WithAPIDir(cfg.GoBGPAPIDir), gobgp.WithWorkerHandoff(workerHandoff(ctx, cfg)))
 
 	// Create runtime manager.
 	runtimeMgr := galacticruntime.NewRuntimeManager(factory)
@@ -587,6 +609,10 @@ func newRootCommand() *cobra.Command {
 		"Interval between BMP statistics reports per peer; 0 disables them")
 	cmd.Flags().String("gobgp-api-dir", "",
 		"Directory to serve the GoBGP API in, read-only, as a unix socket per BGPRouter; empty serves none")
+	cmd.Flags().String("worker-socket", "",
+		"Galactic Worker socket to hand tenant routes to; empty hands Worker nothing")
+	cmd.Flags().String("worker-token-file", config.DefaultRouterWorkerTokenFile,
+		"Projected ServiceAccount token, audience galactic-worker, presented to Worker")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 

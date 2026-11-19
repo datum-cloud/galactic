@@ -168,7 +168,7 @@ func TestVRFRoutes_ForgetTable(t *testing.T) {
 
 	v.install(tenantRoute, tenantSID)
 	v.install(otherVRF, tenantSID)
-	v.forgetTable(tenantRoute.tableID)
+	v.forgetTable("", tenantRoute.tableID)
 	if failing != 1 {
 		t.Errorf("failing = %d after forgetting one of two VRFs, want 1", failing)
 	}

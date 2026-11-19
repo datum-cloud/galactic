@@ -37,7 +37,11 @@ var vrfRouteDelIfSID = srv6.RouteEgressDelIfSID
 // dropped.
 func (r *GoBGPRuntime) withdrawMovedVRFRoutes(b *gobgpserver.BgpServer, m movedVRFTable) {
 	if r.vrf != nil {
-		r.vrf.forgetTable(m.tableID)
+		vpc, err := vrfVPC(m.name)
+		if err != nil {
+			vpc = ""
+		}
+		r.vrf.forgetTable(vpc, m.tableID)
 	}
 	rts := make(map[string]struct{}, len(m.importRTs))
 	for _, rt := range m.importRTs {
@@ -61,7 +65,9 @@ func (r *GoBGPRuntime) withdrawMovedVRFRoutes(b *gobgpserver.BgpServer, m movedV
 				continue
 			}
 			prefix := addrToIPNet(ipPrefix.IPPrefix, int(ipPrefix.IPPrefixLength))
-			if err := vrfRouteDelIfSID(prefix, m.tableID, evpnGateway(path.Attrs)); err != nil {
+			if err := r.writeMovedVRF(m.name, func() error {
+				return vrfRouteDelIfSID(prefix, m.tableID, evpnGateway(path.Attrs))
+			}); err != nil {
 				slog.Error("withdrawMovedVRFRoutes: route delete failed",
 					"vrf", m.name, "prefix", prefix, "table", m.tableID, "err", err)
 				continue
@@ -91,4 +97,18 @@ func hasRouteTarget(attrs []bgp.PathAttributeInterface, rts map[string]struct{})
 		}
 	}
 	return false
+}
+
+// writeMovedVRF runs mutate under the write fence of the VPC of the VRF named
+// vrfName. galactic-worker removes the old table's entries of a VPC it owns
+// itself, so mutate does not run then.
+func (r *GoBGPRuntime) writeMovedVRF(vrfName string, mutate func() error) error {
+	if r.vrf == nil {
+		return mutate()
+	}
+	vpc, err := vrfVPC(vrfName)
+	if err != nil {
+		vpc = ""
+	}
+	return r.vrf.write(vpc, mutate)
 }

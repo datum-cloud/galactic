@@ -74,6 +74,10 @@ type GoBGPRuntime struct {
 	// it, so the shared watcher dispatches a best-path event in constant time
 	// rather than scanning every VRF. A node can host thousands.
 	rtIndex map[string]uint32
+	// tableVPC maps each table in rtIndex to the VPC whose VRF uses it,
+	// guarded by rtIndexMu. Tenant routes are fenced and handed to
+	// galactic-worker by VPC.
+	tableVPC map[uint32]string
 	// appliedAdvertisements holds the EVPN advertisements, by name, whose
 	// routes the last successful applyEVPN converged, for status reporting.
 	advertisementMu       sync.Mutex
@@ -147,6 +151,15 @@ type FactoryOption func(*factoryOptions)
 
 type factoryOptions struct {
 	apiDir string
+	sink   TenantRouteSink
+	fence  VPCFence
+}
+
+// WithWorkerHandoff hands every tenant route each created runtime installs or
+// withdraws to sink, and writes each route under fence, leaving a VPC that
+// galactic-worker owns to Worker. A nil sink or fence leaves that part out.
+func WithWorkerHandoff(sink TenantRouteSink, fence VPCFence) FactoryOption {
+	return func(o *factoryOptions) { o.sink, o.fence = sink, fence }
 }
 
 // WithAPIDir serves each created runtime's GoBGP API, read-only, on a unix
@@ -178,7 +191,7 @@ func NewRuntimeFactory(
 	}
 	return func(key types.NamespacedName) (runtime.RouterRuntime, error) {
 		router := key.String()
-		return &GoBGPRuntime{
+		r := &GoBGPRuntime{
 			key:                   key,
 			server:                newServer(Config{APISocket: apiSocketPath(fo.apiDir, key)}),
 			listenPort:            listenPort,
@@ -192,14 +205,24 @@ func NewRuntimeFactory(
 			appliedVRFImportRTs:   make(map[string][]string),
 			vrfStatus:             make(map[string]model.VRFStatus),
 			rtIndex:               make(map[string]uint32),
+			tableVPC:              make(map[uint32]string),
 			appliedAdvertisements: make(map[string]model.DesiredAdvertisement),
 			appliedRoutes:         make(map[evpnRouteKey]evpnRoute),
 			plain:                 newPlainRoutes(installFailingReporter(router, "plain")),
 			vrf:                   newVRFRoutes(installFailingReporter(router, "vrf")),
 			observer:              observer,
 			bmp:                   newBMPKeeper(bmp, key.String()),
-		}, nil
+		}
+		r.vrf.vpcOf, r.vrf.sink, r.vrf.fence = r.vpcOfTable, fo.sink, fo.fence
+		return r, nil
 	}
+}
+
+// vpcOfTable returns the VPC whose VRF uses tableID, or "".
+func (r *GoBGPRuntime) vpcOfTable(tableID uint32) string {
+	r.rtIndexMu.RLock()
+	defer r.rtIndexMu.RUnlock()
+	return r.tableVPC[tableID]
 }
 
 // Apply converges the running GoBGP instance toward desired.
@@ -396,7 +419,11 @@ func (r *GoBGPRuntime) applyVRFs(
 		if _, ok := desired[name]; !ok {
 			deleteVRF(ctx, b, name)
 			if r.vrf != nil {
-				r.vrf.forgetTable(r.appliedVRFs[name])
+				vpc, err := vrfVPC(name)
+				if err != nil {
+					vpc = ""
+				}
+				r.vrf.forgetTable(vpc, r.appliedVRFs[name])
 			}
 			delete(r.appliedVRFs, name)
 			delete(r.appliedVRFImportRTs, name)
@@ -410,6 +437,7 @@ func (r *GoBGPRuntime) applyVRFs(
 	}
 
 	rtIndex := make(map[string]uint32, len(vrfs))
+	tableVPC := make(map[uint32]string, len(vrfs))
 	needsBackfill := false
 	var moved []movedVRFTable
 
@@ -471,10 +499,14 @@ func (r *GoBGPRuntime) applyVRFs(
 		for _, rt := range v.ImportRouteTargets {
 			rtIndex[rt] = tableID
 		}
+		if vpc, err := vrfVPC(v.Name); err == nil {
+			tableVPC[tableID] = vpc
+		}
 	}
 
 	r.rtIndexMu.Lock()
 	r.rtIndex = rtIndex
+	r.tableVPC = tableVPC
 	r.rtIndexMu.Unlock()
 
 	// Only once the index no longer names a moved VRF's old table, so the

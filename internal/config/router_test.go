@@ -58,6 +58,12 @@ func TestRouterConfigDefaults(t *testing.T) {
 	if cfg.GoBGPAPIDir != "" {
 		t.Errorf("GoBGPAPIDir = %q, want empty", cfg.GoBGPAPIDir)
 	}
+	if cfg.WorkerSocket != "" {
+		t.Errorf("WorkerSocket = %q, want empty (no route handoff by default)", cfg.WorkerSocket)
+	}
+	if cfg.WorkerTokenFile != DefaultRouterWorkerTokenFile {
+		t.Errorf("WorkerTokenFile = %q, want %q", cfg.WorkerTokenFile, DefaultRouterWorkerTokenFile)
+	}
 }
 
 func TestRouterConfigEnvOverride(t *testing.T) {
@@ -73,8 +79,13 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvRouterBMPPolicy, "local-rib")
 	t.Setenv(EnvRouterBMPStatisticsInterval, "0s")
 	t.Setenv(EnvRouterGoBGPAPIDir, "/run/galactic-router")
+	t.Setenv(EnvRouterWorkerSocket, "/run/galactic-worker/worker.sock")
+	t.Setenv(EnvRouterWorkerTokenFile, "/token")
 
 	cfg := NewRouterConfig()
+	if cfg.WorkerSocket != "/run/galactic-worker/worker.sock" || cfg.WorkerTokenFile != "/token" {
+		t.Errorf("Worker socket and token = %q, %q", cfg.WorkerSocket, cfg.WorkerTokenFile)
+	}
 
 	if cfg.NodeName != testEnvNode {
 		t.Errorf("NodeName = %q, want %q", cfg.NodeName, testEnvNode)
