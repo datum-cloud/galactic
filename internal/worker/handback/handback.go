@@ -32,6 +32,9 @@ import (
 	"go.datum.net/galactic/internal/worker/module"
 )
 
+// errTaken is a scope another writer took after Run relinquished it.
+var errTaken = errors.New("handback: another writer took the scope")
+
 // ErrWorkerRunning is returned while a Worker answers on the socket.
 var ErrWorkerRunning = errors.New("handback: a galactic-worker answers on the socket; stop it first")
 
@@ -151,12 +154,18 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		// since keeps it.
 		err = cfg.Fence.ExclusiveIf(scope, func(r ownership.Record) error {
 			if !ownership.HandedBack(r.Owner) {
-				return fmt.Errorf("handback: %q took %s first; leaving it", r.Owner, scope)
+				return fmt.Errorf("%w: %q", errTaken, r.Owner)
 			}
 			return nil
 		}, func() error {
 			return cfg.Local.Release(ctx, module.Scope{VPC: vpc})
 		})
+		if errors.Is(err, errTaken) {
+			// The new owner keeps what is there; a Worker that took it back
+			// fails the run below, before its claims or pins are touched.
+			cfg.Log.Info("left a scope another writer took after the handback", "scope", scope, "error", err)
+			continue
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("handback: remove Local state of %s: %w", scope, err))
 			continue

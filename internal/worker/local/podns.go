@@ -129,6 +129,12 @@ func (p *ProcPods) openPID(podUID string, pid int32) (netns.NsHandle, error) {
 		return netns.None(), errOtherPod
 	}
 	h, err := netns.GetFromPath(filepath.Join(p.ProcRoot, strconv.Itoa(int(pid)), "ns", "net"))
+	if errors.Is(err, os.ErrPermission) {
+		// The kernel's ptrace access check refused the open: Worker lacks a
+		// capability the pod's process holds. Say so rather than report a
+		// missing pod.
+		return netns.None(), fmt.Errorf("local: open pod %s's network namespace: %w", podUID, err)
+	}
 	if err != nil {
 		return netns.None(), errOtherPod
 	}
