@@ -30,41 +30,41 @@ type HostLinks struct {
 func NewHostLinks() *HostLinks {
 	return &HostLinks{
 		masterless: instmetrics.NewGauge(prometheus.GaugeOpts{
-			Namespace: sidecarReturnNamespace,
+			Namespace: galacticNamespace,
 			Subsystem: hostLinkSubsystem,
 			Name:      "host_links_masterless",
 			Help: "Galactic host links with no VRF master after the last repair pass: " +
 				"their VPC's VRF is gone or re-enslaving failed, so their guest is routed outside the VPC.",
 		}),
 		reenslaved: instmetrics.NewCounter(prometheus.CounterOpts{
-			Namespace: sidecarReturnNamespace,
+			Namespace: galacticNamespace,
 			Subsystem: hostLinkSubsystem,
 			Name:      "host_link_reenslaved_total",
 			Help:      "Galactic host links the repair pass found with no VRF master and enslaved back to their VPC's VRF.",
 		}),
 		failures: instmetrics.NewCounter(prometheus.CounterOpts{
-			Namespace: sidecarReturnNamespace,
+			Namespace: galacticNamespace,
 			Subsystem: hostLinkSubsystem,
 			Name:      "host_link_repair_failures_total",
 			Help: "Host link repair passes that failed. A pass that could not take the VRF lock or list links " +
 				"leaves host_links_masterless at its last value.",
 		}),
 		staleTapsPending: instmetrics.NewGauge(prometheus.GaugeOpts{
-			Namespace: sidecarReturnNamespace,
+			Namespace: galacticNamespace,
 			Subsystem: hostLinkSubsystem,
 			Name:      "stale_taps_pending",
 			Help: "Tenant taps the last stale tap pass found detached with no VPCAttachment and no " +
 				"BGPAdvertisement, awaiting confirmation by the next pass or kept after a failed removal.",
 		}),
 		staleTapsReclaimed: instmetrics.NewCounter(prometheus.CounterOpts{
-			Namespace: sidecarReturnNamespace,
+			Namespace: galacticNamespace,
 			Subsystem: hostLinkSubsystem,
 			Name:      "stale_taps_reclaimed_total",
 			Help: "Tenant taps removed, with their eBPF interface rows, after outliving their VPCAttachment " +
 				"and BGPAdvertisement.",
 		}),
 		staleTapFailures: instmetrics.NewCounter(prometheus.CounterOpts{
-			Namespace: sidecarReturnNamespace,
+			Namespace: galacticNamespace,
 			Subsystem: hostLinkSubsystem,
 			Name:      "stale_tap_reclaim_failures_total",
 			Help: "Stale tap passes that failed. A pass that could not list links, BGPAdvertisements or " +
