@@ -172,6 +172,11 @@ type Worker struct {
 	shutting atomic.Bool
 	started  atomic.Bool
 	wg       sync.WaitGroup
+
+	// subscribed, when set, runs after Observe registers a subscriber and
+	// before it queues the first snapshot. Tests use it to publish in
+	// between, and set it before any Observe starts.
+	subscribed func()
 }
 
 // New returns a Worker. Start loads desired state and starts reconciling.
