@@ -85,12 +85,14 @@ table() {
 }
 
 # dump prints NODE's egress_route_table entries in VPC's table, one per line:
-# prefix, SID, link index and destination MAC.
+# prefix, SID, link index and destination MAC. It needs bpftool on the host.
 dump() {
   local node=$1 vpc=$2 tbl pid
   tbl=$(table "${node}" "${vpc}")
   pid=$(docker inspect -f '{{.State.Pid}}' "${node}")
-  sudo nsenter -t "${pid}" -m bpftool -j map dump pinned "${PIN_DIR}/egress_route_table" |
+  # The node's bpffs is reachable through its /proc root; bpftool runs on the
+  # host, since the node image has none.
+  sudo bpftool -j map dump pinned "/proc/${pid}/root${PIN_DIR}/egress_route_table" |
     jq -r --argjson t "${tbl}" '
       .[] | .formatted | select(.key.table_id == $t)
       | [.key.family, .key.prefixlen - 40, (.key.addr | @json), (.value.sid | @json),
