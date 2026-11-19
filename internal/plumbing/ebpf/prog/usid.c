@@ -1542,6 +1542,27 @@ struct {
 	__array(values, struct egress_shard_group_inner);
 } egress_shard_groups SEC(".maps");
 
+// struct egress_local_shard_value is one egress_local_shard row: the VPC whose
+// VRF table keys it has a ready service-internal veth pair into this node's own
+// NAT shard. shard_sid is that shard's base SID, pair_ifindex the pair's tenant
+// end. flags is reserved and zero.
+struct egress_local_shard_value {
+	__u8 shard_sid[16];
+	__u32 pair_ifindex;
+	__u32 flags;
+};
+
+// egress_local_shard: one row per VRF table whose tenants may use this node's
+// own NAT shard. Galactic Worker writes a row while the VPC's pair is ready
+// and removes it when it is not; usid_egress and galactic-cni's egress sweep
+// only read it.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u32);
+	__type(value, struct egress_local_shard_value);
+} egress_local_shard SEC(".maps");
+
 // egress_shard_pin: see struct egress_shard_pin_key. An LRU, so a pin is
 // evicted under pressure rather than refusing a new one. An evicted pin falls
 // back to the Maglev table, which usually gives the same answer anyway. Sized
