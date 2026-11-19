@@ -162,7 +162,9 @@ func (c *Claims) Observe(st *workerv1alpha1.ClaimStatus) {
 	}
 	if s := c.claims[vpc]; s != nil && sameKey(s.key, st.GetKey()) {
 		if st.GetReleased() {
-			s.status = nil
+			// Worker removed the claim, for example when its lease
+			// expired: the next pass requests it again.
+			s.status, s.gen, s.spec = nil, 0, nil
 			return
 		}
 		if st.GetGeneration() >= s.gen {
@@ -323,7 +325,12 @@ func (c *Claims) ensureLocked(ctx context.Context, vpc string, w wantedClaim) er
 			s.gen++
 		}
 	default:
-		return nil
+		// Re-assert the claim each pass. Worker answers a repeated
+		// Request at the current generation and spec with the claim's
+		// status and changes nothing, and recreates a claim it lost, as
+		// after a lease expiry the Observe stream did not report.
+		op = "reassert"
+		st, err = c.client.Request(ctx, w.key, s.gen, w.spec)
 	}
 	c.metrics.operation(op, err)
 	if err != nil {
@@ -333,6 +340,9 @@ func (c *Claims) ensureLocked(ctx context.Context, vpc string, w wantedClaim) er
 		}
 		s.refused = reason
 		switch reason {
+		case workerv1alpha1.ReasonClaimNotFound:
+			// Updated a claim Worker no longer has: request it anew.
+			s.gen, s.spec, s.status = 0, nil, nil
 		case workerv1alpha1.ReasonClaimExists, workerv1alpha1.ReasonGenerationConflict,
 			workerv1alpha1.ReasonStaleGeneration:
 			// The claim exists at a generation this container does not

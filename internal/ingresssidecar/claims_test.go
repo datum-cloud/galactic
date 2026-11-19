@@ -196,13 +196,37 @@ func TestClaimsPerVPCAndRouteChoice(t *testing.T) {
 		t.Fatalf("Ready = %v", err)
 	}
 
-	// A sync with nothing changed calls nothing.
+	// A sync with nothing changed only re-asserts each claim at its
+	// current generation.
 	before := len(w.calls)
 	if err := c.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(w.calls) != before {
-		t.Fatalf("an unchanged sync called %v", w.calls[before:])
+	if got := w.calls[before:]; !slices.Equal(got, []string{"request vpcA 1", "request vpcB 1"}) &&
+		!slices.Equal(got, []string{"request vpcB 1", "request vpcA 1"}) {
+		t.Fatalf("an unchanged sync called %v, want one re-assertion per claim", got)
+	}
+
+	// Worker loses VPC A's claim, as when its lease expired while the
+	// Observe stream was down: the next re-assertion recreates it.
+	delete(w.claims, testVPCA)
+	if err := c.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if w.claims[testVPCA] == nil {
+		t.Fatal("a claim Worker lost was not requested again")
+	}
+
+	// Worker reports a claim released: the next pass requests it anew.
+	gone := proto.Clone(w.claims[testVPCB]).(*workerv1alpha1.ClaimStatus)
+	gone.Released = true
+	delete(w.claims, testVPCB)
+	c.Observe(gone)
+	if err := c.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.claims[testVPCB].GetGeneration(); got != 1 {
+		t.Fatalf("VPC B after its release: generation %d, want a new claim at 1", got)
 	}
 
 	// The Local backend moves off-node: Worker resolves it to Fabric, and

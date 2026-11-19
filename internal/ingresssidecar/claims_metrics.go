@@ -67,8 +67,9 @@ func NewClaimMetrics() *ClaimMetrics {
 		operations: metrics.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Name:      "worker_claim_operations_total",
-			Help: "Worker claim calls by operation (request, update or release) and outcome: success, or " +
-				"the reason Worker gave for refusing it.",
+			Help: "Worker claim calls by operation (request, update, release, or reassert, the repeated " +
+				"Request each sweep that recreates a claim Worker lost) and outcome: success, or the reason " +
+				"Worker gave for refusing it.",
 		}, []string{operationLabel, labels.Outcome}),
 	}
 	m.capabilities.Reset()
