@@ -482,13 +482,16 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 func (w *Worker) resolveDestination(ctx context.Context, vpc string, own netip.Prefix,
 	pref workerv1alpha1.Mode, d *workerv1alpha1.Destination,
 	locator func(string) (netip.Prefix, error), de *destEval) (module.Destination, error) {
-	if sh, isShard := d.GetTarget().(*workerv1alpha1.Destination_Shard); isShard {
-		return w.resolveShard(ctx, vpc, own, pref, d, sh.Shard, de)
+	switch t := d.GetTarget().(type) {
+	case *workerv1alpha1.Destination_Shard:
+		return w.resolveShard(ctx, vpc, own, pref, d, t.Shard, de)
+	case *workerv1alpha1.Destination_Backend:
+		return w.resolveBackend(ctx, vpc, own, pref, d, t.Backend, locator, de)
 	}
 	t, ok := d.GetTarget().(*workerv1alpha1.Destination_Attachment)
 	if !ok {
 		de.reason = workerv1alpha1.ReasonDestinationKindUnsupported
-		de.msg = "backend destinations are resolved by a later Task (#1438)"
+		de.msg = "the destination names no attachment, shard or backend"
 		return module.Destination{}, nil
 	}
 	att, found, err := w.d.Sources.Attachment(ctx, t.Attachment.GetUid())
@@ -503,7 +506,7 @@ func (w *Worker) resolveDestination(ctx context.Context, vpc string, own netip.P
 		de.reason, de.msg = workerv1alpha1.ReasonVPCNotAuthorized, "the destination is in another VPC"
 		return module.Destination{}, nil
 	case !own.IsValid():
-		de.reason, de.msg = workerv1alpha1.ReasonLocatorUnknown, "this node has no SRv6 locator yet"
+		de.reason, de.msg = workerv1alpha1.ReasonLocatorUnknown, msgOwnLocatorUnknown
 		return module.Destination{}, nil
 	}
 	loc, err := locator(att.Node)
@@ -580,7 +583,7 @@ func (w *Worker) resolveShard(ctx context.Context, vpc string, own netip.Prefix,
 			"the EgressShard reports no SID, or is not Programmed and Ready"
 		return module.Destination{}, nil
 	case !own.IsValid():
-		de.reason, de.msg = workerv1alpha1.ReasonLocatorUnknown, "this node has no SRv6 locator yet"
+		de.reason, de.msg = workerv1alpha1.ReasonLocatorUnknown, msgOwnLocatorUnknown
 		return module.Destination{}, nil
 	}
 	mode := workerv1alpha1.Mode_MODE_FABRIC
@@ -608,6 +611,113 @@ func (w *Worker) resolveShard(ctx context.Context, vpc string, own netip.Prefix,
 	return module.Destination{ID: de.id, Ref: d, Mode: mode, VPC: vpc, Node: es.Node,
 		Locator: netip.PrefixFrom(es.SID, uformat.LocatorBits).Masked(), Shard: target}, nil
 }
+
+// backendKey is one backend: the address and port its slot hashes.
+type backendKey struct {
+	addr netip.Addr
+	port uint16
+}
+
+// resolveBackend resolves a backend destination from the ServiceVIPBindings
+// galactic-router writes for it on its node. A binding counts while it is
+// Bound for its current generation and not being deleted, and only one in
+// the claim's VPC names the backend: two VPCs may use the same backend
+// address on one node, and hash to the same slot. A slot with no counting
+// binding is BackendNotBound, and one counting only in other VPCs is
+// VPCNotAuthorized. A slot whose counting bindings name two backends, which
+// the gateway's SID cannot tell apart, is BackendSlotConflict. The backend
+// then resolves as the VPCAttachment of the VPC on its node that holds its
+// address does, so a module delivers to it exactly as to that attachment.
+//
+// It is Local when the backend runs on this node and Fabric otherwise. As
+// for a shard, the node decides, not the locator: the binding names the
+// node, and the attachment found on it shares that node's locator, so the
+// own-locator rule gives the same answer once both locators are known.
+//
+// Worker computes no SID for a backend. The gateway encodes the slot in the
+// SID it sends, and local_rx checks that SID against this node's locator
+// (locator_table) and the TAP's VRF (vrf_table) where it is received.
+func (w *Worker) resolveBackend(ctx context.Context, vpc string, own netip.Prefix,
+	pref workerv1alpha1.Mode, d *workerv1alpha1.Destination, ref *workerv1alpha1.BackendRef,
+	locator func(string) (netip.Prefix, error), de *destEval) (module.Destination, error) {
+	node := ref.GetNode()
+	slot := uint16(ref.GetSlot()) //nolint:gosec // admission refuses a slot above 65535
+	bindings, err := w.d.Sources.BackendBindings(ctx, node, slot)
+	if err != nil {
+		return module.Destination{}, fmt.Errorf("read the ServiceVIPBindings of %s: %w", de.id, err)
+	}
+	backends := map[backendKey]bool{}
+	var names []string
+	otherVPC := false
+	for _, b := range bindings {
+		switch {
+		case !b.Bound:
+		case b.VPCRef != vpc:
+			otherVPC = true
+		default:
+			backends[backendKey{addr: b.BackendAddress, port: b.BackendPort}] = true
+			names = append(names, b.Name)
+		}
+	}
+	switch {
+	case len(backends) == 0 && otherVPC:
+		de.reason, de.msg = workerv1alpha1.ReasonVPCNotAuthorized, "the backend is bound in another VPC"
+		return module.Destination{}, nil
+	case len(backends) == 0:
+		de.reason, de.msg = workerv1alpha1.ReasonBackendNotBound,
+			fmt.Sprintf("no Bound ServiceVIPBinding on %s names slot %d", node, slot)
+		return module.Destination{}, nil
+	case len(backends) > 1:
+		de.reason, de.msg = workerv1alpha1.ReasonBackendSlotConflict,
+			fmt.Sprintf("slot %d on %s names %d backends", slot, node, len(backends))
+		return module.Destination{}, nil
+	}
+	var be backendKey
+	for k := range backends {
+		be = k
+	}
+	atts, err := w.d.Sources.VPCAttachments(ctx, vpc, node)
+	if err != nil {
+		return module.Destination{}, fmt.Errorf("read the VPCAttachments of %s on %s: %w", vpc, node, err)
+	}
+	i := slices.IndexFunc(atts, func(a sources.Attachment) bool { return slices.Contains(a.Addresses, be.addr) })
+	switch {
+	case i < 0:
+		de.reason, de.msg = workerv1alpha1.ReasonDestinationNotFound,
+			fmt.Sprintf("no VPCAttachment of the VPC on %s holds the backend address %s", node, be.addr)
+		return module.Destination{}, nil
+	case !own.IsValid():
+		de.reason, de.msg = workerv1alpha1.ReasonLocatorUnknown, msgOwnLocatorUnknown
+		return module.Destination{}, nil
+	}
+	att := atts[i]
+	loc, err := locator(att.Node)
+	if err != nil {
+		return module.Destination{}, fmt.Errorf("read locator of %s: %w", att.Node, err)
+	}
+	if !loc.IsValid() {
+		de.reason, de.msg = workerv1alpha1.ReasonLocatorUnknown, "the backend's node has no SRv6 locator yet"
+		return module.Destination{}, nil
+	}
+	mode := workerv1alpha1.Mode_MODE_FABRIC
+	if node == w.cfg.Node {
+		mode = workerv1alpha1.Mode_MODE_LOCAL
+	}
+	if (pref == workerv1alpha1.Mode_MODE_LOCAL || pref == workerv1alpha1.Mode_MODE_FABRIC) && pref != mode {
+		de.mode = mode
+		de.reason, de.msg = workerv1alpha1.ReasonModeUnavailable,
+			"the backend resolves to "+modeName(mode)+", not the requested mode"
+		return module.Destination{}, nil
+	}
+	de.mode, de.resolved = mode, true
+	return module.Destination{ID: de.id, Ref: d, Mode: mode, VPC: att.VPC, Node: att.Node, Locator: loc,
+		Addresses: slices.Clone(att.Addresses), HostInterface: att.HostInterface,
+		Backend: &module.BackendTarget{Slot: slot, Address: be.addr, Port: be.port, Bindings: names}}, nil
+}
+
+// msgOwnLocatorUnknown is LocatorUnknown's message while this node has no
+// locator.
+const msgOwnLocatorUnknown = "this node has no SRv6 locator yet"
 
 func modeName(m workerv1alpha1.Mode) string {
 	return strings.ToLower(strings.TrimPrefix(m.String(), "MODE_"))

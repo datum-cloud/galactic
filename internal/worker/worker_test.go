@@ -410,7 +410,7 @@ func TestSessionsAndValidation(t *testing.T) {
 }
 
 // TestDestinationResolution covers destinations that do not resolve: a
-// backend, which a later Task resolves, and a mode preference the
+// backend no ServiceVIPBinding binds, and a mode preference the
 // destination cannot meet. None falls back to the other mode.
 func TestDestinationResolution(t *testing.T) {
 	e := newEnv(t)
@@ -422,8 +422,8 @@ func TestDestinationResolution(t *testing.T) {
 	e.mustOK(e.request(natSA, key(vpcA, "svc-a"), 1, s))
 	st := e.waitObserved(mkey(vpcA, "svc-a"))
 	if c := condOf(st, workerv1alpha1.ConditionResolved); c.GetStatus() != condFalse ||
-		c.GetReason() != workerv1alpha1.ReasonDestinationKindUnsupported {
-		t.Fatalf("Resolved = %v, want False/DestinationKindUnsupported", c)
+		c.GetReason() != workerv1alpha1.ReasonBackendNotBound {
+		t.Fatalf("Resolved = %v, want False/BackendNotBound", c)
 	}
 	if !isTrue(st, workerv1alpha1.ConditionProgrammed) || isTrue(st, workerv1alpha1.ConditionReady) {
 		t.Fatalf("status = %v, want the resolved destination programmed and the claim not Ready", st)

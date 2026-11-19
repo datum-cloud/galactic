@@ -65,6 +65,7 @@ const (
 type options struct {
 	nodeName       string
 	namespace      string
+	gatewayNS      string
 	socket         string
 	socketGroup    int
 	stateDir       string
@@ -87,6 +88,9 @@ func (o *options) validate() error {
 	var errs []error
 	if o.nodeName == "" {
 		errs = append(errs, fmt.Errorf("--node-name (or %s) is required", envNodeName))
+	}
+	if o.gatewayNS == "" {
+		errs = append(errs, errors.New("--gateway-namespace must not be empty"))
 	}
 	if o.allowlist == "" {
 		errs = append(errs, errors.New("--allowlist is required"))
@@ -206,7 +210,7 @@ func run(o *options) error {
 	}, worker.Deps{
 		Store:   st,
 		Fence:   fence,
-		Sources: sources.Kube{Reader: mgr.GetClient(), Namespace: o.namespace},
+		Sources: sources.Kube{Reader: mgr.GetClient(), Namespace: o.namespace, GatewayNamespace: o.gatewayNS},
 		Modules: reg,
 		Host: &hostscope.Kernel{
 			K8s: direct, Namespace: o.namespace, Node: o.nodeName, PinDir: o.pinDir, Edge: edge,
@@ -321,6 +325,9 @@ func newRootCommand() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&o.nodeName, "node-name", "", "This node's name (env "+envNodeName+")")
 	f.StringVar(&o.namespace, "namespace", config.DefaultNamespace, "Namespace of the BGPRouters that carry node locators")
+	f.StringVar(&o.gatewayNS, "gateway-namespace", config.DefaultNamespace,
+		"Gateway namespace, whose ServiceVIPBindings resolve backend destinations (galactic-gateway's "+
+			config.EnvGatewayNamespace+")")
 	f.StringVar(&o.socket, "socket", workerv1alpha1.DefaultSocketPath, "Unix socket serving the Worker API")
 	f.IntVar(&o.socketGroup, "socket-group", socketGroupNoneOption,
 		"Numeric group that owns the socket; clients join it. -1 keeps the process's group")
