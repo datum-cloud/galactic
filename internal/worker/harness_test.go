@@ -50,6 +50,8 @@ const (
 	routerSA = "galactic-system/galactic-router"
 
 	callerMD = "x-test-caller"
+	// podMD names the pod a test caller calls from.
+	podMD = "x-test-pod"
 )
 
 var (
@@ -78,7 +80,11 @@ func (metaAuth) Authenticate(ctx context.Context) (auth.Caller, error) {
 		return auth.Caller{}, refusal.New(codes.PermissionDenied, workerv1alpha1.ReasonCapabilityNotAllowed,
 			"not listed", nil)
 	}
-	return auth.Caller{ServiceAccount: v[0], Capabilities: caps}, nil
+	c := auth.Caller{ServiceAccount: v[0], Capabilities: caps}
+	if pod := md.Get(podMD); len(pod) == 1 {
+		c.PodUID = pod[0]
+	}
+	return c, nil
 }
 
 // faultyStore fails chosen operations once, standing in for a crash at

@@ -1509,9 +1509,15 @@ type ClaimStatus struct {
 	// confirmed.
 	Released bool `protobuf:"varint,7,opt,name=released,proto3" json:"released,omitempty"`
 	// revision increases with every snapshot Worker produces for the claim.
-	Revision      uint64 `protobuf:"varint,8,opt,name=revision,proto3" json:"revision,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Revision uint64 `protobuf:"varint,8,opt,name=revision,proto3" json:"revision,omitempty"`
+	// handoff_interfaces are the interfaces Worker created for the claim's
+	// handoff, which the client attaches its own program to or configures:
+	// the NAT end of a veth_pair claim's service-internal veth pair, and both
+	// ends of a routed_link or socket claim's routed link. A tap claim has
+	// none. Each is listed once Worker has created it.
+	HandoffInterfaces []*HandoffInterface `protobuf:"bytes,9,rep,name=handoff_interfaces,json=handoffInterfaces,proto3" json:"handoff_interfaces,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ClaimStatus) Reset() {
@@ -1596,6 +1602,80 @@ func (x *ClaimStatus) GetReleased() bool {
 func (x *ClaimStatus) GetRevision() uint64 {
 	if x != nil {
 		return x.Revision
+	}
+	return 0
+}
+
+func (x *ClaimStatus) GetHandoffInterfaces() []*HandoffInterface {
+	if x != nil {
+		return x.HandoffInterfaces
+	}
+	return nil
+}
+
+// HandoffInterface is one interface Worker created for a claim's handoff.
+type HandoffInterface struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// role is "nat" for the NAT end of a veth pair, in the host's network
+	// namespace; "tenant" for the pair's tenant end, in the VPC's VRF; "host"
+	// for a routed link's host end, in the VPC's VRF; or "pod" for the routed
+	// link's end in the caller's pod, which the pod configures.
+	Role string `protobuf:"bytes,1,opt,name=role,proto3" json:"role,omitempty"`
+	// name is the interface name in its network namespace.
+	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	// ifindex is the interface index in its network namespace.
+	Ifindex       int32 `protobuf:"varint,3,opt,name=ifindex,proto3" json:"ifindex,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HandoffInterface) Reset() {
+	*x = HandoffInterface{}
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HandoffInterface) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HandoffInterface) ProtoMessage() {}
+
+func (x *HandoffInterface) ProtoReflect() protoreflect.Message {
+	mi := &file_galactic_worker_v1alpha1_worker_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HandoffInterface.ProtoReflect.Descriptor instead.
+func (*HandoffInterface) Descriptor() ([]byte, []int) {
+	return file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *HandoffInterface) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *HandoffInterface) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *HandoffInterface) GetIfindex() int32 {
+	if x != nil {
+		return x.Ifindex
 	}
 	return 0
 }
@@ -1689,7 +1769,7 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"\x06reason\x18\x06 \x01(\tR\x06reason\x12\x18\n" +
 	"\amessage\x18\a \x01(\tR\amessage\x12#\n" +
 	"\rforward_ready\x18\b \x01(\bR\fforwardReady\x12!\n" +
-	"\freturn_ready\x18\t \x01(\bR\vreturnReady\"\xb8\x03\n" +
+	"\freturn_ready\x18\t \x01(\bR\vreturnReady\"\x93\x04\n" +
 	"\vClaimStatus\x124\n" +
 	"\x03key\x18\x01 \x01(\v2\".galactic.worker.v1alpha1.ClaimKeyR\x03key\x12\x1e\n" +
 	"\n" +
@@ -1702,7 +1782,12 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"\fdestinations\x18\x05 \x03(\v2+.galactic.worker.v1alpha1.DestinationStatusR\fdestinations\x12T\n" +
 	"\x10withdrawal_scope\x18\x06 \x01(\x0e2).galactic.worker.v1alpha1.WithdrawalScopeR\x0fwithdrawalScope\x12\x1a\n" +
 	"\breleased\x18\a \x01(\bR\breleased\x12\x1a\n" +
-	"\brevision\x18\b \x01(\x04R\brevision*u\n" +
+	"\brevision\x18\b \x01(\x04R\brevision\x12Y\n" +
+	"\x12handoff_interfaces\x18\t \x03(\v2*.galactic.worker.v1alpha1.HandoffInterfaceR\x11handoffInterfaces\"T\n" +
+	"\x10HandoffInterface\x12\x12\n" +
+	"\x04role\x18\x01 \x01(\tR\x04role\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
+	"\aifindex\x18\x03 \x01(\x05R\aifindex*u\n" +
 	"\x0fCapabilityState\x12 \n" +
 	"\x1cCAPABILITY_STATE_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aCAPABILITY_STATE_AVAILABLE\x10\x01\x12 \n" +
@@ -1750,7 +1835,7 @@ func file_galactic_worker_v1alpha1_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_galactic_worker_v1alpha1_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_galactic_worker_v1alpha1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_galactic_worker_v1alpha1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_galactic_worker_v1alpha1_worker_proto_goTypes = []any{
 	(CapabilityState)(0),            // 0: galactic.worker.v1alpha1.CapabilityState
 	(Handoff)(0),                    // 1: galactic.worker.v1alpha1.Handoff
@@ -1777,11 +1862,12 @@ var file_galactic_worker_v1alpha1_worker_proto_goTypes = []any{
 	(*Condition)(nil),               // 22: galactic.worker.v1alpha1.Condition
 	(*DestinationStatus)(nil),       // 23: galactic.worker.v1alpha1.DestinationStatus
 	(*ClaimStatus)(nil),             // 24: galactic.worker.v1alpha1.ClaimStatus
-	(*durationpb.Duration)(nil),     // 25: google.protobuf.Duration
+	(*HandoffInterface)(nil),        // 25: galactic.worker.v1alpha1.HandoffInterface
+	(*durationpb.Duration)(nil),     // 26: google.protobuf.Duration
 }
 var file_galactic_worker_v1alpha1_worker_proto_depIdxs = []int32{
-	25, // 0: galactic.worker.v1alpha1.GetCapabilitiesResponse.lease:type_name -> google.protobuf.Duration
-	25, // 1: galactic.worker.v1alpha1.GetCapabilitiesResponse.renew_interval:type_name -> google.protobuf.Duration
+	26, // 0: galactic.worker.v1alpha1.GetCapabilitiesResponse.lease:type_name -> google.protobuf.Duration
+	26, // 1: galactic.worker.v1alpha1.GetCapabilitiesResponse.renew_interval:type_name -> google.protobuf.Duration
 	7,  // 2: galactic.worker.v1alpha1.GetCapabilitiesResponse.capabilities:type_name -> galactic.worker.v1alpha1.Capability
 	0,  // 3: galactic.worker.v1alpha1.Capability.state:type_name -> galactic.worker.v1alpha1.CapabilityState
 	9,  // 4: galactic.worker.v1alpha1.Destination.attachment:type_name -> galactic.worker.v1alpha1.AttachmentRef
@@ -1807,21 +1893,22 @@ var file_galactic_worker_v1alpha1_worker_proto_depIdxs = []int32{
 	22, // 24: galactic.worker.v1alpha1.ClaimStatus.conditions:type_name -> galactic.worker.v1alpha1.Condition
 	23, // 25: galactic.worker.v1alpha1.ClaimStatus.destinations:type_name -> galactic.worker.v1alpha1.DestinationStatus
 	4,  // 26: galactic.worker.v1alpha1.ClaimStatus.withdrawal_scope:type_name -> galactic.worker.v1alpha1.WithdrawalScope
-	5,  // 27: galactic.worker.v1alpha1.Worker.GetCapabilities:input_type -> galactic.worker.v1alpha1.GetCapabilitiesRequest
-	14, // 28: galactic.worker.v1alpha1.Worker.Request:input_type -> galactic.worker.v1alpha1.RequestRequest
-	16, // 29: galactic.worker.v1alpha1.Worker.Update:input_type -> galactic.worker.v1alpha1.UpdateRequest
-	20, // 30: galactic.worker.v1alpha1.Worker.Observe:input_type -> galactic.worker.v1alpha1.ObserveRequest
-	18, // 31: galactic.worker.v1alpha1.Worker.Release:input_type -> galactic.worker.v1alpha1.ReleaseRequest
-	6,  // 32: galactic.worker.v1alpha1.Worker.GetCapabilities:output_type -> galactic.worker.v1alpha1.GetCapabilitiesResponse
-	15, // 33: galactic.worker.v1alpha1.Worker.Request:output_type -> galactic.worker.v1alpha1.RequestResponse
-	17, // 34: galactic.worker.v1alpha1.Worker.Update:output_type -> galactic.worker.v1alpha1.UpdateResponse
-	21, // 35: galactic.worker.v1alpha1.Worker.Observe:output_type -> galactic.worker.v1alpha1.ObserveResponse
-	19, // 36: galactic.worker.v1alpha1.Worker.Release:output_type -> galactic.worker.v1alpha1.ReleaseResponse
-	32, // [32:37] is the sub-list for method output_type
-	27, // [27:32] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	25, // 27: galactic.worker.v1alpha1.ClaimStatus.handoff_interfaces:type_name -> galactic.worker.v1alpha1.HandoffInterface
+	5,  // 28: galactic.worker.v1alpha1.Worker.GetCapabilities:input_type -> galactic.worker.v1alpha1.GetCapabilitiesRequest
+	14, // 29: galactic.worker.v1alpha1.Worker.Request:input_type -> galactic.worker.v1alpha1.RequestRequest
+	16, // 30: galactic.worker.v1alpha1.Worker.Update:input_type -> galactic.worker.v1alpha1.UpdateRequest
+	20, // 31: galactic.worker.v1alpha1.Worker.Observe:input_type -> galactic.worker.v1alpha1.ObserveRequest
+	18, // 32: galactic.worker.v1alpha1.Worker.Release:input_type -> galactic.worker.v1alpha1.ReleaseRequest
+	6,  // 33: galactic.worker.v1alpha1.Worker.GetCapabilities:output_type -> galactic.worker.v1alpha1.GetCapabilitiesResponse
+	15, // 34: galactic.worker.v1alpha1.Worker.Request:output_type -> galactic.worker.v1alpha1.RequestResponse
+	17, // 35: galactic.worker.v1alpha1.Worker.Update:output_type -> galactic.worker.v1alpha1.UpdateResponse
+	21, // 36: galactic.worker.v1alpha1.Worker.Observe:output_type -> galactic.worker.v1alpha1.ObserveResponse
+	19, // 37: galactic.worker.v1alpha1.Worker.Release:output_type -> galactic.worker.v1alpha1.ReleaseResponse
+	33, // [33:38] is the sub-list for method output_type
+	28, // [28:33] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_galactic_worker_v1alpha1_worker_proto_init() }
@@ -1840,7 +1927,7 @@ func file_galactic_worker_v1alpha1_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_galactic_worker_v1alpha1_worker_proto_rawDesc), len(file_galactic_worker_v1alpha1_worker_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

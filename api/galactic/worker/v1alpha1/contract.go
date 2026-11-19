@@ -139,6 +139,29 @@ const (
 	// ReasonReturnPathNotProgrammed is a destination whose return traffic
 	// this node cannot yet decapsulate into the VPC's table.
 	ReasonReturnPathNotProgrammed = "ReturnPathNotProgrammed"
+	// ReasonHandoffHookMissing is a Local destination whose handoff program
+	// is not on its hook: Worker's own tc program, or the program the
+	// client attaches to the NAT end of a veth pair.
+	ReasonHandoffHookMissing = "HandoffHookMissing"
+	// ReasonDispatcherSlotUnclaimed is a local.tap destination with no
+	// receiving device whose XDP dispatcher runs a live public slot.
+	ReasonDispatcherSlotUnclaimed = "DispatcherSlotUnclaimed"
+	// ReasonHandoffMTUTooSmall is a Local destination whose interface's MTU
+	// is below the receiving path's, so a packet the path carries would
+	// not reach the guest.
+	ReasonHandoffMTUTooSmall = "HandoffMTUTooSmall"
+)
+
+// Handoff interface roles, carried in HandoffInterface.
+const (
+	// HandoffRoleNAT is the NAT end of a service-internal veth pair.
+	HandoffRoleNAT = "nat"
+	// HandoffRoleTenant is the tenant end of a service-internal veth pair.
+	HandoffRoleTenant = "tenant"
+	// HandoffRoleHost is the host end of a routed link.
+	HandoffRoleHost = "host"
+	// HandoffRolePod is the routed link's end in the caller's pod.
+	HandoffRolePod = "pod"
 )
 
 // Route rejection reasons, carried in RejectedRoute.

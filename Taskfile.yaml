@@ -122,7 +122,7 @@ tasks:
     cmds:
       - python3 hack/docs/generate_api.py --check
   build:ebpf:
-    desc: Regenerate the eBPF uSID, edge gateway DSR, NAT egress, XDP dispatcher, XDP transmit drop and Local handoff probe programs (requires clang)
+    desc: Regenerate the eBPF uSID, edge gateway DSR, NAT egress, XDP dispatcher, XDP transmit drop, Local handoff and Local handoff probe programs (requires clang)
     run: once
     deps: [require-clang]
     cmds:
@@ -131,6 +131,7 @@ tasks:
       - go generate ./internal/plumbing/ebpf/natprog/...
       - go generate ./internal/plumbing/ebpf/xdpdispatch/...
       - go generate ./internal/plumbing/ebpf/xmitdrops/...
+      - go generate ./internal/plumbing/ebpf/localprog/...
       - go generate ./tests/handoffs/probe/...
   require-clang:
     internal: true
