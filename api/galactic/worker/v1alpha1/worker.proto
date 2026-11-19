@@ -276,4 +276,8 @@ message HandoffInterface {
   string name = 2;
   // ifindex is the interface index in its network namespace.
   int32 ifindex = 3;
+  // link_local is the interface's IPv6 link-local address, set for a routed
+  // link's host end once the kernel has assigned it. The pod routes the
+  // destinations it reaches through the link to this address.
+  string link_local = 4;
 }

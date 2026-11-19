@@ -1624,7 +1624,11 @@ type HandoffInterface struct {
 	// name is the interface name in its network namespace.
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// ifindex is the interface index in its network namespace.
-	Ifindex       int32 `protobuf:"varint,3,opt,name=ifindex,proto3" json:"ifindex,omitempty"`
+	Ifindex int32 `protobuf:"varint,3,opt,name=ifindex,proto3" json:"ifindex,omitempty"`
+	// link_local is the interface's IPv6 link-local address, set for a routed
+	// link's host end once the kernel has assigned it. The pod routes the
+	// destinations it reaches through the link to this address.
+	LinkLocal     string `protobuf:"bytes,4,opt,name=link_local,json=linkLocal,proto3" json:"link_local,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1678,6 +1682,13 @@ func (x *HandoffInterface) GetIfindex() int32 {
 		return x.Ifindex
 	}
 	return 0
+}
+
+func (x *HandoffInterface) GetLinkLocal() string {
+	if x != nil {
+		return x.LinkLocal
+	}
+	return ""
 }
 
 var File_galactic_worker_v1alpha1_worker_proto protoreflect.FileDescriptor
@@ -1783,11 +1794,13 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"\x10withdrawal_scope\x18\x06 \x01(\x0e2).galactic.worker.v1alpha1.WithdrawalScopeR\x0fwithdrawalScope\x12\x1a\n" +
 	"\breleased\x18\a \x01(\bR\breleased\x12\x1a\n" +
 	"\brevision\x18\b \x01(\x04R\brevision\x12Y\n" +
-	"\x12handoff_interfaces\x18\t \x03(\v2*.galactic.worker.v1alpha1.HandoffInterfaceR\x11handoffInterfaces\"T\n" +
+	"\x12handoff_interfaces\x18\t \x03(\v2*.galactic.worker.v1alpha1.HandoffInterfaceR\x11handoffInterfaces\"s\n" +
 	"\x10HandoffInterface\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
-	"\aifindex\x18\x03 \x01(\x05R\aifindex*u\n" +
+	"\aifindex\x18\x03 \x01(\x05R\aifindex\x12\x1d\n" +
+	"\n" +
+	"link_local\x18\x04 \x01(\tR\tlinkLocal*u\n" +
 	"\x0fCapabilityState\x12 \n" +
 	"\x1cCAPABILITY_STATE_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aCAPABILITY_STATE_AVAILABLE\x10\x01\x12 \n" +
