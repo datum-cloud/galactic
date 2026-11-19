@@ -10,3 +10,5 @@ resources:
   - bgppeer-dfw-worker2.yaml
   - bgprouter-dfw-worker3.yaml
   - bgppeer-dfw-worker3.yaml
+  - bgprouter-dfw-worker4.yaml
+  - bgppeer-dfw-worker4.yaml
