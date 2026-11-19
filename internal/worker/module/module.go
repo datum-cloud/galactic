@@ -169,6 +169,10 @@ type HandoffInterface struct {
 	Role    string
 	Name    string
 	Ifindex int32
+	// LinkLocal is a routed link host end's IPv6 link-local address, the
+	// pod's next hop through the link. It is invalid for other roles and
+	// until the kernel assigns it.
+	LinkLocal netip.Addr
 }
 
 // HandoffReporter is implemented by a module that creates interfaces for a

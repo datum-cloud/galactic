@@ -305,3 +305,27 @@ func ParseTenantIdentifier(id string) (vpc, vpcAttachment string, ok bool) {
 	}
 	return vpc, vpcAttachment, true
 }
+
+// Labels and annotation of the BGPAdvertisement Galactic Worker publishes for
+// the addresses of a routed_link or socket claim (WorkerAdvertisementName).
+// It carries no netns annotation, so galactic-router's GC never judges it;
+// Worker withdraws it when the claim goes, its lease expires or its pod is
+// gone.
+const (
+	// LabelWorkerVPC is the claim's base62 VPC.
+	LabelWorkerVPC = "galactic.datumapis.com/worker-vpc"
+	// LabelWorkerNode is the node of the Worker that published it.
+	LabelWorkerNode = "galactic.datumapis.com/worker-node"
+	// LabelWorkerAttachment is the UID of the claim's attachment.
+	LabelWorkerAttachment = "galactic.datumapis.com/worker-attachment"
+	// AnnotationWorkerPod is the UID of the pod the claim's routed link
+	// serves.
+	AnnotationWorkerPod = "galactic.datumapis.com/worker-pod"
+)
+
+// WorkerAdvertisementName returns the name of the BGPAdvertisement Worker on
+// nodeName publishes for the claim on attachment attachmentUID in vpc. It
+// leads with the VPC segment, as every BGP CRD name does.
+func WorkerAdvertisementName(vpc, attachmentUID, nodeName string) string {
+	return BGPAdvertisementName(vpc, attachmentUID, nodeName)
+}
