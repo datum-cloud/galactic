@@ -175,7 +175,9 @@ EdgeAttachment condition names where they mean the same thing:
 
 A claim's status also lists `handoff_interfaces`: each interface Worker
 created for the claim's handoff, by role, name and ifindex
-([the Local module](#the-local-module)).
+([the Local module](#the-local-module)). A routed link's host end also carries
+`link_local`, its IPv6 link-local address, once the kernel has assigned it
+(not while tentative). The pod routes its Local destinations to that address.
 
 The withdrawal scope names what stops: one destination, one claim, every claim
 of a caller, or a whole VPC on the node. Operators read it to judge the reach
@@ -225,11 +227,11 @@ handoff's `Ready`. The scripts, captures and results are in
 [the lab's handoff checks](../../deploy/containerlab/docs/handoffs.md);
 [the Local module](#the-local-module) describes the implementation.
 
-| Capability                          | Mechanism                                                                                                                                                                                                                                                                                                              |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local.tap`                         | A dispatcher slot on the receiving interface returns `XDP_PASS` with metadata naming the TAP. A tc ingress program on the same interface decides the TAP's ingress policy, marks the packet decided and delivers with `bpf_redirect_neigh`. The reply leaves from the TAP's tc ingress.                                |
-| `local.veth_pair`                   | A tc program on the tenant TAP or veth redirects into the pair's tenant end. XDP on the NAT end runs the shard. The return is redirected into the NAT end and received by tc on the tenant end, which decides policy and delivers.                                                                                     |
-| `local.routed_link`, `local.socket` | A veth from a VRF in the pod to the tenant VRF on the host. Its pod end uses the claim attachment's addresses (D26), each routed as a `/128` to the host end in the tenant VRF (D29). A socket bound to the pod's VRF (`SO_BINDTODEVICE`) sends and receives through it with no redirect; the kernel routes both ways. |
+| Capability                          | Mechanism                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `local.tap`                         | A dispatcher slot on the receiving interface returns `XDP_PASS` with metadata naming the TAP. A tc ingress program on the same interface decides the TAP's ingress policy, marks the packet decided and delivers with `bpf_redirect_neigh`. The reply leaves from the TAP's tc ingress.                                                                                                                            |
+| `local.veth_pair`                   | A tc program on the tenant TAP or veth redirects into the pair's tenant end. XDP on the NAT end runs the shard. The return is redirected into the NAT end and received by tc on the tenant end, which decides policy and delivers.                                                                                                                                                                                 |
+| `local.routed_link`, `local.socket` | A veth from a VRF in the pod to the tenant VRF on the host. Its pod end uses the claim attachment's addresses (D26), each routed as a `/128` to the host end in the tenant VRF (D29). A socket bound to the pod's VRF (`SO_BINDTODEVICE`) sends and receives through it with no redirect; the kernel routes both ways. The galactic-vrf sidecar uses it as [described below](#envoy-and-the-galactic-vrf-sidecar). |
 
 These amend the mechanisms the qualification plan first named:
 
@@ -381,7 +383,8 @@ either a default pass-through or a Local branch in `usid_egress`, which
 
 The client learns the interfaces the module created from the claim's
 `handoff_interfaces`: the NAT end it attaches its native XDP program to, and
-the routed link's pod end it configures.
+the routed link's pod end it configures. The pod end's next hop for a Local
+destination is the host end's `link_local`.
 
 `local_rx` records each flow it delivers in a 65536-entry LRU table, which the
 flow's replies use. A sender that opens more flows than that through the
@@ -389,6 +392,84 @@ receiving devices evicts older ones, whose replies then go to the kernel
 instead of the device they arrived on. `local_rx` stays on the receiving
 devices while any TAP is authorized, so a restarted Worker does not take it
 away before it has planned every scope.
+
+### Envoy and the galactic-vrf sidecar
+
+[#1439](https://github.com/datum-cloud/galactic/issues/1439) integrates Envoy
+with Worker through the galactic-vrf sidecar (D40-D42). The sidecar opens one
+`socket` claim per VPC it serves, over the Worker socket with a projected token
+of audience `galactic-worker` (D8, D9). A VPC gets a claim only when the proxy
+has an attachment in it and the VPC has at least one backend.
+
+| Part of the claim | Source                                                                                                                                                                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Attachment        | The proxy's own VPCAttachment in the VPC on this node. The sidecar selects it with the label selector `GALACTIC_VRF_ATTACHMENT_SELECTOR` in the pod's namespace and keeps the one whose `status.node` is this node.                   |
+| Addresses         | The attachment's `spec.interface.addresses`, which are the proxy's gateway addresses.                                                                                                                                                 |
+| Destinations      | The VPCAttachments of the VPC's backends. The sidecar finds them from the tenant EndpointSlices: the label `galactic.datum.net/tenant-id` is `<vpc>-<vpcAttachment>`, matching the backend's `status.vpc` and `status.vpcAttachment`. |
+
+NSO creates the proxy's per-VPC VPCAttachment, with the gateway address in
+`spec.interface.addresses`, labels that match the selector, and `status.vpc`
+and `status.node` recorded. That sits outside Galactic and outside this epic.
+Until NSO does it, a VPC has no claim. The lab fixture creates these
+attachments by hand.
+
+**Worker side.** Worker gives a `routed_link` or `socket` claim to the Local
+module even when none of its destinations resolves to Local, because the routed
+link carries every reply. Local creates the link, with its host end in the
+VPC's host VRF behind `local_link_guard` and its pod end in the pod. It routes
+each claim address as a `/128` in the host VRF with a `PassThroughLocal`
+`egress_route_table` entry. That `/128` and entry keep a local backend's reply
+to the gateway address off the VPC's `::/0` NAT entry.
+
+For each such claim whose pod runs, Worker also writes a BGPAdvertisement
+(EVPN, End.DT46) for the claim attachment's IPv6 addresses as `/128`s, using
+the VPC's BGPVRFInstance router, VRF ID and export route target. The write is
+part of the scope's fenced commit. Remote nodes therefore send replies for the
+gateway address to this node's host VRF, where Local's `/128` delivers them
+over the routed link. Worker writes the BGPVRFInstance of any VPC with claims
+through `nodevpc.Ensure`, under the Argument lock; the sidecar writes neither
+resource.
+
+| Field                                            | Value                                                        |
+| ------------------------------------------------ | ------------------------------------------------------------ |
+| Name                                             | `crdnames.WorkerAdvertisementName(vpc, attachmentUID, node)` |
+| Label `galactic.datumapis.com/worker-vpc`        | The VPC                                                      |
+| Label `galactic.datumapis.com/worker-node`       | The node                                                     |
+| Label `galactic.datumapis.com/worker-attachment` | The claim attachment                                         |
+| Annotation `galactic.datumapis.com/worker-pod`   | The UID of the pod the claim serves                          |
+
+The advertisement has no netns annotation, so galactic-router GC never judges
+it. Worker rewrites it when the claim moves to the owner's new pod, and
+withdraws it when the pod is gone, on release, on lease expiry, and before it
+reclaims a VPC with no claims. Worker needs RBAC to write BGPAdvertisements;
+[#1441](https://github.com/datum-cloud/galactic/issues/1441) packages it.
+
+**Sidecar side.** The sidecar owns everything inside the pod: the per-VPC pod
+VRF (a table from the sidecar range, starting at `0x10000`), the pod end's
+enslavement into it, the gateway `/128` address on the pod end (`NODAD`), and
+the per-backend routes. Envoy binds each upstream cluster's sockets to the
+VPC's VRF device (`SO_BINDTODEVICE`), which keeps overlapping backend addresses
+in two VPCs apart. Worker reports each destination's resolution (D11) in the
+claim's destination status, and the sidecar routes by it:
+
+| Backend | Pod route                                                                                                                                                                                                                                                             |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local   | A `/128` in the pod VRF's table, through the pod end, to the host end's `link_local`. The route has protocol `0x47`, so the sidecar removes only its own.                                                                                                             |
+| Fabric  | None. The VRF's default route leads into the sidecar's in-pod encapsulating datapath (the `ivs<table>` and `ivp<table>` veth pair with `usid_egress`). Its `egress_route_table` rows stay in the sidecar's private table range, where the sidecar is the only writer. |
+
+Worker does not take the sidecar's rows (D41).
+
+**Replacement.** A claim serves one pod. While the proxy's previous pod runs,
+Worker refuses the new pod with `FAILED_PRECONDITION`/`ClaimHeldByAnotherPod`.
+The sidecar retries each sweep and reports not ready. The old sidecar releases
+its claims on `SIGTERM`, so the successor usually takes over at once; otherwise
+it takes over once the old pod is gone. Overlapping ownership is not
+implemented. The replacement keeps the same VPCAttachments, so it has the same
+claim key, and that is what serializes the two pods. Because the new pod is
+ready only once it holds every claim, the `config/galactic-vrf` Component sets
+the proxy Deployment's rollout to `maxSurge: 0` and `maxUnavailable: 1`: a
+rollout that waited for the new pod before stopping the old one would never
+finish.
 
 ## Errors and retry
 
@@ -517,3 +598,4 @@ Each case names the decision it exercises and the Task that owns its test.
 | Local locator with a missing TAP | Claim admitted; one destination is a guest on this node.                                                                       | Resolution finds the node's own locator, but the guest's TAP does not exist (not yet attached, or being replaced). | Resolves the destination to Local and does not fall back to Fabric. Programs the other destinations. Leaves the missing one unprogrammed and watches CNI attachment events. When CNI ADD creates the TAP, programs it on the new ifindex and reads it back.                                   | Until the TAP appears: `Resolved=True`, `Programmed=False` and `Ready=False`, with reason `HandoffInterfaceMissing` naming the destination. Afterwards: `Ready=True`.                                          | D2, D11      | [#1435](https://github.com/datum-cloud/galactic/issues/1435) root test for Local programming; [#1434](https://github.com/datum-cloud/galactic/issues/1434) for CNI attachment observation               |
 | Withdrawal during repair         | A commit failed part-way, so the VPC scope is resync-required and Worker's repair holds a ticket while it prepares a snapshot. | The owner sends `Release` with the current generation.                                                             | Records the release durably and answers. Takes the scope over again with `Takeover`, which invalidates the repair's ticket, and commits a snapshot computed from desired state without the released claim. The repair's late commit fails with a transitioning or stale error and is dropped. | `Release` returns `OK`. Status shows `Withdrawing` with scope "one claim" until the read-back confirms removal, then `Observe` reports the claim released. No row of the released claim survives the snapshot. | D3, D12, D23 | [#1433](https://github.com/datum-cloud/galactic/issues/1433) crash and interleaving tests; [#1436](https://github.com/datum-cloud/galactic/issues/1436) for Fabric rows                                 |
 | Underlay next hop lost           | Claim `Ready=True` with Fabric destinations on nodes B and C.                                                                  | The underlay route toward node C's locator is withdrawn.                                                           | The route event requeues only the VPCs with a route toward that locator. The Fabric module keeps the entries toward node C and rewrites nothing. When the route returns, it rewrites each entry whose next hop moved.                                                                         | Meanwhile the destination on node C reports `forward_ready=False` with reason `UnderlayUnreachable`, and the one on node B stays `Ready`. Afterwards both are `Ready`.                                         | D11, D25     | [#1436](https://github.com/datum-cloud/galactic/issues/1436) root test for the Fabric datapath and lab captures                                                                                         |
+| Proxy pod replacement            | Claim held by pod 1 of the Envoy proxy; pod 1 runs.                                                                            | Pod 2, with the same VPCAttachments, calls `Request` for the claim.                                                | Compares the caller pod with the pod the claim serves. Refuses while pod 1 runs. Once pod 1 is gone, or has released, moves the routed link and rewrites the advertisement for pod 2.                                                                                                         | `FAILED_PRECONDITION`/`ClaimHeldByAnotherPod` while pod 1 runs, and the sidecar retries each sweep. Afterwards pod 2 holds the claim and `Ready=True`.                                                         | D42          | [#1439](https://github.com/datum-cloud/galactic/issues/1439) `TestSocketClaimAdvertisesItsAddresses` (`internal/worker`) and `TestClaimsWaitForThePreviousPod` (`internal/ingresssidecar`)              |

@@ -36,7 +36,9 @@ The patch sets the Deployment's rollout to `maxSurge: 0` and
 time, and the sidecar is ready only once it holds every claim, so a rollout
 that keeps the old pod until the new one is ready never finishes. With this
 strategy the old pod stops first, its sidecar releases the claims on
-`SIGTERM`, and the new pod takes them over.
+`SIGTERM`, and the new pod takes them over. Upstream connections pause for
+that handover. For the same reason two replicas on one node never both become
+ready, so spread replicas across nodes, for example with pod anti-affinity.
 
 ## Worker allowlist
 
