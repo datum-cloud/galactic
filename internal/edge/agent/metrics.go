@@ -7,6 +7,7 @@ package agent
 import (
 	"github.com/prometheus/client_golang/prometheus"
 
+	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/forwardgatemap"
 )
 
@@ -30,6 +31,15 @@ var (
 		nil, nil)
 	mtuDesc = prometheus.NewDesc("galactic_edge_foundation_mtu_bytes",
 		"The MTU the agent gives every attachment link, its --mtu flag.", nil, nil)
+	workerCapabilityDesc = prometheus.NewDesc("galactic_edge_foundation_worker_capability",
+		"Galactic Worker's state of each capability, as it last reported it to galactic-edge: 1 when available. "+
+			"reason is Worker's contract reason for an unavailable one. Exported only when Worker registers the "+
+			"node's edge links (--worker-socket).",
+		[]string{"capability", "reason"}, nil)
+	workerClaimsDesc = prometheus.NewDesc("galactic_edge_foundation_worker_claims",
+		"galactic-edge's edge link claims on Galactic Worker, by state: ready, programmed (not yet carrying "+
+			"traffic), pending (not yet programmed) or refused (not admitted).",
+		[]string{"state"}, nil)
 	encapLimitDesc = prometheus.NewDesc("galactic_edge_foundation_encap_limit_bytes",
 		"The largest packet the fabric underlay carries once encapsulated (encap_mtu_table), read at scrape time. "+
 			"An attachment MTU above it is refused. Zero means galactic-cni has not set it and the check is off.",
@@ -60,7 +70,7 @@ type Collector struct{ Agent *Agent }
 // Describe implements prometheus.Collector.
 func (c Collector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{edgeLinksDesc, gatesDesc, gateDropsDesc, scopesLostDesc,
-		nodeCollectErrorsDesc, mtuDesc, encapLimitDesc} {
+		nodeCollectErrorsDesc, mtuDesc, encapLimitDesc, workerCapabilityDesc, workerClaimsDesc} {
 		ch <- d
 	}
 }
@@ -74,6 +84,9 @@ func (c Collector) Collect(ch chan<- prometheus.Metric) {
 	a.lostMu.Unlock()
 	ch <- prometheus.MustNewConstMetric(scopesLostDesc, prometheus.GaugeValue, float64(lost))
 	ch <- prometheus.MustNewConstMetric(mtuDesc, prometheus.GaugeValue, float64(a.MTU))
+	if dp, ok := a.Datapath.(*WorkerDatapath); ok {
+		collectWorker(ch, dp)
+	}
 	if a.Gates == nil && a.EncapMTU == nil {
 		return
 	}
@@ -132,4 +145,22 @@ func collectGates(ch chan<- prometheus.Metric, a *Agent) int {
 		}
 	}
 	return failed
+}
+
+// collectWorker exports Worker's capability state and galactic-edge's claims
+// by state.
+func collectWorker(ch chan<- prometheus.Metric, dp *WorkerDatapath) {
+	if dp.Capabilities != nil {
+		for _, c := range dp.Capabilities().GetCapabilities() {
+			v := 0.0
+			if c.GetState() == workerv1alpha1.CapabilityState_CAPABILITY_STATE_AVAILABLE {
+				v = 1
+			}
+			ch <- prometheus.MustNewConstMetric(workerCapabilityDesc, prometheus.GaugeValue, v, c.GetName(),
+				c.GetReason())
+		}
+	}
+	for state, n := range dp.ClaimStates() {
+		ch <- prometheus.MustNewConstMetric(workerClaimsDesc, prometheus.GaugeValue, float64(n), state)
+	}
 }

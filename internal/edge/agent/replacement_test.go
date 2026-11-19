@@ -130,12 +130,12 @@ func inNS(path string, fn func() error) error {
 	return fnErr
 }
 
-func (d nsDatapath) Register(vrfTable, ifindex uint32, ifname string, addr netip.Addr) error {
-	return inNS(d.host, func() error { return d.PinnedDatapath.Register(vrfTable, ifindex, ifname, addr) })
+func (d nsDatapath) Register(l Link) error {
+	return inNS(d.host, func() error { return d.PinnedDatapath.Register(l) })
 }
 
-func (d nsDatapath) Unregister(ifindex uint32) error {
-	return inNS(d.host, func() error { return d.PinnedDatapath.Unregister(ifindex) })
+func (d nsDatapath) Unregister(l Link) error {
+	return inNS(d.host, func() error { return d.PinnedDatapath.Unregister(l) })
 }
 
 func startE2E(t *testing.T) *e2e {
