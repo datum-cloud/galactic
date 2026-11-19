@@ -132,11 +132,11 @@ func mergeRouteInventory(
 // table that leaves through linkIndex, the VRF device ensureRedirectRoute
 // points them at, except a host route to an address in local.
 //
-// ensureGatewayVRFRoute also routes into the VRF device, for the VPC's own
-// gateway address, and no EndpointSlice claims that route. A backend redirect
-// always targets a remote address, never one this VRF holds, since
-// DeriveGatewayAddress draws gateway addresses from a prefix disjoint from
-// tenant address space.
+// Earlier versions of this sidecar also routed the VPC's own gateway address
+// into the VRF device, and a container restart in the same pod can find that
+// route, which no EndpointSlice claims. A backend redirect always targets a
+// remote address, never one this VRF holds, so the host route to a local
+// address is skipped.
 func redirectPrefixes(linkIndex int, local map[string]struct{}) ([]*net.IPNet, error) {
 	var out []*net.IPNet
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
