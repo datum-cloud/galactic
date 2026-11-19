@@ -129,10 +129,17 @@ message ShardRef {
   string name = 3;
 }
 
+// BackendRef names a load-balancer backend by the node it runs on and the
+// slot the gateway encodes in its SID. Worker resolves it from the Bound
+// ServiceVIPBinding galactic-router writes for the backend on that node, in
+// the gateway namespace: the binding whose backend address and port hash to
+// the slot (BackendSlot), joined to the VPCAttachment in the claim's VPC on
+// that node that holds the address. A request with an empty node, or a slot
+// of 0 or above 65535, is refused with INVALID_ARGUMENT/MalformedSpec.
 message BackendRef {
   // node is the backend's node name.
   string node = 1;
-  // slot is the slot the gateway encodes in the backend SID.
+  // slot is the slot the gateway encodes in the backend SID, 1 to 65535.
   uint32 slot = 2;
 }
 
@@ -143,8 +150,13 @@ message Destination {
     // shard is an egress translation shard. It resolves to Local when the
     // shard runs on this node and to Fabric otherwise.
     ShardRef shard = 2;
-    // backend is resolved by #1438. Until then it reports
-    // DestinationKindUnsupported.
+    // backend is a load-balancer backend. It resolves to the backend's
+    // VPCAttachment: Local when the backend runs on this node and Fabric
+    // otherwise. One with no Bound ServiceVIPBinding reports
+    // BackendNotBound, and one whose slot names two backends reports
+    // BackendSlotConflict. Worker computes no SID for it: the gateway's SID
+    // is checked against this node's locator and the TAP's VRF where it
+    // is received.
     BackendRef backend = 3;
   }
 }

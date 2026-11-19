@@ -702,11 +702,18 @@ func (x *ShardRef) GetName() string {
 	return ""
 }
 
+// BackendRef names a load-balancer backend by the node it runs on and the
+// slot the gateway encodes in its SID. Worker resolves it from the Bound
+// ServiceVIPBinding galactic-router writes for the backend on that node, in
+// the gateway namespace: the binding whose backend address and port hash to
+// the slot (BackendSlot), joined to the VPCAttachment in the claim's VPC on
+// that node that holds the address. A request with an empty node, or a slot
+// of 0 or above 65535, is refused with INVALID_ARGUMENT/MalformedSpec.
 type BackendRef struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// node is the backend's node name.
 	Node string `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
-	// slot is the slot the gateway encodes in the backend SID.
+	// slot is the slot the gateway encodes in the backend SID, 1 to 65535.
 	Slot          uint32 `protobuf:"varint,2,opt,name=slot,proto3" json:"slot,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -848,8 +855,13 @@ type Destination_Shard struct {
 }
 
 type Destination_Backend struct {
-	// backend is resolved by #1438. Until then it reports
-	// DestinationKindUnsupported.
+	// backend is a load-balancer backend. It resolves to the backend's
+	// VPCAttachment: Local when the backend runs on this node and Fabric
+	// otherwise. One with no Bound ServiceVIPBinding reports
+	// BackendNotBound, and one whose slot names two backends reports
+	// BackendSlotConflict. Worker computes no SID for it: the gateway's SID
+	// is checked against this node's locator and the TAP's VRF where it
+	// is received.
 	Backend *BackendRef `protobuf:"bytes,3,opt,name=backend,proto3,oneof"`
 }
 
