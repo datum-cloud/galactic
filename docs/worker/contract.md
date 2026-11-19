@@ -35,13 +35,21 @@ A second caller that names the same attachment gets `PERMISSION_DENIED` with
 reason `AttachmentClaimedByAnotherCaller`. Fabric state for a VPC is shared:
 any number of claims may resolve destinations through the same VPC.
 
-A destination names an attachment, a shard or a backend. Worker resolves
-attachment and shard destinations; a shard is named by its EgressShard's name
-(`ShardRef.name`), and a request that sets the unused `group` or `index` gets
-`INVALID_ARGUMENT`/`MalformedSpec` (D31). The backend resolver is added by
-[#1438](https://github.com/datum-cloud/galactic/issues/1438). Until then a
-backend destination is accepted and reports `Resolved=False` with reason
-`DestinationKindUnsupported` (D20).
+A destination names an attachment, a shard or a backend. A shard is named by
+its EgressShard's name (`ShardRef.name`), and a request that sets the unused
+`group` or `index` gets `INVALID_ARGUMENT`/`MalformedSpec` (D31). A backend is
+named by its node and the slot the gateway encodes in its SID
+(`BackendRef.node`, `BackendRef.slot`); an empty node, or a slot of 0 or above
+65535, gets `INVALID_ARGUMENT`/`MalformedSpec`. Worker resolves a backend to
+the VPCAttachment of the claim's VPC on that node that holds the backend's
+address, from the [trusted sources](#trusted-sources), so a module delivers to
+it exactly as to that attachment. A slot no Bound ServiceVIPBinding of the VPC
+names reports `BackendNotBound`, and one whose bindings name two backends
+reports `BackendSlotConflict`. A backend bound only in another VPC is refused
+with `PERMISSION_DENIED`/`VPCNotAuthorized`, and reports `VPCNotAuthorized`
+once a claimed one moves. The gateway claims a backend's own VPCAttachment
+with the `tap` handoff, in `local` mode, with one backend destination per slot
+it serves there; that claim needs no authority beyond the attachment's.
 
 The NAT shard has no VPCAttachment in the VPCs it serves, so its `veth_pair`
 claim may name its own EgressShard as `attachment_uid` (D30). Worker allows
@@ -186,7 +194,9 @@ EdgeAttachment condition names where they mean the same thing:
 
 A claim's status also lists `handoff_interfaces`: each interface Worker
 created for the claim's handoff, by role, name and ifindex
-([the Local module](#the-local-module)).
+([the Local module](#the-local-module)). A `tap` claim lists, with role `tap`,
+each TAP its destinations deliver to once `lt_tap` authorizes it; the gateway
+keys its datapath on that ifindex.
 
 The withdrawal scope names what stops: one destination, one claim, every claim
 of a caller, or a whole VPC on the node. Operators read it to judge the reach
@@ -209,19 +219,19 @@ missing waits, as the [worked transitions](#worked-transitions) show.
 
 Worker takes these facts only from the sources below, never from the request (D10).
 
-| Fact                     | Source                                                                                                                                                                                                                                                        |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Physical locator         | The node's BGPRouter Block and Node-ID, the same source `internal/installer/locatorroute.go` uses for the locator's local route.                                                                                                                              |
-| VPC identity             | NetworkFabricIdentity for the VPC (`api/cloud/v1alpha1`), written by the fabric identity allocator.                                                                                                                                                           |
-| Authorized VPC           | `VPCAttachment.spec.vpc` for workload and service attachments, written by NSO; for a connector, an EdgeAttachment that is `Admitted`.                                                                                                                         |
-| Owner                    | The authenticated caller (D8), recorded with the claim's desired state.                                                                                                                                                                                       |
-| Backend SID              | The backend node's locator plus the slot the gateway encodes in the uSID, as `docs/gateway/architecture.md` describes.                                                                                                                                        |
-| Shard identity           | The EgressShard, in Worker's namespace: its node from `spec.targetRef`, its SID from `status.shardSID`, and readiness from its Programmed and Ready conditions, which galactic-nat writes for the identity its datapath translates with (D32).                |
-| Shard claim authority    | For a claim whose attachment is an EgressShard: the allowlist's `egressShardClaims`, the EgressShard's node, and an admitted VPCAttachment of the VPC on this node (D30).                                                                                     |
-| Tenant SID               | This node's source SID (`node_src_addr_table`) completed with the VPC's Argument (`ifindex_vrf_table` of one of its tenant interfaces), both pinned by galactic-cni.                                                                                          |
-| Interface traffic policy | TrafficPolicyBinding, resolved by the cell controller. Worker applies no policy of its own.                                                                                                                                                                   |
-| Destination addresses    | `VPCAttachment.spec.interface.addresses` (D26). An attachment whose guest manages its own addressing records none, and its destination reports `DestinationAddressUnknown`; taking those addresses from the attachment's advertised routes is follow-up work. |
-| Tenant routes            | galactic-router, from EVPN, through the [tenant route handoff](#tenant-route-handoff).                                                                                                                                                                        |
+| Fact                     | Source                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Physical locator         | The node's BGPRouter Block and Node-ID, the same source `internal/installer/locatorroute.go` uses for the locator's local route.                                                                                                                                                                                                                                                                                       |
+| VPC identity             | NetworkFabricIdentity for the VPC (`api/cloud/v1alpha1`), written by the fabric identity allocator.                                                                                                                                                                                                                                                                                                                    |
+| Authorized VPC           | `VPCAttachment.spec.vpc` for workload and service attachments, written by NSO; for a connector, an EdgeAttachment that is `Admitted`.                                                                                                                                                                                                                                                                                  |
+| Owner                    | The authenticated caller (D8), recorded with the claim's desired state.                                                                                                                                                                                                                                                                                                                                                |
+| Backend SID              | The Bound ServiceVIPBinding galactic-router writes for the backend on its node, in the gateway namespace (`--gateway-namespace`), matched by node and the BackendSlot of its backend address and port, joined to the VPCAttachment holding that address. The SID's locator is the node's BGPRouter locator. Worker computes no SID: `local_rx` checks the gateway's SID against this node's locator and the TAP's VRF. |
+| Shard identity           | The EgressShard, in Worker's namespace: its node from `spec.targetRef`, its SID from `status.shardSID`, and readiness from its Programmed and Ready conditions, which galactic-nat writes for the identity its datapath translates with (D32).                                                                                                                                                                         |
+| Shard claim authority    | For a claim whose attachment is an EgressShard: the allowlist's `egressShardClaims`, the EgressShard's node, and an admitted VPCAttachment of the VPC on this node (D30).                                                                                                                                                                                                                                              |
+| Tenant SID               | This node's source SID (`node_src_addr_table`) completed with the VPC's Argument (`ifindex_vrf_table` of one of its tenant interfaces), both pinned by galactic-cni.                                                                                                                                                                                                                                                   |
+| Interface traffic policy | TrafficPolicyBinding, resolved by the cell controller. Worker applies no policy of its own.                                                                                                                                                                                                                                                                                                                            |
+| Destination addresses    | `VPCAttachment.spec.interface.addresses` (D26). An attachment whose guest manages its own addressing records none, and its destination reports `DestinationAddressUnknown`; taking those addresses from the attachment's advertised routes is follow-up work.                                                                                                                                                          |
+| Tenant routes            | galactic-router, from EVPN, through the [tenant route handoff](#tenant-route-handoff).                                                                                                                                                                                                                                                                                                                                 |
 
 Worker compares a VPC as the base62 identifier the attachment's status records
 (`VPCAttachment.status.vpc`, `EdgeAttachment.status.vpc`). That identifier is
@@ -244,11 +254,11 @@ handoff's `Ready`. The scripts, captures and results are in
 [the lab's handoff checks](../../deploy/containerlab/docs/handoffs.md);
 [the Local module](#the-local-module) describes the implementation.
 
-| Capability                          | Mechanism                                                                                                                                                                                                                                                                                                              |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local.tap`                         | A dispatcher slot on the receiving interface returns `XDP_PASS` with metadata naming the TAP. A tc ingress program on the same interface decides the TAP's ingress policy, marks the packet decided and delivers with `bpf_redirect_neigh`. The reply leaves from the TAP's tc ingress.                                |
-| `local.veth_pair`                   | A tc program on the tenant TAP or veth redirects into the pair's tenant end. XDP on the NAT end runs the shard. The return is redirected into the NAT end and received by tc on the tenant end, which decides policy and delivers.                                                                                     |
-| `local.routed_link`, `local.socket` | A veth from a VRF in the pod to the tenant VRF on the host. Its pod end uses the claim attachment's addresses (D26), each routed as a `/128` to the host end in the tenant VRF (D29). A socket bound to the pod's VRF (`SO_BINDTODEVICE`) sends and receives through it with no redirect; the kernel routes both ways. |
+| Capability                          | Mechanism                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local.tap`                         | A dispatcher slot on the receiving interface returns `XDP_PASS` with metadata naming the TAP. A tc ingress program on the same interface decides the TAP's ingress policy, marks the packet decided and delivers with `bpf_redirect_neigh`. The reply leaves from the TAP's tc ingress. The gateway's `edge_lb` writes GLM2 metadata, which also names the backend SID it selected: `local_rx` checks that SID and translates the VIP to the backend before the policy decision, and the reply leaves through `usid_egress`'s VIP branch (D43). |
+| `local.veth_pair`                   | A tc program on the tenant TAP or veth redirects into the pair's tenant end. XDP on the NAT end runs the shard. The return is redirected into the NAT end and received by tc on the tenant end, which decides policy and delivers.                                                                                                                                                                                                                                                                                                              |
+| `local.routed_link`, `local.socket` | A veth from a VRF in the pod to the tenant VRF on the host. Its pod end uses the claim attachment's addresses (D26), each routed as a `/128` to the host end in the tenant VRF (D29). A socket bound to the pod's VRF (`SO_BINDTODEVICE`) sends and receives through it with no redirect; the kernel routes both ways.                                                                                                                                                                                                                          |
 
 These amend the mechanisms the qualification plan first named:
 
@@ -329,13 +339,13 @@ pinned. Its own maps (`lt_*`) are pinned under `/sys/fs/bpf/galactic-local`
 (`--local-pin-dir`), so a restarted Worker keeps the rows the running programs
 read.
 
-| Program            | Hook                                                                               | Does                                                                                                                                                                                                          |
-| ------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local_rx`         | tc ingress of each public receiving device: its bond, or its VLANs when it has any | Delivers a packet whose metadata (`localprog/local_meta.h`) names a TAP a `local.tap` claim authorizes, on the PublicService path, and records the flow. A packet without the metadata goes on to the kernel. |
-| `local_link_rx`    | tc ingress of each destination's tenant interface, after galactic-cni's filters    | Sends a recorded flow's reply out of the device the flow arrived on, on the PublicService path, and a flow whose destination has a `PassThroughLocalNAT` entry into the VPC's pair, on the PublicNAT path.    |
-| `local_pair_rx`    | tc ingress of a pair's tenant end                                                  | Delivers the NAT end's return to the destination address it names in the pair's VPC, on the PublicNAT path.                                                                                                   |
-| `local_link_guard` | tc ingress of a routed link's host end                                             | Drops any source the link was not given.                                                                                                                                                                      |
-| `local_pair_napi`  | XDP, native, of a pair's tenant end                                                | Passes everything, so the tenant end receives what the NAT end's return redirects into the pair.                                                                                                              |
+| Program            | Hook                                                                               | Does                                                                                                                                                                                                                                                                                                          |
+| ------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local_rx`         | tc ingress of each public receiving device: its bond, or its VLANs when it has any | Delivers a packet whose metadata (`localprog/local_meta.h`) names a TAP a `local.tap` claim authorizes, on the PublicService path, and records the flow. With GLM2 metadata it first checks the backend SID and translates the VIP to the backend (D46). A packet without the metadata goes on to the kernel. |
+| `local_link_rx`    | tc ingress of each destination's tenant interface, after galactic-cni's filters    | Sends a recorded flow's reply out of the device the flow arrived on, on the PublicService path, and a flow whose destination has a `PassThroughLocalNAT` entry into the VPC's pair, on the PublicNAT path.                                                                                                    |
+| `local_pair_rx`    | tc ingress of a pair's tenant end                                                  | Delivers the NAT end's return to the destination address it names in the pair's VPC, on the PublicNAT path.                                                                                                                                                                                                   |
+| `local_link_guard` | tc ingress of a routed link's host end                                             | Drops any source the link was not given.                                                                                                                                                                                                                                                                      |
+| `local_pair_napi`  | XDP, native, of a pair's tenant end                                                | Passes everything, so the tenant end receives what the NAT end's return redirects into the pair.                                                                                                                                                                                                              |
 
 The module keeps link lifecycle apart from program ownership. CNI creates and
 deletes tenant TAPs and veths; the module attaches only its own filters and
@@ -379,8 +389,21 @@ Public ingress cannot assert tenant context. Only an XDP program can write
 skb metadata, so a packet from the wire carries none, and `local_rx` delivers
 only to a TAP Local authorized and drops a packet that names any other. The
 programs a receiving device's dispatcher runs are trusted to name the right
-one of those TAPs: a slot's holder, such as the gateway, chooses the TAP, and
-Worker checks only that a claim authorizes it. `local_rx` drops an IPv6
+one of those TAPs: a slot's holder chooses the TAP, and Worker checks that a
+claim authorizes it. The gateway is that holder for its backends. It writes
+`edge_local_table` from each claim's `handoff_interfaces` (role `tap`) and
+writes GLM2 metadata, which also names the backend SID it selected.
+
+For GLM2 metadata, `local_rx` also checks that SID before it delivers (D46).
+The SID must carry this node's locator (`locator_table`), the End.DT46
+function, a nonzero slot, and the argument of a VRF (`vrf_table`) whose table
+is the TAP's VRF. Otherwise `local_rx` drops the packet and counts
+`rx_sid_mismatch`. It then translates the VIP to the backend with the
+`vip_xlat_table` ingress row for the SID's slot, as `usid_ingress` does for an
+encapsulated packet. An IPv4 VIP goes through `vip_siit_ingress`, so the guest
+sees the client in `64:ff9b::/96`. With no row, `local_rx` drops the packet
+and counts `rx_no_binding`; a translation it refuses or that fails counts
+`rx_xlat_refused` or `rx_xlat_failed`. These counters are in `lt_stats`. `local_rx` drops an IPv6
 fragment, also one behind hop-by-hop, routing or destination options
 headers, and each Local redirect drops a packet its egress's MTU does not
 cover. Every
@@ -392,10 +415,15 @@ namespace outside any VRF (`attach.IsInternalLink`).
 
 A tenant's public flows enter a pair through `egress_route_table` or through
 `usid_egress`'s choice of a Local shard; [Local NAT shards](#local-nat-shards)
-describes both. A `local.tap` reply reaches `local_link_rx` only when its
-destination has a pass-through entry, so replies to clients anywhere need
-either a default pass-through or a Local branch in `usid_egress`, which
-[#1438](https://github.com/datum-cloud/galactic/issues/1438) decides (D29).
+describes both. A gateway backend's reply never reaches `local_link_rx` (D43). The guest
+replies from its own address, so `usid_egress`'s existing VIP branch takes it:
+the egress `vip_xlat_table` row restores the VIP and port, translates an IPv4
+VIP's reply back to IPv4, clamps a SYN-ACK's MSS, and redirects the reply out
+of `public_uplink_table`'s link before any `egress_route_table` lookup. There
+is no default pass-through and no Local branch in `usid_egress`, and the
+egress NAT never sees the reply. The reply needs `public_uplink_table` on the
+gateway node, and it leaves through that table's link, which need not be the
+device the request arrived on.
 
 The client learns the interfaces the module created from the claim's
 `handoff_interfaces`: the NAT end it attaches its native XDP program to, and
@@ -481,7 +509,9 @@ Status carries these reasons besides the ones above:
 | Reason                                             | Where                 | Meaning                                                                                                   |
 | -------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------- |
 | `Pending`                                          | Any condition         | Worker has not yet reconciled the generation                                                              |
-| `DestinationKindUnsupported`                       | `Resolved`            | A backend destination, until #1438 resolves it                                                            |
+| `DestinationKindUnsupported`                       | `Resolved`            | The destination names no attachment, shard or backend                                                     |
+| `BackendNotBound`                                  | `Resolved`            | No Bound ServiceVIPBinding of the claim's VPC on the backend's node names its slot                        |
+| `BackendSlotConflict`                              | `Resolved`            | The slot's Bound ServiceVIPBindings in the claim's VPC name more than one backend address and port        |
 | `ShardNotReady`                                    | `Resolved`            | The shard's EgressShard reports no SID, or is not Programmed and Ready                                    |
 | `LocalShardIneligible`                             | `Ready`               | The VPC's tenants do not take the Local shard yet; they keep the remote shards                            |
 | `DestinationNotFound`                              | `Resolved`            | The destination attachment no longer exists                                                               |

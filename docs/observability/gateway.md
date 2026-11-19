@@ -8,22 +8,27 @@ series appear on each one. Direct server return keeps no per-flow state,
 so there is no connection table to report. See
 [ARCHITECTURE-GATEWAY.md](../gateway/architecture.md).
 
-| Metric                                                  | Type    | Labels                              | Meaning                                                                                              |
-| ------------------------------------------------------- | ------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `galactic_edge_rule_packets_total`                      | counter | `proto`, `port`, `vip`, `vpc`       | Packets that matched the VIP, port and protocol, whatever happened to them next                      |
-| `galactic_edge_rule_bytes_total`                        | counter | same                                | Bytes of those packets                                                                               |
-| `galactic_edge_rule_dropped_packets_total`              | counter | same                                | Matched packets the datapath then dropped, such as for no backends. A subset of `rule_packets_total` |
-| `galactic_edge_rule_backends`                           | gauge   | same                                | Backends registered for the VIP                                                                      |
-| `galactic_edge_rule_seconds_since_last_packet`          | gauge   | same                                | Seconds since a packet last matched the VIP. Absent until the first one                              |
-| `galactic_edge_return_packets_total`                    | counter | `proto`, `port`, `vip`, `vpc`       | Replies from the VIP, port and protocol that this node forwarded past the kernel (`edge_return`)     |
-| `galactic_edge_return_bytes_total`                      | counter | same                                | Bytes of those replies                                                                               |
-| `galactic_edge_return_dropped_packets_total`            | counter | same                                | Those replies that the datapath dropped. A subset of `return_packets_total`                          |
-| `galactic_edge_drops_total`                             | counter | `reason`                            | Packets `edge_lb` and `edge_return` dropped, by reason                                               |
-| `galactic_edge_neigh_fallbacks_total`                   | counter | none                                | Packets `edge_lb` handed to the kernel to resolve the next hop. Not counted as drops                 |
-| `galactic_edge_redirect_xmit_drops_total`               | counter | `interface`, `reason`               | Frames the kernel dropped after any XDP program redirected them, which no other counter shows        |
-| `galactic_edge_control_plane_drops_total`               | counter | `rule`, `reason` (`quota_exceeded`) | Rule applications refused before they reached the datapath                                           |
-| `galactic_edge_dispatch_lease_renewals_total`           | counter | `slot`, `result`                    | Renewals of the gateway's XDP dispatcher slot leases. Dispatch mode only                             |
-| `galactic_edge_dispatch_lease_expiry_timestamp_seconds` | gauge   | `slot`                              | Unix time each lease, as last renewed, expires. Dispatch mode only                                   |
+| Metric                                                  | Type    | Labels                              | Meaning                                                                                                                            |
+| ------------------------------------------------------- | ------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic_edge_rule_packets_total`                      | counter | `proto`, `port`, `vip`, `vpc`       | Packets that matched the VIP, port and protocol, whatever happened to them next                                                    |
+| `galactic_edge_rule_bytes_total`                        | counter | same                                | Bytes of those packets                                                                                                             |
+| `galactic_edge_rule_dropped_packets_total`              | counter | same                                | Matched packets the datapath then dropped, such as for no backends. A subset of `rule_packets_total`                               |
+| `galactic_edge_rule_backends`                           | gauge   | same                                | Backends registered for the VIP                                                                                                    |
+| `galactic_edge_rule_seconds_since_last_packet`          | gauge   | same                                | Seconds since a packet last matched the VIP. Absent until the first one                                                            |
+| `galactic_edge_return_packets_total`                    | counter | `proto`, `port`, `vip`, `vpc`       | Replies from the VIP, port and protocol that this node forwarded past the kernel (`edge_return`)                                   |
+| `galactic_edge_return_bytes_total`                      | counter | same                                | Bytes of those replies                                                                                                             |
+| `galactic_edge_return_dropped_packets_total`            | counter | same                                | Those replies that the datapath dropped. A subset of `return_packets_total`                                                        |
+| `galactic_edge_drops_total`                             | counter | `reason`                            | Packets `edge_lb` and `edge_return` dropped, by reason                                                                             |
+| `galactic_edge_neigh_fallbacks_total`                   | counter | none                                | Packets `edge_lb` handed to the kernel to resolve the next hop. Not counted as drops                                               |
+| `galactic_edge_local_handoffs_total`                    | counter | none                                | Packets `edge_lb` handed to Worker's Local module for a backend on this node. Not counted as drops                                 |
+| `galactic_edge_worker_session_up`                       | gauge   | none                                | 1 while the gateway holds a Galactic Worker session, 0 while it cannot open one. Absent without the Worker socket                  |
+| `galactic_edge_local_handoff_ready`                     | gauge   | `attachment`, `reason`              | 1 for each backend attachment on this node whose Local handoff Worker reports ready, 0 otherwise. Absent without the Worker socket |
+| `galactic_edge_local_table_errors_total`                | counter | none                                | Failed `edge_local_table` writes since the gateway started. Absent without the Worker socket                                       |
+| `galactic_edge_family_withdrawn`                        | gauge   | `family` (`ipv6`, `ipv4`)           | 1 while the node withdraws the VIP family from BGP because its public path does not cover it, 0 otherwise                          |
+| `galactic_edge_redirect_xmit_drops_total`               | counter | `interface`, `reason`               | Frames the kernel dropped after any XDP program redirected them, which no other counter shows                                      |
+| `galactic_edge_control_plane_drops_total`               | counter | `rule`, `reason` (`quota_exceeded`) | Rule applications refused before they reached the datapath                                                                         |
+| `galactic_edge_dispatch_lease_renewals_total`           | counter | `slot`, `result`                    | Renewals of the gateway's XDP dispatcher slot leases. Dispatch mode only                                                           |
+| `galactic_edge_dispatch_lease_expiry_timestamp_seconds` | gauge   | `slot`                              | Unix time each lease, as last renewed, expires. Dispatch mode only                                                                 |
 
 - `proto` is `tcp`, `udp`, or the protocol number for anything else.
 - The return series use the rule series' key, attributing a reply by its
@@ -45,8 +50,20 @@ so there is no connection table to report. See
 - `galactic_edge_drops_total` reasons: `empty_backend_list`,
   `no_encap_config`, `fib_no_neigh`, `fib_unreachable`, `fib_frag_needed`,
   `fib_lookup_failed`, `adjust_head_failed`, `no_egress_ifindex`,
-  `redirect_failed`, `return_hop_limit`, `icmp_rate_limited`, plus
-  `unknown_<n>` for an index the binary has no name for.
+  `redirect_failed`, `return_hop_limit`, `icmp_rate_limited`,
+  `ipv4_fragment`, `local_unavailable` (the selected backend is Local on this
+  node but its handoff is not Ready; it is never encapsulated instead),
+  `adjust_meta_failed`, plus `unknown_<n>` for an index the binary has no
+  name for.
+- `galactic_edge_local_handoff_ready`'s `reason` is `Ready`,
+  `WorkerUnavailable` while the gateway has no Worker session, or Worker's
+  reason for the first destination that is not ready. A backend at 0 has its
+  flows through this gateway dropped (`local_unavailable`) and is reported
+  `Unhealthy` with reason `LocalHandoffNotReady`. See
+  [Local handoff](../gateway/architecture.md#local-handoff).
+- `galactic_edge_family_withdrawn` at 1 matches the `NetworkGateway`'s
+  `PublicPath` condition, `False` with reason `FamilyWithdrawn`, whose message
+  says why.
 - `fib_no_neigh` counts only replies `edge_return` forwards and ICMP errors
   the gateway sends. A load-balanced packet whose next hop has no neighbor
   entry goes to the kernel, which resolves the neighbor and forwards it, and
@@ -89,6 +106,12 @@ max by (vip, port, proto) (galactic_edge_rule_backends) == 0
 
 # Drops by reason
 sum by (node, reason) (rate(galactic_edge_drops_total[5m])) > 0
+
+# Local backends whose handoff is not ready
+max by (node, attachment, reason) (galactic_edge_local_handoff_ready) == 0
+
+# VIP families withdrawn because the public path does not cover them
+max by (node, family) (galactic_edge_family_withdrawn) == 1
 
 # Rules refused by quota
 sum by (node, rule) (increase(galactic_edge_control_plane_drops_total[1h])) > 0
