@@ -327,7 +327,11 @@ names them `G<VPC><key><role>` with the alias
 creates a routed link's pod end only in the pod Worker authenticated the
 claim's owner from: it finds a process of that pod through its cgroup, as the
 API's peer check does (D21), and refuses a pod on the host's network. A
-duplicate `Request` from the owner's new pod moves the link there.
+duplicate `Request` from the owner's new pod moves the link there, so a
+routed link serves one pod at a time: two pods that hold one claim move it
+back and forth, and each pod's link needs its own claim and attachment. The
+host end stays down until its guard is attached, and goes down again whenever
+the guard is missing.
 
 A destination is programmed when the module's rows and filters are in place,
 confirmed by read-back. It is ready when, in addition:
@@ -352,7 +356,13 @@ it carries.
 
 Public ingress cannot assert tenant context. Only an XDP program can write
 skb metadata, so a packet from the wire carries none, and `local_rx` delivers
-only to a TAP Local authorized and drops a packet that names any other. Every
+only to a TAP Local authorized and drops a packet that names any other. The
+programs a receiving device's dispatcher runs are trusted to name the right
+one of those TAPs: a slot's holder, such as the gateway, chooses the TAP, and
+Worker checks only that a claim authorizes it. `local_rx` drops an IPv6
+fragment, also one behind hop-by-hop, routing or destination options
+headers, and each Local redirect drops a packet its egress's MTU does not
+cover. Every
 Local program that delivers decides the receiver's policy on its own path and
 sets the decided mark itself, and the pair delivers only to the destination
 addresses a claim names. Every uplink discovery path skips a link Galactic
@@ -370,6 +380,13 @@ either a default pass-through or a Local branch in `usid_egress`, which
 The client learns the interfaces the module created from the claim's
 `handoff_interfaces`: the NAT end it attaches its native XDP program to, and
 the routed link's pod end it configures.
+
+`local_rx` records each flow it delivers in a 65536-entry LRU table, which the
+flow's replies use. A sender that opens more flows than that through the
+receiving devices evicts older ones, whose replies then go to the kernel
+instead of the device they arrived on. `local_rx` stays on the receiving
+devices while any TAP is authorized, so a restarted Worker does not take it
+away before it has planned every scope.
 
 ## Errors and retry
 

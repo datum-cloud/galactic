@@ -233,12 +233,19 @@ func readHost() (*host, error) {
 	return h, nil
 }
 
-// localLinks returns the Local links of vpc, by name.
+// localLinks returns the Local links of vpc, by name: those marked for one
+// of its claims, and unmarked ones named for it, which an interrupted
+// creation left.
 func (h *host) localLinks(vpc string) map[string]netlink.Link {
 	out := map[string]netlink.Link{}
+	prefix := intf.GenerateInterfaceNameLocal(vpc, "000", intf.LocalRolePairNAT)[:10]
 	for _, l := range h.all {
-		if v, _, ok := parseAlias(l.Attrs().Alias); ok && v == vpc && intf.IsLocalLinkName(l.Attrs().Name) {
-			out[l.Attrs().Name] = l
+		a, name := l.Attrs().Alias, l.Attrs().Name
+		if !intf.IsLocalLinkName(name) {
+			continue
+		}
+		if v, _, ok := parseAlias(a); (ok && v == vpc) || (a == "" && strings.HasPrefix(name, prefix)) {
+			out[name] = l
 		}
 	}
 	return out
@@ -276,9 +283,11 @@ func (h *host) readPair(p pairWant) (pair, bool) {
 }
 
 // collision returns an error when a link named name belongs to another claim
-// than the one alias a names.
+// than the one alias a names. A Local link with no alias is what an
+// interrupted creation left, and is Local's to replace.
 func (h *host) collision(name, a string) error {
-	if l := h.byName[name]; l != nil && l.Attrs().Alias != a {
+	if l := h.byName[name]; l != nil && l.Attrs().Alias != a &&
+		(l.Attrs().Alias != "" || !intf.IsLocalLinkName(name)) {
 		return fmt.Errorf("local: link %s belongs to %q, not %q", name, l.Attrs().Alias, a)
 	}
 	return nil
@@ -297,7 +306,10 @@ func (k *Kernel) ensurePair(h *host, p pairWant, vrfIdx int, dry bool) (pair, er
 			return pair{}, err
 		}
 	}
-	if err := placeInVRF(got.tenant, vrfIdx, dry); err != nil {
+	if err := enslave(got.tenant, vrfIdx, dry); err != nil {
+		return got, err
+	}
+	if err := setUp(got.tenant, dry); err != nil {
 		return got, err
 	}
 	if err := fix(dry, got.nat.Attrs().Flags&net.FlagUp == 0, func() error {
@@ -323,10 +335,25 @@ func (k *Kernel) createPair(h *host, p pairWant) (pair, error) {
 			}
 		}
 	}
+	// The kernel takes no alias when it creates a link, so both ends are
+	// marked after; a failure before then removes the pair, and an unmarked
+	// pair a crash left in between is Local's to replace (collision).
 	v := &netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: p.tenant, MTU: k.mtu()}, PeerName: p.nat}
 	if err := netlink.LinkAdd(v); err != nil {
 		return pair{}, fmt.Errorf("local: create pair %s/%s: %w", p.tenant, p.nat, err)
 	}
+	got, err := markPair(p)
+	if err != nil {
+		if l, lerr := netlink.LinkByName(p.tenant); lerr == nil {
+			_ = netlink.LinkDel(l)
+		}
+		return pair{}, err
+	}
+	return got, nil
+}
+
+// markPair marks both ends of a new pair and returns them.
+func markPair(p pairWant) (pair, error) {
 	var got pair
 	for _, n := range []string{p.tenant, p.nat} {
 		l, err := netlink.LinkByName(n)
@@ -335,6 +362,9 @@ func (k *Kernel) createPair(h *host, p pairWant) (pair, error) {
 		}
 		if err := netlink.LinkSetAlias(l, alias(p.key)); err != nil {
 			return pair{}, fmt.Errorf("local: mark pair link %s: %w", n, err)
+		}
+		if l, err = netlink.LinkByName(n); err != nil {
+			return pair{}, err
 		}
 		if n == p.tenant {
 			got.tenant = l
@@ -579,13 +609,29 @@ func (k *Kernel) receiverDevices(h *host) ([]receiver, error) {
 
 // ensureReceivers attaches local_rx to every receiving device when want, and
 // removes it from every device it is on otherwise or that is no longer one.
+// A TAP Local still authorizes keeps local_rx attached whatever want says:
+// after a restart, a scope with no local.tap claim can be planned before the
+// scopes that have one, and must not take local_rx away from them.
 func (k *Kernel) ensureReceivers(want, dry bool) error {
-	if _, _, err := k.open(); err != nil {
+	objs, _, err := k.open()
+	if err != nil {
 		return err
 	}
 	h, err := readHost()
 	if err != nil {
 		return err
+	}
+	if !want {
+		taps, err := u32Keys(objs.Maps.Tap)
+		if err != nil {
+			return err
+		}
+		for _, idx := range taps {
+			if h.byIdx[int(idx)] != nil {
+				want = true
+				break
+			}
+		}
 	}
 	rs, err := k.receiverDevices(h)
 	if err != nil {

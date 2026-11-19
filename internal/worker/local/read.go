@@ -5,6 +5,7 @@
 package local
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 
@@ -115,7 +116,10 @@ func (k *Kernel) read(vpc, node string, claims []module.Claim, m *model, errs ma
 		desiredKeys[c.Key] = true
 	}
 	for _, l := range h.localLinks(vpc) {
-		v, uid, _ := parseAlias(l.Attrs().Alias)
+		v, uid, ok := parseAlias(l.Attrs().Alias)
+		if !ok {
+			continue
+		}
 		key := module.ClaimKey{Node: node, VPC: v, AttachmentUID: uid}
 		if !desiredKeys[key] {
 			out.state[key] = map[string]module.DestinationState{leftoverID: {}}
@@ -157,6 +161,12 @@ func (k *Kernel) read(vpc, node string, claims []module.Claim, m *model, errs ma
 
 		for _, d := range c.Destinations {
 			ck := newCheck(c.Generation)
+			if other, ok := m.collisions[c.Key]; ok {
+				ck.unprogrammed(workerv1alpha1.ReasonProgrammingFailed,
+					"the claim's handoff links would take the names of claim "+other.String()+"'s")
+				states[d.ID] = ck.done()
+				continue
+			}
 			l := k.destinationCheck(ck, h, vrfIdx, c, d, objs, &out)
 			handoffCheck(ck, l)
 			states[d.ID] = ck.done()
@@ -385,7 +395,11 @@ func (k *Kernel) routedCheck(h *host, m *model, c module.Claim, vrfIdx int, objs
 			return
 		}
 		if err := errs[r.host]; err != nil {
-			ck.unprogrammed(workerv1alpha1.ReasonHandoffInterfaceMissing, err.Error())
+			reason := workerv1alpha1.ReasonProgrammingFailed
+			if errors.Is(err, ErrPodNotFound) || errors.Is(err, ErrPodHostNetwork) {
+				reason = workerv1alpha1.ReasonHandoffInterfaceMissing
+			}
+			ck.unprogrammed(reason, err.Error())
 			return
 		}
 		if len(r.addrs) == 0 {

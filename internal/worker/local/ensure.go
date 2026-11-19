@@ -127,8 +127,8 @@ func (p *pass) ensurePairs() error {
 	return nil
 }
 
-// ensureRoutedLinks makes each routed link exist. A link whose pod cannot be
-// reached is recorded, not fatal.
+// ensureRoutedLinks makes each routed link exist. A link that cannot be made
+// is recorded for Read, not fatal.
 func (p *pass) ensureRoutedLinks() error {
 	if len(p.m.routed) == 0 {
 		return nil
@@ -137,14 +137,17 @@ func (p *pass) ensureRoutedLinks() error {
 	if err != nil {
 		return err
 	}
+	// One link's failure, such as a pod that already holds an interface of
+	// the pod end's name, is that claim's alone: the rest of the VPC is
+	// still programmed.
 	for _, name := range sortedKeys(p.m.routed) {
 		err := p.ensureRouted(p.m.routed[name], entries)
 		switch {
 		case err == nil:
-		case errors.Is(err, ErrPodNotFound) || errors.Is(err, ErrPodHostNetwork):
-			p.res.errs[name] = err
-		default:
+		case errors.Is(err, errDirty):
 			return err
+		default:
+			p.res.errs[name] = err
 		}
 	}
 	return nil

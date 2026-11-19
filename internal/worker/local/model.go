@@ -26,8 +26,9 @@ const maxGuardAddrs = 4
 const base62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 // linkKey is the 3-character key of the links Local creates for the claim on
-// attachmentUID, derived from its UID. Two claims in one VPC whose keys
-// collide are told apart by the links' alias.
+// attachmentUID, derived from its UID. When two claims of one VPC derive the
+// same key, the first in claim key order gets the links and the other
+// reports why it has none (model.collisions).
 func linkKey(attachmentUID string) string {
 	sum := sha256.Sum256([]byte(attachmentUID))
 	n := binary.BigEndian.Uint32(sum[:4]) % (62 * 62 * 62)
@@ -102,6 +103,9 @@ type model struct {
 	// tap is set when a claim of the scope uses local.tap, which needs
 	// local_rx on the node's public receiving devices.
 	tap bool
+	// collisions are the claims whose links would take another claim's
+	// names, with that claim.
+	collisions map[module.ClaimKey]module.ClaimKey
 }
 
 // Empty reports whether the scope wants no Local state.
@@ -124,7 +128,7 @@ func ipv6(addrs []netip.Addr) []netip.Addr {
 // whose attachment has no host interface yet wants nothing; Read reports it.
 func desire(vpc string, claims []module.Claim) *model {
 	m := &model{vpc: vpc, pairs: map[string]pairWant{}, routed: map[string]routedWant{},
-		tenants: map[string]*tenantWant{}}
+		tenants: map[string]*tenantWant{}, collisions: map[module.ClaimKey]module.ClaimKey{}}
 	sorted := slices.Clone(claims)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Key.String() < sorted[j].Key.String() })
 	tenant := func(name string) *tenantWant {
@@ -152,6 +156,10 @@ func desire(vpc string, claims []module.Claim) *model {
 		case workerv1alpha1.Handoff_HANDOFF_VETH_PAIR:
 			p := pairWant{key: c.Key, nat: linkName(vpc, c.Key.AttachmentUID, intf.LocalRolePairNAT),
 				tenant: linkName(vpc, c.Key.AttachmentUID, intf.LocalRolePairTenant)}
+			if other, ok := m.pairs[p.tenant]; ok {
+				m.collisions[c.Key] = other.key
+				continue
+			}
 			m.pairs[p.tenant] = p
 			for _, d := range c.Destinations {
 				if d.HostInterface == "" {
@@ -172,6 +180,10 @@ func desire(vpc string, claims []module.Claim) *model {
 			}
 			r := routedWant{key: c.Key, host: linkName(vpc, c.Key.AttachmentUID, intf.LocalRoleRoutedHost),
 				pod: linkName(vpc, c.Key.AttachmentUID, intf.LocalRoleRoutedPod), podUID: c.OwnerPod, addrs: addrs}
+			if other, ok := m.routed[r.host]; ok {
+				m.collisions[c.Key] = other.key
+				continue
+			}
 			m.routed[r.host] = r
 		}
 	}
