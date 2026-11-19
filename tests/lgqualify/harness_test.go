@@ -161,7 +161,7 @@ type query struct {
 }
 
 // routers are dfw's fabric routers.
-var routers = []string{"dfw-worker", "dfw-worker2", "dfw-worker3"}
+var routers = []string{"dfw-worker", "dfw-worker2", "dfw-worker3", "dfw-worker4"}
 
 // sink returns a distinct address in the lab's probe sink for family 4 or
 // 6, so tests do not share a destination host bucket.

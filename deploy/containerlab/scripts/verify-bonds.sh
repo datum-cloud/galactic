@@ -23,8 +23,9 @@ LAB="${LAB:-gvpc}"
 # container:bond, two members each.
 BONDS=(
   dfw-worker:bond0 dfw-worker:bond1
-  dfw-worker2:bond0 dfw-worker2:bond1
-  dfw-worker3:bond0 dfw-worker3:bond1
+  dfw-worker2:bond0 dfw-worker2:bond1 dfw-worker2:bond2
+  dfw-worker3:bond0 dfw-worker3:bond1 dfw-worker3:bond2
+  dfw-worker4:bond0 dfw-worker4:bond1
   sjc-worker:bond0
   sjc-worker2:bond0 sjc-worker2:bond1
   iad-worker:bond0

@@ -1,0 +1,7 @@
+# ns80's traffic policy in dfw: the shared set plus a binding for each of
+# dfw-worker4's guests, whose attachments only dfw has
+# (../../dfw/nad-dfw-worker4.yaml).
+namespace: ns80
+resources:
+  - ../base
+  - bindings.yaml

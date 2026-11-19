@@ -1,0 +1,15 @@
+# Client session to the lab's single EVPN route reflector.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: BGPPeer
+metadata:
+  name: galactic-control-dfw-worker4
+  namespace: galactic-system
+spec:
+  routerRef:
+    name: galactic-router-dfw-worker4
+  peerASN: 65000
+  address: "fc00:0:8::1"
+  remotePort: 1790
+  addressFamilies:
+    - afi: l2vpn
+      safi: evpn

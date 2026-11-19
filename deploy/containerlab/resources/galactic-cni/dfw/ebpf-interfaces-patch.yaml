@@ -5,16 +5,51 @@ metadata:
 spec:
   template:
     spec:
-      # Both uplinks. bond0/bond1 name the same roles on every dfw node --
-      # dfw-worker's bonds to each edge node, and each edge node's transit
-      # and compute-facing bonds -- so one list is right for the whole site.
+      # Every uplink. bond0/bond1 name the same roles on every dfw node --
+      # each compute node's bonds to the two edge nodes, and each edge node's
+      # transit and dfw-worker-facing bonds -- so bond0,bond1 is the site's
+      # list.
+      #
+      # The edge nodes also have bond2, facing dfw-worker4, and need
+      # usid_ingress there too: a packet from dfw-worker4 to an SID on an edge
+      # node (a Galactic Edge attachment, or the ns10/ns20 edge clients)
+      # arrives on bond2. The site list cannot name bond2, because attaching
+      # to an interface a node lacks fails the datapath's start
+      # (internal/plumbing/ebpf/attach Start), and the compute nodes have no
+      # bond2. So both containers run under a wrapper that widens the list on
+      # dfw-worker2 and dfw-worker3 only. The lab's galactic-cni image is the
+      # alpine stage of containers/galactic-cni/Dockerfile, which has /bin/sh.
       initContainers:
         - name: install-cni
+          command:
+            - /bin/sh
+            - -c
+            - |
+              case "${LAB_NODE_NAME}" in
+                dfw-worker2 | dfw-worker3) export GALACTIC_CNI_EBPF_INTERFACES=bond0,bond1,bond2 ;;
+              esac
+              exec /galactic-cni init
           env:
+            - name: LAB_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             - name: GALACTIC_CNI_EBPF_INTERFACES
               value: bond0,bond1
       containers:
         - name: credential-refresh
+          command:
+            - /bin/sh
+            - -c
+            - |
+              case "${LAB_NODE_NAME}" in
+                dfw-worker2 | dfw-worker3) export GALACTIC_CNI_EBPF_INTERFACES=bond0,bond1,bond2 ;;
+              esac
+              exec /galactic-cni run
           env:
+            - name: LAB_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             - name: GALACTIC_CNI_EBPF_INTERFACES
               value: bond0,bond1
