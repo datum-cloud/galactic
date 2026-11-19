@@ -1,0 +1,193 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: galactic-worker
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: galactic-worker
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: galactic-worker
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: galactic-worker
+    spec:
+      serviceAccountName: galactic-worker
+      # Worker programs the host's VRFs, routes, tc filters and XDP
+      # receivers, so it runs in the host network namespace.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # A caller's SO_PEERCRED PID is mapped to its pod through
+      # /proc/<pid>/cgroup. Outside the host PID namespace the kernel reports
+      # PID 0 for a peer in another pod (docs/worker/contract.md, D21). With
+      # hostPID, the container's /proc is the host's, so --proc-root needs no
+      # separate mount.
+      hostPID: true
+      # Worker writes the tenant routes of every VPC it owns, so losing it
+      # stops their route updates: never preempt it for ordinary workloads.
+      priorityClassName: system-node-critical
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      # Runs wherever galactic-router runs as a per-node router, on compute
+      # and edge nodes (docs/operations/node-labels.md). Services call the
+      # Worker on their own node, so both roles need one in either placement
+      # profile.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: galactic.datumapis.com/galactic
+                    operator: In
+                    values:
+                      - router
+                  - key: galactic.datumapis.com/node
+                    operator: In
+                    values:
+                      - compute
+                      - edge
+      tolerations:
+        - operator: Exists
+      # Long enough for Worker to stop serving and finish a commit in
+      # progress. Stopping keeps every scope: a restarted Worker adopts them
+      # again, and only galactic-worker handback returns them.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: galactic-worker
+          # Placeholder: CI stamps the published tag into the bundle, and the
+          # placement profiles pin the branch tag.
+          image: ghcr.io/datum-cloud/galactic-worker:latest
+          command:
+            - /galactic-worker
+          args:
+            - --allowlist=/etc/galactic-worker/allowlist.yaml
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: metrics
+              containerPort: 9104
+              protocol: TCP
+            - name: grpc-health
+              containerPort: 9105
+              protocol: TCP
+          # Readiness turns SERVING only after the trusted-source cache syncs
+          # and the socket listens, which can take up to the 2 minute sync
+          # timeout on a cold API server.
+          startupProbe:
+            grpc:
+              port: 9105
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            grpc:
+              port: 9105
+            periodSeconds: 20
+          readinessProbe:
+            grpc:
+              port: 9105
+            periodSeconds: 10
+          # Root for the host paths below; every capability but the two it
+          # uses is dropped. NET_ADMIN covers VRFs, links, routes, neighbors
+          # and tc filters; BPF covers the pinned maps and the Local
+          # programs. tests/manifests/worker-profiles/privileges.yaml records
+          # this set, and task test:manifests refuses any other.
+          securityContext:
+            runAsUser: 0
+            # The socket (mode 0660) takes the process's group, which clients
+            # join with supplementalGroups. Running in the group, rather than
+            # passing --socket-group, needs no CAP_CHOWN.
+            runAsGroup: 65441
+            capabilities:
+              drop: ["ALL"]
+              add:
+                - NET_ADMIN
+                - BPF
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: allowlist
+              mountPath: /etc/galactic-worker
+              readOnly: true
+            # The Worker API socket, and the status snapshot inspect reads
+            # stays out of it: clients mount this directory.
+            - name: socket
+              mountPath: /run/galactic-worker
+            # Durable desired state (claims) and the root-only status
+            # snapshot.
+            - name: state
+              mountPath: /var/lib/galactic-worker
+            # The node's VPC write fence, shared with CNI, galactic-router
+            # and galactic-edge. Never delete or restore it while a writer
+            # runs.
+            - name: ownership
+              mountPath: /var/lib/galactic-edge/ownership
+            # The uSID maps (galactic), the Local handoff programs
+            # (galactic-local) and the shared XDP dispatcher (galactic-xdp).
+            - name: bpf-fs
+              mountPath: /sys/fs/bpf
+            # galactic-cni's per-interface tc lock, which Local's filters
+            # take too (docs/worker/ownership.md).
+            - name: tc-locks
+              mountPath: /run/galactic
+            # The VRF table ID lock, held while reclaiming an unused VPC's
+            # VRF (internal/plumbing/vrf).
+            - name: vrf-lock
+              mountPath: /var/lib/cni/galactic-vrf
+            # Reclaim checks whether a container's netns still exists before
+            # treating its VPC as unused (internal/gc).
+            - name: netns
+              mountPath: /var/run/netns
+              readOnly: true
+      volumes:
+        - name: allowlist
+          configMap:
+            name: galactic-worker-allowlist
+        - name: socket
+          hostPath:
+            path: /run/galactic-worker
+            type: DirectoryOrCreate
+        - name: state
+          hostPath:
+            path: /var/lib/galactic-worker
+            type: DirectoryOrCreate
+        - name: ownership
+          hostPath:
+            path: /var/lib/galactic-edge/ownership
+            type: DirectoryOrCreate
+        # Directory, not DirectoryOrCreate: bpffs must already be mounted
+        # here (config/galactic-cni/daemonset.yaml).
+        - name: bpf-fs
+          hostPath:
+            path: /sys/fs/bpf
+            type: Directory
+        - name: tc-locks
+          hostPath:
+            path: /run/galactic
+            type: DirectoryOrCreate
+        - name: vrf-lock
+          hostPath:
+            path: /var/lib/cni/galactic-vrf
+            type: DirectoryOrCreate
+        - name: netns
+          hostPath:
+            path: /var/run/netns
+            type: DirectoryOrCreate

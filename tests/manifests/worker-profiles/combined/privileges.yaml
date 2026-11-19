@@ -1,0 +1,359 @@
+# Privileges the rendered manifests beside this file grant, checked by
+# hack/check-privileges in task test:manifests. Review every change.
+# Regenerate with check-privileges -write, then task lint-fix.
+bindings:
+  ClusterRoleBinding/galactic-cni:
+    - ServiceAccount/galactic-system/galactic-cni -> ClusterRole/galactic-cni
+  ClusterRoleBinding/galactic-gateway:
+    - ServiceAccount/galactic-system/galactic-gateway -> ClusterRole/galactic-gateway
+  ClusterRoleBinding/galactic-nat:
+    - ServiceAccount/galactic-system/galactic-nat -> ClusterRole/galactic-nat
+  ClusterRoleBinding/galactic-router:
+    - ServiceAccount/galactic-system/galactic-router -> ClusterRole/galactic-router
+  ClusterRoleBinding/galactic-worker:
+    - ServiceAccount/galactic-system/galactic-worker -> ClusterRole/galactic-worker
+  RoleBinding/galactic-system/galactic-worker:
+    - ServiceAccount/galactic-system/galactic-worker -> Role/galactic-worker
+roles:
+  ClusterRole/galactic-cni:
+    - core/nodes:get
+    - core/nodes:list
+    - core/pods:get
+    - core/pods:list
+    - discovery.k8s.io/endpointslices:create
+    - discovery.k8s.io/endpointslices:delete
+    - discovery.k8s.io/endpointslices:get
+    - discovery.k8s.io/endpointslices:list
+    - discovery.k8s.io/endpointslices:patch
+    - discovery.k8s.io/endpointslices:update
+    - galactic.datumapis.com/bgpadvertisements:create
+    - galactic.datumapis.com/bgpadvertisements:delete
+    - galactic.datumapis.com/bgpadvertisements:get
+    - galactic.datumapis.com/bgpadvertisements:list
+    - galactic.datumapis.com/bgpadvertisements:patch
+    - galactic.datumapis.com/bgpadvertisements:update
+    - galactic.datumapis.com/bgprouters:get
+    - galactic.datumapis.com/bgprouters:list
+    - galactic.datumapis.com/bgpvrfinstances:create
+    - galactic.datumapis.com/bgpvrfinstances:delete
+    - galactic.datumapis.com/bgpvrfinstances:get
+    - galactic.datumapis.com/bgpvrfinstances:list
+    - galactic.datumapis.com/bgpvrfinstances:patch
+    - galactic.datumapis.com/bgpvrfinstances:update
+    - galactic.datumapis.com/egressshards:get
+    - galactic.datumapis.com/egressshards:list
+    - galactic.datumapis.com/egressshards:watch
+    - galactic.datumapis.com/vpcattachments:list
+    - k8s.cni.cncf.io/network-attachment-definitions:get
+    - k8s.cni.cncf.io/network-attachment-definitions:patch
+  ClusterRole/galactic-gateway:
+    - galactic.datumapis.com/bgpadvertisements:create
+    - galactic.datumapis.com/bgpadvertisements:delete
+    - galactic.datumapis.com/bgpadvertisements:get
+    - galactic.datumapis.com/bgpadvertisements:list
+    - galactic.datumapis.com/bgpadvertisements:patch
+    - galactic.datumapis.com/bgpadvertisements:update
+    - galactic.datumapis.com/bgpadvertisements:watch
+    - galactic.datumapis.com/bgprouters:get
+    - galactic.datumapis.com/bgprouters:list
+    - galactic.datumapis.com/bgprouters:watch
+    - galactic.datumapis.com/bgpvrfinstances:get
+    - galactic.datumapis.com/bgpvrfinstances:list
+    - galactic.datumapis.com/bgpvrfinstances:watch
+    - galactic.datumapis.com/networkgateways/status:get
+    - galactic.datumapis.com/networkgateways/status:patch
+    - galactic.datumapis.com/networkgateways/status:update
+    - galactic.datumapis.com/networkgateways:get
+    - galactic.datumapis.com/networkgateways:list
+    - galactic.datumapis.com/networkgateways:patch
+    - galactic.datumapis.com/networkgateways:update
+    - galactic.datumapis.com/networkgateways:watch
+    - galactic.datumapis.com/networkserviceaddresses/status:get
+    - galactic.datumapis.com/networkserviceaddresses/status:patch
+    - galactic.datumapis.com/networkserviceaddresses/status:update
+    - galactic.datumapis.com/networkserviceaddresses:get
+    - galactic.datumapis.com/networkserviceaddresses:list
+    - galactic.datumapis.com/networkserviceaddresses:patch
+    - galactic.datumapis.com/networkserviceaddresses:update
+    - galactic.datumapis.com/networkserviceaddresses:watch
+    - galactic.datumapis.com/networkservices/status:get
+    - galactic.datumapis.com/networkservices/status:patch
+    - galactic.datumapis.com/networkservices/status:update
+    - galactic.datumapis.com/networkservices:get
+    - galactic.datumapis.com/networkservices:list
+    - galactic.datumapis.com/networkservices:patch
+    - galactic.datumapis.com/networkservices:update
+    - galactic.datumapis.com/networkservices:watch
+    - galactic.datumapis.com/servicevipbindings:get
+    - galactic.datumapis.com/servicevipbindings:list
+    - galactic.datumapis.com/servicevipbindings:watch
+    - galactic.datumapis.com/vpcattachments:get
+    - galactic.datumapis.com/vpcattachments:list
+    - galactic.datumapis.com/vpcattachments:watch
+    - galactic.datumapis.com/vpcs:get
+    - galactic.datumapis.com/vpcs:list
+    - galactic.datumapis.com/vpcs:watch
+  ClusterRole/galactic-nat:
+    - galactic.datumapis.com/bgpadvertisements:create
+    - galactic.datumapis.com/bgpadvertisements:delete
+    - galactic.datumapis.com/bgpadvertisements:get
+    - galactic.datumapis.com/bgpadvertisements:list
+    - galactic.datumapis.com/bgpadvertisements:patch
+    - galactic.datumapis.com/bgpadvertisements:update
+    - galactic.datumapis.com/bgpadvertisements:watch
+    - galactic.datumapis.com/bgprouters:get
+    - galactic.datumapis.com/bgprouters:list
+    - galactic.datumapis.com/bgprouters:watch
+    - galactic.datumapis.com/egressshards/status:get
+    - galactic.datumapis.com/egressshards/status:patch
+    - galactic.datumapis.com/egressshards/status:update
+    - galactic.datumapis.com/egressshards:get
+    - galactic.datumapis.com/egressshards:list
+    - galactic.datumapis.com/egressshards:patch
+    - galactic.datumapis.com/egressshards:update
+    - galactic.datumapis.com/egressshards:watch
+  ClusterRole/galactic-router:
+    - coordination.k8s.io/leases:create
+    - coordination.k8s.io/leases:delete
+    - coordination.k8s.io/leases:get
+    - coordination.k8s.io/leases:list
+    - coordination.k8s.io/leases:patch
+    - coordination.k8s.io/leases:update
+    - coordination.k8s.io/leases:watch
+    - core/events:create
+    - core/events:patch
+    - core/nodes:get
+    - core/nodes:list
+    - core/nodes:watch
+    - core/secrets:get
+    - core/secrets:list
+    - core/secrets:watch
+    - discovery.k8s.io/endpointslices:get
+    - discovery.k8s.io/endpointslices:list
+    - discovery.k8s.io/endpointslices:watch
+    - events.k8s.io/events:create
+    - events.k8s.io/events:patch
+    - galactic.datumapis.com/bgpadvertisements/status:get
+    - galactic.datumapis.com/bgpadvertisements/status:patch
+    - galactic.datumapis.com/bgpadvertisements/status:update
+    - galactic.datumapis.com/bgpadvertisements:delete
+    - galactic.datumapis.com/bgpadvertisements:get
+    - galactic.datumapis.com/bgpadvertisements:list
+    - galactic.datumapis.com/bgpadvertisements:patch
+    - galactic.datumapis.com/bgpadvertisements:watch
+    - galactic.datumapis.com/bgppeers/status:get
+    - galactic.datumapis.com/bgppeers/status:patch
+    - galactic.datumapis.com/bgppeers/status:update
+    - galactic.datumapis.com/bgppeers:get
+    - galactic.datumapis.com/bgppeers:list
+    - galactic.datumapis.com/bgppeers:patch
+    - galactic.datumapis.com/bgppeers:update
+    - galactic.datumapis.com/bgppeers:watch
+    - galactic.datumapis.com/bgppolicies/status:get
+    - galactic.datumapis.com/bgppolicies/status:patch
+    - galactic.datumapis.com/bgppolicies/status:update
+    - galactic.datumapis.com/bgppolicies:get
+    - galactic.datumapis.com/bgppolicies:list
+    - galactic.datumapis.com/bgppolicies:patch
+    - galactic.datumapis.com/bgppolicies:update
+    - galactic.datumapis.com/bgppolicies:watch
+    - galactic.datumapis.com/bgprouters/status:get
+    - galactic.datumapis.com/bgprouters/status:patch
+    - galactic.datumapis.com/bgprouters/status:update
+    - galactic.datumapis.com/bgprouters:get
+    - galactic.datumapis.com/bgprouters:list
+    - galactic.datumapis.com/bgprouters:patch
+    - galactic.datumapis.com/bgprouters:update
+    - galactic.datumapis.com/bgprouters:watch
+    - galactic.datumapis.com/bgpvrfinstances/status:get
+    - galactic.datumapis.com/bgpvrfinstances/status:patch
+    - galactic.datumapis.com/bgpvrfinstances/status:update
+    - galactic.datumapis.com/bgpvrfinstances:delete
+    - galactic.datumapis.com/bgpvrfinstances:get
+    - galactic.datumapis.com/bgpvrfinstances:list
+    - galactic.datumapis.com/bgpvrfinstances:watch
+    - galactic.datumapis.com/edgeattachments:get
+    - galactic.datumapis.com/edgeattachments:list
+    - galactic.datumapis.com/edgeattachments:watch
+    - galactic.datumapis.com/edgeservices:get
+    - galactic.datumapis.com/edgeservices:list
+    - galactic.datumapis.com/edgeservices:watch
+    - galactic.datumapis.com/networkserviceaddresses:get
+    - galactic.datumapis.com/networkserviceaddresses:list
+    - galactic.datumapis.com/networkserviceaddresses:watch
+    - galactic.datumapis.com/networkservices/status:get
+    - galactic.datumapis.com/networkservices/status:patch
+    - galactic.datumapis.com/networkservices/status:update
+    - galactic.datumapis.com/networkservices:get
+    - galactic.datumapis.com/networkservices:list
+    - galactic.datumapis.com/networkservices:watch
+    - galactic.datumapis.com/serviceendpointproducerreports:create
+    - galactic.datumapis.com/serviceendpointproducerreports:delete
+    - galactic.datumapis.com/serviceendpointproducerreports:get
+    - galactic.datumapis.com/serviceendpointproducerreports:list
+    - galactic.datumapis.com/serviceendpointproducerreports:patch
+    - galactic.datumapis.com/serviceendpointproducerreports:watch
+    - galactic.datumapis.com/serviceendpoints/status:get
+    - galactic.datumapis.com/serviceendpoints/status:patch
+    - galactic.datumapis.com/serviceendpoints/status:update
+    - galactic.datumapis.com/serviceendpoints:get
+    - galactic.datumapis.com/serviceendpoints:list
+    - galactic.datumapis.com/serviceendpoints:watch
+    - galactic.datumapis.com/serviceroutepolicies/status:get
+    - galactic.datumapis.com/serviceroutepolicies/status:patch
+    - galactic.datumapis.com/serviceroutepolicies/status:update
+    - galactic.datumapis.com/serviceroutepolicies:get
+    - galactic.datumapis.com/serviceroutepolicies:list
+    - galactic.datumapis.com/serviceroutepolicies:watch
+    - galactic.datumapis.com/servicevipbindings/status:get
+    - galactic.datumapis.com/servicevipbindings/status:patch
+    - galactic.datumapis.com/servicevipbindings/status:update
+    - galactic.datumapis.com/servicevipbindings:create
+    - galactic.datumapis.com/servicevipbindings:delete
+    - galactic.datumapis.com/servicevipbindings:get
+    - galactic.datumapis.com/servicevipbindings:list
+    - galactic.datumapis.com/servicevipbindings:patch
+    - galactic.datumapis.com/servicevipbindings:update
+    - galactic.datumapis.com/servicevipbindings:watch
+    - galactic.datumapis.com/trafficpolicies:get
+    - galactic.datumapis.com/trafficpolicies:list
+    - galactic.datumapis.com/trafficpolicies:watch
+    - galactic.datumapis.com/trafficpolicybindings/status:get
+    - galactic.datumapis.com/trafficpolicybindings/status:patch
+    - galactic.datumapis.com/trafficpolicybindings:get
+    - galactic.datumapis.com/trafficpolicybindings:list
+    - galactic.datumapis.com/trafficpolicybindings:watch
+    - galactic.datumapis.com/vpcattachments:get
+    - galactic.datumapis.com/vpcattachments:list
+    - galactic.datumapis.com/vpcattachments:watch
+    - galactic.datumapis.com/vpcs:get
+    - galactic.datumapis.com/vpcs:list
+    - galactic.datumapis.com/vpcs:watch
+  ClusterRole/galactic-worker:
+    - authentication.k8s.io/tokenreviews:create
+    - galactic.datumapis.com/bgprouters:get
+    - galactic.datumapis.com/bgprouters:list
+    - galactic.datumapis.com/bgprouters:watch
+    - galactic.datumapis.com/edgeattachments:get
+    - galactic.datumapis.com/edgeattachments:list
+    - galactic.datumapis.com/edgeattachments:watch
+    - galactic.datumapis.com/vpcattachments:get
+    - galactic.datumapis.com/vpcattachments:list
+    - galactic.datumapis.com/vpcattachments:watch
+  Role/galactic-system/galactic-worker:
+    - galactic.datumapis.com/bgpadvertisements:delete
+    - galactic.datumapis.com/bgpadvertisements:get
+    - galactic.datumapis.com/bgpadvertisements:list
+    - galactic.datumapis.com/bgpvrfinstances:create
+    - galactic.datumapis.com/bgpvrfinstances:delete
+    - galactic.datumapis.com/bgpvrfinstances:get
+    - galactic.datumapis.com/bgpvrfinstances:list
+    - galactic.datumapis.com/bgpvrfinstances:update
+workerAllowlist:
+  galactic-system/galactic-gateway:
+    - fabric.srv6
+    - local.tap
+  galactic-system/galactic-nat:
+    - fabric.srv6
+    - local.veth_pair
+  galactic-system/galactic-router:
+    - fabric.routes
+workloads:
+  DaemonSet/galactic-system/galactic-cni:
+    containers:
+      credential-refresh:
+        capabilities:
+          - BPF
+          - NET_ADMIN
+          - NET_RAW
+          - PERFMON
+          - SYS_ADMIN
+        dropsAll: true
+        hostPaths:
+          - /etc/cni/net.d:rw
+          - /run/galactic:rw
+          - /sys/fs/bpf:rw
+          - /var/lib/cni/galactic-vrf:rw
+          - /var/lib/cni/ra:rw
+          - /var/lib/galactic-edge/ownership:rw
+          - /var/lib/galactic:rw
+          - /var/log/galactic:rw
+      install-cni:
+        dropsAll: true
+        hostPaths:
+          - /etc/cni/net.d:rw
+          - /opt/cni/bin:rw
+          - /var/lib/galactic:rw
+          - /var/log/galactic:rw
+    hostNetwork: true
+  DaemonSet/galactic-system/galactic-gateway:
+    containers:
+      galactic-gateway:
+        capabilities:
+          - BPF
+          - NET_ADMIN
+          - PERFMON
+        dropsAll: true
+        hostPaths:
+          - /proc/sys/net:rw
+          - /sys/fs/bpf:rw
+    hostNetwork: true
+  DaemonSet/galactic-system/galactic-nat:
+    containers:
+      galactic-nat:
+        capabilities:
+          - BPF
+          - NET_ADMIN
+          - PERFMON
+        dropsAll: true
+        hostPaths:
+          - /proc/sys/net:rw
+          - /sys/fs/bpf:rw
+    hostNetwork: true
+  DaemonSet/galactic-system/galactic-router:
+    containers:
+      galactic-router:
+        capabilities:
+          - BPF
+          - NET_ADMIN
+        dropsAll: true
+        hostPaths:
+          - /run/galactic-router:rw
+          - /run/galactic-worker:rw
+          - /sys/fs/bpf:rw
+          - /var/lib/cni:rw
+          - /var/lib/galactic-edge/ownership:rw
+          - /var/run/netns
+    hostNetwork: true
+  DaemonSet/galactic-system/galactic-router-rr:
+    containers:
+      galactic-router:
+        capabilities:
+          - BPF
+          - NET_ADMIN
+        dropsAll: true
+        hostPaths:
+          - /run/galactic-router:rw
+          - /run/galactic-worker:rw
+          - /sys/fs/bpf:rw
+          - /var/lib/cni:rw
+          - /var/lib/galactic-edge/ownership:rw
+          - /var/run/netns
+    hostNetwork: true
+  DaemonSet/galactic-system/galactic-worker:
+    containers:
+      galactic-worker:
+        capabilities:
+          - BPF
+          - NET_ADMIN
+        dropsAll: true
+        hostPaths:
+          - /run/galactic-worker:rw
+          - /run/galactic:rw
+          - /sys/fs/bpf:rw
+          - /var/lib/cni/galactic-vrf:rw
+          - /var/lib/galactic-edge/ownership:rw
+          - /var/lib/galactic-worker:rw
+          - /var/run/netns
+    hostNetwork: true
+    hostPID: true
