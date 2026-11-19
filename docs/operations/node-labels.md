@@ -163,7 +163,7 @@ Worker is installed, `galactic-worker` runs beside them on the same nodes
 Galactic Worker ([docs/worker/](../worker/README.md)) adds no label. It runs
 on every `galactic=router` node that is `node=compute` or `node=edge`, because
 each service calls the Worker on its own node. Two placements use the labels
-above (D31 in the [decision log](../worker/README.md#decision-log)).
+above (D35 in the [decision log](../worker/README.md#decision-log)).
 
 ### Dedicated placement
 
