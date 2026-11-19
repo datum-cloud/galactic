@@ -16,6 +16,7 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/safchain/ethtool"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 
@@ -23,6 +24,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/localprog"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
@@ -32,6 +34,9 @@ const (
 	filterLinkRx    = attach.LocalFilterPrefix + "link_rx"
 	filterPairRx    = attach.LocalFilterPrefix + "pair_rx"
 	filterLinkGuard = attach.LocalFilterPrefix + "link_guard"
+	// xdpPairNAPI names local_pair_napi, which is attached as XDP rather
+	// than as a filter.
+	xdpPairNAPI = "xdp_pair_napi"
 )
 
 // DefaultLinkMTU is the MTU of the links Local creates. A veth with a larger
@@ -127,7 +132,8 @@ func (k *Kernel) open() (*localprog.Objects, *egressroutemap.EgressRouteTable, e
 		}
 		ids := map[string]ebpf.ProgramID{}
 		for name, p := range map[string]*ebpf.Program{filterRx: objs.Programs.Rx, filterLinkRx: objs.Programs.LinkRx,
-			filterPairRx: objs.Programs.PairRx, filterLinkGuard: objs.Programs.LinkGuard} {
+			filterPairRx: objs.Programs.PairRx, filterLinkGuard: objs.Programs.LinkGuard,
+			xdpPairNAPI: objs.Programs.PairNAPI} {
 			info, err := p.Info()
 			if err != nil {
 				_ = objs.Close()
@@ -320,7 +326,37 @@ func (k *Kernel) ensurePair(h *host, p pairWant, vrfIdx int, dry bool) (pair, er
 	}); err != nil {
 		return got, err
 	}
-	return got, ensureFeatures(p.tenant, dry)
+	if err := ensureFeatures(p.tenant, dry); err != nil {
+		return got, err
+	}
+	return got, k.ensurePairNAPI(got.tenant, dry)
+}
+
+// pairNAPICurrent reports whether l, a pair's tenant end, runs
+// local_pair_napi in native mode.
+func (k *Kernel) pairNAPICurrent(l netlink.Link) bool {
+	xdp := l.Attrs().Xdp
+	if xdp == nil || !xdp.Attached {
+		return false
+	}
+	k.mu.Lock()
+	want := k.progIDs[xdpPairNAPI]
+	k.mu.Unlock()
+	mode, ok := xdpmode.FromAttachMode(xdp.AttachMode)
+	return ok && mode == xdpmode.Native && ebpf.ProgramID(xdp.ProgId) == want
+}
+
+// ensurePairNAPI attaches local_pair_napi to l, a pair's tenant end, in
+// native mode: a veth receives what a native XDP_REDIRECT sends into its
+// peer only while it runs NAPI, which GRO alone does not turn on on every
+// kernel.
+func (k *Kernel) ensurePairNAPI(l netlink.Link, dry bool) error {
+	return fix(dry, !k.pairNAPICurrent(l), func() error {
+		if err := netlink.LinkSetXdpFdWithFlags(l, k.objs.Programs.PairNAPI.FD(), nl.XDP_FLAGS_DRV_MODE); err != nil {
+			return fmt.Errorf("local: attach XDP to %s: %w", l.Attrs().Name, err)
+		}
+		return nil
+	})
 }
 
 // createPair creates p, replacing whatever is left of it.

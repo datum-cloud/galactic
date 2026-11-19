@@ -34,12 +34,13 @@ type Programs struct {
 	LinkRx    *ebpf.Program `ebpf:"local_link_rx"`
 	PairRx    *ebpf.Program `ebpf:"local_pair_rx"`
 	LinkGuard *ebpf.Program `ebpf:"local_link_guard"`
+	PairNAPI  *ebpf.Program `ebpf:"local_pair_napi"`
 }
 
 // Close closes every program descriptor.
 func (p *Programs) Close() error {
 	var errs []error
-	for _, prog := range []*ebpf.Program{p.Rx, p.LinkRx, p.PairRx, p.LinkGuard} {
+	for _, prog := range []*ebpf.Program{p.Rx, p.LinkRx, p.PairRx, p.LinkGuard, p.PairNAPI} {
 		if prog != nil {
 			errs = append(errs, prog.Close())
 		}

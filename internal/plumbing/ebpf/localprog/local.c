@@ -28,6 +28,10 @@
 //                     NAT end sent back to the tenant it is for.
 //   local_link_guard  tc ingress of a routed link's host end. Drops any
 //                     source the link was not given (local.routed_link).
+//   local_pair_napi   XDP of a pair's tenant end. Passes everything: a veth
+//                     receives what a native XDP_REDIRECT sends into its
+//                     peer only while it runs NAPI, which an XDP program
+//                     turns on whatever the kernel does with GRO.
 //
 // Every program that delivers to a tenant decides the receiver's policy on
 // its own path and sets the decided mark itself, so tp_deliver skips it
@@ -605,4 +609,13 @@ int local_link_guard(struct __sk_buff *skb)
 	}
 	lt_count(LT_STAT_GUARD_DROP);
 	return TC_ACT_SHOT;
+}
+
+// local_pair_napi runs on the tenant end of a service-internal veth pair, so
+// the NAT end's return, which a dispatcher slot redirects into the pair, is
+// received; local_pair_rx then decides it.
+SEC("xdp")
+int local_pair_napi(struct xdp_md *ctx)
+{
+	return XDP_PASS;
 }

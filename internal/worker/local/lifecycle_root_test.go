@@ -151,6 +151,18 @@ func TestHookWithdrawalAndRepairRoot(t *testing.T) {
 	wantState(t, r.read(a.vpc), natClaim, true, false, true, workerv1alpha1.ReasonHandoffHookMissing)
 	wantReady(t, r.reconcile(a.vpc, claims), claims)
 
+	// Local's XDP on the pair's tenant end, which receiving the NAT end's
+	// redirected return needs.
+	r.in(r.node, func() error {
+		l, err := netlink.LinkByName(pairTenant)
+		if err != nil {
+			return err
+		}
+		return netlink.LinkSetXdpFdWithFlags(l, -1, xdpDrvMode)
+	})
+	wantState(t, r.read(a.vpc), natClaim, true, false, true, workerv1alpha1.ReasonHandoffHookMissing)
+	wantReady(t, r.reconcile(a.vpc, claims), claims)
+
 	// The dispatcher's public slot: an empty or expired slot is no
 	// receiving path, and Local cannot repair it.
 	r.in(r.node, func() error {
