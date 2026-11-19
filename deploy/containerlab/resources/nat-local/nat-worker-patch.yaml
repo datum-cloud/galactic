@@ -1,0 +1,28 @@
+# Lab-only: point dfw's galactic-nat at galactic-worker. verify:nat-local
+# applies it with kubectl patch, and its closing redeploy removes it.
+spec:
+  template:
+    spec:
+      containers:
+        - name: galactic-nat
+          env:
+            - name: GALACTIC_NAT_WORKER_SOCKET
+              value: /run/galactic-worker/worker.sock
+          volumeMounts:
+            - name: galactic-worker-socket
+              mountPath: /run/galactic-worker
+            - name: galactic-worker-token
+              mountPath: /var/run/secrets/galactic-worker
+              readOnly: true
+      volumes:
+        - name: galactic-worker-socket
+          hostPath:
+            path: /run/galactic-worker
+            type: DirectoryOrCreate
+        - name: galactic-worker-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: galactic-worker
+                  expirationSeconds: 3600
+                  path: token
