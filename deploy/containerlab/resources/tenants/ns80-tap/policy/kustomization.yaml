@@ -1,0 +1,8 @@
+# ns80-tap's traffic policy: the handoff set
+# (../../policies/README.md), bound to both TAP attachments in both
+# directions. A binding is named after its VPCAttachment, which
+# scripts/publish-attachments.sh creates.
+namespace: ns80-tap
+resources:
+  - ../../policies/handoff
+  - bindings.yaml

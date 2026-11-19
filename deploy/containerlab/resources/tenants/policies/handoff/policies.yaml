@@ -1,0 +1,77 @@
+# The TAP guests of the Local handoff fixture (ns80-tap, docs/handoffs.md).
+# They stand in for a gateway backend and a NAT client at once, so each
+# direction grants PublicService and PublicNAT, and denies one port on each
+# as the policy-denied control. Private ingress comes only from the VPC
+# itself, so a public client delivered without a PublicService decision is
+# denied. Private egress is open: usid_egress decides a Local pass-through
+# destination on the Private path before the handoff's own decision runs.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: handoff-egress
+spec:
+  rules:
+    - name: deny-service-discard
+      action: Deny
+      match:
+        path: PublicService
+        protocol: UDP
+        destinationPorts:
+          - start: 9
+            end: 9
+    - name: allow-service
+      action: Allow
+      match:
+        path: PublicService
+    - name: deny-nat-discard
+      action: Deny
+      match:
+        path: PublicNAT
+        protocol: UDP
+        destinationPorts:
+          - start: 9
+            end: 9
+    - name: allow-nat
+      action: Allow
+      match:
+        path: PublicNAT
+    - name: allow-private
+      action: Allow
+      match:
+        path: Private
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: handoff-ingress
+spec:
+  rules:
+    - name: deny-service-discard
+      action: Deny
+      match:
+        path: PublicService
+        protocol: TCP
+        destinationPorts:
+          - start: 9
+            end: 9
+    - name: allow-service
+      action: Allow
+      match:
+        path: PublicService
+    - name: deny-nat-discard
+      action: Deny
+      match:
+        path: PublicNAT
+        protocol: TCP
+        destinationPorts:
+          - start: 9
+            end: 9
+    - name: allow-nat-returns
+      action: Allow
+      match:
+        path: PublicNAT
+    - name: allow-vpc
+      action: Allow
+      match:
+        path: Private
+        sourceCIDRs: ["fd20:80::/32", "fe80::/10"]
