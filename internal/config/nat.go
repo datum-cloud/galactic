@@ -142,6 +142,15 @@ type NATConfig struct {
 
 	// ProcSysPath is EnvNATProcSysPath.
 	ProcSysPath string
+
+	// WorkerSocket is Galactic Worker's socket. Empty turns local shard
+	// delivery through Worker off, leaving the shard reachable over the
+	// fabric alone.
+	WorkerSocket string
+
+	// WorkerTokenFile is the projected token the shard presents to Worker,
+	// workerclient's default when empty.
+	WorkerTokenFile string
 }
 
 // NewNATConfig creates a config resolver reading the GALACTIC_NAT
@@ -160,6 +169,8 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault("datapath_enabled", true)
 	v.SetDefault("echo_responder", false)
 	v.SetDefault("proc_sys_path", DefaultProcSysPath)
+	v.SetDefault("worker_socket", "")
+	v.SetDefault("worker_token_file", "")
 
 	cfg := &NATConfig{
 		v:      v,
@@ -184,6 +195,8 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{"nat-datapath-enabled", "datapath_enabled"},
 		{"nat-echo-responder", "echo_responder"},
 		{"nat-proc-sys-path", "proc_sys_path"},
+		{"worker-socket", "worker_socket"},
+		{"worker-token-file", "worker_token_file"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -210,6 +223,8 @@ func (c *NATConfig) readFields() {
 	c.DatapathEnabled = c.v.GetBool("datapath_enabled")
 	c.EchoResponder = c.v.GetBool("echo_responder")
 	c.ProcSysPath = c.v.GetString("proc_sys_path")
+	c.WorkerSocket = c.v.GetString("worker_socket")
+	c.WorkerTokenFile = c.v.GetString("worker_token_file")
 }
 
 // Validate checks that the required configuration fields are set.
