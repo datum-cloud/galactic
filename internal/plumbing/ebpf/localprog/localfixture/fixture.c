@@ -286,4 +286,12 @@ int ltf_nat(struct xdp_md *ctx)
 	return bpf_redirect(out, 0);
 }
 
+// ltf_pass passes everything. On the receiving end of a veth it turns on the
+// NAPI a native XDP_REDIRECT into its peer needs.
+SEC("xdp")
+int ltf_pass(struct xdp_md *ctx)
+{
+	return XDP_PASS;
+}
+
 char __license[] SEC("license") = "GPL";

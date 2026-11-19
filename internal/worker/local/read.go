@@ -337,6 +337,10 @@ func (k *Kernel) pairCheck(h *host, m *model, c module.Claim, vrfIdx int, objs *
 			ck.notReady(true, false, workerv1alpha1.ReasonHandoffHookMissing,
 				"Local's tc program is not on "+p.tenant)
 		}
+		if !k.pairNAPICurrent(got.tenant) {
+			ck.notReady(true, false, workerv1alpha1.ReasonHandoffHookMissing,
+				"Local's XDP program is not on "+p.tenant)
+		}
 		if !lowerUp(got.tenant) || !lowerUp(got.nat) {
 			ck.notReady(true, true, workerv1alpha1.ReasonHandoffInterfaceMissing, "the pair has no carrier")
 		}

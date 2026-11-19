@@ -213,16 +213,17 @@ func up(name string) error {
 	return netlink.LinkSetUp(l)
 }
 
-// wireLike makes a veth end stand in for the far side of a physical link:
-// it sends complete checksums, and takes a native XDP_REDIRECT into its
-// peer, which a veth receives only with GRO or an XDP program.
+// wireLike makes a veth end stand in for the far side of a physical link,
+// which sends complete checksums. GRO stays as the kernel left it: what lets
+// the client's end take a native redirect is the XDP program buildReceiver
+// attaches.
 func wireLike(name string) error {
 	et, err := ethtool.NewEthtool()
 	if err != nil {
 		return err
 	}
 	defer et.Close()
-	return et.Change(name, map[string]bool{featureTxChecksum: false, featureGRO: true})
+	return et.Change(name, map[string]bool{featureTxChecksum: false, featureGRO: false})
 }
 
 // buildReceiver builds the receiving device for r.cell: a veth (plain), a
@@ -303,6 +304,21 @@ func (r *rig) buildReceiver() {
 	}
 	build(r.node, r.rxLower, r.rx)
 	build(r.client, clientLowers, r.clientIf)
+	// The NAT stand-in redirects out of the node's end, natively, so the
+	// client's end must run NAPI: an XDP program turns it on whatever the
+	// kernel does with GRO. On a bond it goes to the members through the
+	// bond.
+	pass := clientLower
+	if r.cell == cellBond {
+		pass = bondName
+	}
+	r.in(r.client, func() error {
+		l, err := netlink.LinkByName(pass)
+		if err != nil {
+			return err
+		}
+		return netlink.LinkSetXdpFdWithFlags(l, r.fix.LtfPass.FD(), xdpDrvMode)
+	})
 	r.in(r.node, func() error { return addrOn(r.rx, netip.PrefixFrom(nodeAddr, 64)) })
 	r.in(r.client, func() error {
 		if err := addrOn(r.clientIf, netip.PrefixFrom(client, 64)); err != nil {
