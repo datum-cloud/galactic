@@ -80,12 +80,24 @@ func (k *Kernel) Advertise(ctx context.Context, vpc string, want []Advertisement
 	return nil
 }
 
-// Current implements Advertiser. It compares the names, pods and prefixes,
-// and leaves the router and route target to Advertise.
+// Current implements Advertiser. Besides the names, pods and prefixes it
+// compares each advertisement's router, VRF ID, route target and function
+// with the VPC's BGPVRFInstance, so a drift in either is published again.
 func (k *Kernel) Current(ctx context.Context, vpc string, want []Advertisement) (bool, error) {
 	have, err := k.listAdvertisements(ctx, vpc)
 	if err != nil || len(have) != len(want) {
 		return false, err
+	}
+	if len(want) == 0 {
+		return true, nil
+	}
+	inst := &bgpv1alpha1.BGPVRFInstance{}
+	key := client.ObjectKey{Namespace: k.Namespace, Name: crdnames.BGPVRFInstanceName(vpc, k.Node)}
+	if err := k.K8s.Get(ctx, key, inst); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read BGPVRFInstance %s: %w", key.Name, err)
 	}
 	byName := map[string]bgpv1alpha1.BGPAdvertisement{}
 	for _, adv := range have {
@@ -94,7 +106,7 @@ func (k *Kernel) Current(ctx context.Context, vpc string, want []Advertisement) 
 	for _, a := range want {
 		adv, ok := byName[crdnames.WorkerAdvertisementName(vpc, a.AttachmentUID, k.Node)]
 		if !ok || adv.Annotations[crdnames.AnnotationWorkerPod] != a.PodUID ||
-			!slices.Equal(adv.Spec.Prefixes, advertisedPrefixes(a.Addresses)) {
+			!slices.Equal(adv.Spec.Prefixes, advertisedPrefixes(a.Addresses)) || !matchesInstance(adv, inst) {
 			return false, nil
 		}
 	}
@@ -156,4 +168,17 @@ func advertisedPrefixes(addrs []netip.Addr) []bgpv1alpha1.Prefix {
 		}
 	}
 	return out
+}
+
+// matchesInstance reports whether adv carries inst's router, VRF ID and
+// export route target, and End.DT46.
+func matchesInstance(adv bgpv1alpha1.BGPAdvertisement, inst *bgpv1alpha1.BGPVRFInstance) bool {
+	if inst.Spec.RouterRef == nil || len(inst.Spec.ExportRouteTargets) == 0 {
+		return false
+	}
+	return adv.Spec.RouterRef.Name == inst.Spec.RouterRef.Name &&
+		adv.Spec.VRFID != nil && *adv.Spec.VRFID == inst.Spec.VRFID &&
+		adv.Spec.Function != nil && *adv.Spec.Function == bgpv1alpha1.SRv6FunctionEndDT46 &&
+		slices.Equal(adv.Spec.Communities,
+			[]bgpv1alpha1.Community{bgpv1alpha1.Community(inst.Spec.ExportRouteTargets[0].Value)})
 }
