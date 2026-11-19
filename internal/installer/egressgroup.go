@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -113,6 +114,13 @@ type egressGroup struct {
 	// locators is the set of /64 locators the groups' candidates live in,
 	// for the netlink filter. Written by the sweep goroutine.
 	locators atomic.Pointer[[]netip.Prefix]
+
+	// localRows is egress_local_shard's rows as this sweep read them, and
+	// localRowsKnown whether it could: a datapath older than the map has
+	// none, and the sweep then places nothing on this node's own shard.
+	// Written and read by the sweep goroutine only.
+	localRows      map[uint32]egressroutemap.LocalShard
+	localRowsKnown bool
 
 	mu sync.Mutex
 	// active and ineligible are each class's last applied counts, for
@@ -230,8 +238,64 @@ func (g *egressGroup) sweep(ctx context.Context) {
 		defer func() { _ = groupsCloser.Close() }()
 	}
 
+	g.localRows, g.localRowsKnown = readLocalShards(g.pinDir)
+
 	if err := g.sweepWith(ctx, table, groups, foreignTableIDs); err == nil {
 		g.ctl.SweepSucceeded(time.Now())
+	}
+}
+
+// readLocalShards reads egress_local_shard's rows, and reports false when
+// the map is missing or unreadable.
+func readLocalShards(pinDir string) (map[uint32]egressroutemap.LocalShard, bool) {
+	t, err := egressroutemap.OpenPinnedLocalShardTable(pinDir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Error("egress_local_shard unavailable; placing no class route on this node's own shard", "err", err)
+		}
+		return nil, false
+	}
+	defer func() { _ = t.Close() }()
+	rows, err := t.All()
+	if err != nil {
+		slog.Error("Failed to read egress_local_shard; placing no class route on this node's own shard", "err", err)
+		return nil, false
+	}
+	return rows, true
+}
+
+// localShardPollInterval is how often watchLocalShards reads
+// egress_local_shard. A BPF map raises no event when Galactic Worker writes
+// it, so a change is noticed by polling.
+var localShardPollInterval = time.Second
+
+// watchLocalShards kicks a sweep whenever egress_local_shard's rows change,
+// so an ordered-mode class route moves onto or off this node's own shard
+// within a poll of Worker writing or removing its row rather than at the
+// next refresh tick. Hashed mode needs no sweep for that, since usid_egress
+// reads the rows itself, but a sweep is harmless there.
+func (g *egressGroup) watchLocalShards(ctx context.Context) {
+	ticker := time.NewTicker(localShardPollInterval)
+	defer ticker.Stop()
+	var last map[uint32]egressroutemap.LocalShard
+	known := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		rows, ok := readLocalShards(g.pinDir)
+		if !ok {
+			continue
+		}
+		if known && maps.Equal(rows, last) {
+			continue
+		}
+		if known || len(rows) > 0 {
+			g.kick()
+		}
+		last, known = rows, true
 	}
 }
 
@@ -708,6 +772,9 @@ func (g *egressGroup) refresh(
 		return egressroutemap.RefreshResult{}, err
 	}
 	opts = append(opts, egressroutemap.WithoutTenantRoutes(workerTables))
+	if g.localRowsKnown {
+		opts = append(opts, egressroutemap.WithLocalShards(g.localRows))
+	}
 	result, err := table.Refresh(foreignTableIDs, shardSIDs, opts...)
 	if err != nil {
 		g.ctl.SweepError("refresh")
