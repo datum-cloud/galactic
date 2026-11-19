@@ -273,6 +273,33 @@ func Delete(vpc, vpcAttachment, ownerID string) error {
 	return nil
 }
 
+// Release tears down ownerID's host tap for the attachment. While the tap
+// carries ownerID's stamp, it passes the tap's ifindex to unregister, which
+// removes the map rows keyed on it, and then deletes the tap. A tap another
+// container's ADD has taken over is left with its rows, and owned is false;
+// the caller must then also leave the attachment's other per-interface state
+// alone. A missing tap is owned, so cleanup keyed by name still runs.
+//
+// An unregister failure is logged and does not stop the deletion.
+func Release(vpc, vpcAttachment, ownerID string, unregister func(ifindex uint32) error) (owned bool, err error) {
+	tapName := intf.GenerateInterfaceNameHost(vpc, vpcAttachment)
+	tapLink, err := netlink.LinkByName(tapName)
+	switch {
+	case err != nil && !isLinkNotFoundError(err):
+		return false, fmt.Errorf("look up tap %q: %w", tapName, err)
+	case err == nil && !OwnedBy(tapLink, ownerID):
+		slog.Info("tap: leaving host tap and its state alone, another container has taken this attachment over",
+			"tap", tapName, "owner", tapLink.Attrs().Alias, "requestedBy", ownerID)
+		return false, nil
+	case err == nil:
+		if err := unregister(uint32(tapLink.Attrs().Index)); err != nil {
+			slog.Warn("tap: failed to remove the tap's eBPF interface state", "err", err,
+				"tap", tapName, "owner", ownerID)
+		}
+	}
+	return true, Delete(vpc, vpcAttachment, ownerID)
+}
+
 // ensureMTU sets the tap's MTU to mtu, leaving the kernel default in place
 // when none is configured.
 //

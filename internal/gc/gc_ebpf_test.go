@@ -67,7 +67,8 @@ func gcTestScheme(t *testing.T) *runtime.Scheme {
 // that as an error.
 func TestSweepEBPFVRFTable_MissingPinDirIsNoOp(t *testing.T) {
 	k8s := fake.NewClientBuilder().WithScheme(gcTestScheme(t)).Build()
-	result := SweepEBPFVRFTable(context.Background(), k8s, "default", "node-a", "/sys/fs/bpf/galactic-does-not-exist")
+	result := SweepEBPFVRFTable(context.Background(), k8s, "default", "node-a", "/sys/fs/bpf/galactic-does-not-exist",
+		Unfenced)
 	if result.Errors != 0 || result.EBPFVRFEntriesRemoved != 0 {
 		t.Errorf("result = %+v, want a zero-value result (no-op)", result)
 	}
@@ -144,7 +145,7 @@ func TestSweepEBPFVRFTable_RemovesStaleKeepsLive(t *testing.T) {
 		t.Fatalf("seed stale entry: %v", err)
 	}
 
-	result := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir)
+	result := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir, Unfenced)
 	if result.Errors != 0 {
 		t.Errorf("result.Errors = %d, want 0", result.Errors)
 	}
@@ -222,7 +223,7 @@ func TestSweepEBPFVRFTable_PreservesIngressSidecarReservedBlock(t *testing.T) {
 		t.Fatalf("seed ordinary stale entry: %v", err)
 	}
 
-	result := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir)
+	result := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir, Unfenced)
 	if result.Errors != 0 {
 		t.Errorf("result.Errors = %d, want 0", result.Errors)
 	}
@@ -291,7 +292,7 @@ func TestSweepEBPFVRFTable_NoRoutersForNodeSkipsSweep(t *testing.T) {
 		t.Fatalf("seed entry: %v", err)
 	}
 
-	result := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir)
+	result := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir, Unfenced)
 	if result.Errors != 0 {
 		t.Errorf("result.Errors = %d, want 0 (no-router is a skip, not an error)", result.Errors)
 	}
@@ -489,19 +490,19 @@ func TestSweepEBPFVRFTable_KeepsEdgeAttachmentEntry(t *testing.T) {
 	}
 
 	setLinks(nil, errors.New("netlink"))
-	if res := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir); res.Errors != 1 ||
+	if res := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir, Unfenced); res.Errors != 1 ||
 		res.EBPFVRFEntriesRemoved != 0 || !present(edgeVRFID) || !present(otherVRFID) {
 		t.Fatalf("sweep without the edge links = %+v; want an error and nothing removed", res)
 	}
 
 	setLinks([]hostattach.ObservedAttachment{{ID: hostattach.LinkID("a", "uid"), HostIndex: edgeIndex}}, nil)
-	res := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir)
+	res := SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir, Unfenced)
 	if res.Errors != 0 || res.EBPFVRFEntriesRemoved != 1 || !present(edgeVRFID) || present(otherVRFID) {
 		t.Fatalf("sweep with an edge link = %+v; want only the unused entry removed", res)
 	}
 
 	setLinks(nil, nil)
-	res = SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir)
+	res = SweepEBPFVRFTable(context.Background(), k8s, namespace, nodeName, pinDir, Unfenced)
 	if res.Errors != 0 || res.EBPFVRFEntriesRemoved != 1 || present(edgeVRFID) {
 		t.Fatalf("sweep after the edge link is released = %+v; want its entry removed", res)
 	}

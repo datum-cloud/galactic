@@ -16,7 +16,7 @@
 // A stamped link is released only under its own ID, so cleanup of an earlier
 // attachment never touches a replacement's.
 //
-// Each VPC on the node is one ownership scope (internal/edge/ownership). A
+// Each VPC on the node is one ownership scope (internal/ownership). A
 // process takes over the scopes its predecessors held with Fence and Adopt,
 // and writes each scope only inside a commit, so a write prepared by an
 // earlier process, or before another writer's commit, never lands.
@@ -47,8 +47,8 @@ import (
 	"go.datum.net/galactic/internal/edge/claim"
 	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/edge/hostattach"
-	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/timing"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )

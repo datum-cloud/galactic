@@ -6,18 +6,32 @@ package installer
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
+	"go.datum.net/galactic/internal/cni/vpcfence"
 	"go.datum.net/galactic/internal/hostgw"
 	"go.datum.net/galactic/internal/plumbing/ebpf/metrics"
 )
 
 // TestMain keeps Run's host link repair, which every test calling Run
 // starts, off the test host's real links and VRF lock.
+// TestMain stubs the host link re-enslavement and points the VPC write fence
+// at a temporary directory, so tests neither need root to create it nor
+// contend with a real node's.
 func TestMain(m *testing.M) {
 	reenslaveHostLinksFn = func() (hostgw.MasterlessResult, error) { return hostgw.MasterlessResult{}, nil }
-	os.Exit(m.Run())
+	os.Exit(func() int {
+		dir, err := os.MkdirTemp("", "installer-vpcfence-")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		vpcfence.Dir = dir
+		return m.Run()
+	}())
 }
 
 // hostLinkMetric returns the value of the unlabeled host link series name.

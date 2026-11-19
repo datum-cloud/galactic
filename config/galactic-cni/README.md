@@ -165,6 +165,19 @@ lock path is a constant every one of those processes shares. Without the
 mount, the repair would lock a file only it can see, and could re-enslave a
 link at the same moment an ADD or GC acts on its VRF.
 
+## The `vpc-ownership` mount
+
+`/var/lib/galactic-edge/ownership` holds the node's VPC write fence
+(`internal/ownership`). Host-executed CNI writes a VPC's shared host state
+under it: the VRF, the SID Argument and BGPVRFInstance, `vrf_table` rows and
+the attachment's BGPAdvertisement. `credential-refresh` writes under it too,
+for the ingress sidecar's return path, its reaper and the `vrf_table` repair.
+The repair leaves a VPC whose scope galactic-worker owns to that Worker.
+galactic-router, galactic-edge and galactic-worker share the same directory.
+Like `vrf-lock-dir`, it is mounted at its own host-absolute path, because
+every writer must lock the same files. On a missing mount the writes fence
+against a private, empty directory and no longer exclude the other writers.
+
 ## The `cni-net-dir` mount
 
 `credential-refresh` mounts the host's `/etc/cni/net.d` writable, as the

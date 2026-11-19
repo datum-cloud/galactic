@@ -12,6 +12,7 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	type100 "github.com/containernetworking/cni/pkg/types/100"
 
+	"go.datum.net/galactic/internal/cni/vpcfence"
 	"go.datum.net/galactic/internal/nadpatch"
 	"go.datum.net/galactic/internal/podslice"
 )
@@ -106,8 +107,11 @@ func releaseAdvertisementBestEffort(args *skel.CmdArgs, namespace, vpc, vpcAttac
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cniTimeout)
 	defer cancel()
-	if err := releaseAdvertisement(ctx, k8sClient, namespace, vpc, vpcAttachment, cniConfig.NodeName,
-		args.ContainerID); err != nil {
+	// The advertisement is shared state of the VPC on the node.
+	if err := vpcfence.Write(ctx, vpc, func() error {
+		return releaseAdvertisement(ctx, k8sClient, namespace, vpc, vpcAttachment, cniConfig.NodeName,
+			args.ContainerID)
+	}); err != nil {
 		slog.Error("DEL: failed to release advertisement, cleanup deferred to GC", "err", err,
 			"containerID", args.ContainerID, "vpc", vpc, "vpcAttachment", vpcAttachment)
 		return

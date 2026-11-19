@@ -164,11 +164,11 @@ spec:
             # DaemonSet regardless of this mount's presence.
             - name: cni-state
               mountPath: /var/lib/cni
-            # The node's write fence, shared with galactic-edge
-            # (internal/edge/ownership). GC deletes a VPC's VRF and
-            # BGPVRFInstance only under that VPC's fence, after checking no
-            # edge attachment uses it. Without this mount GC reclaims
-            # neither.
+            # The node's VPC write fence (internal/ownership), shared with
+            # CNI, galactic-edge and galactic-worker. GC deletes a VPC's VRF
+            # and BGPVRFInstance only under that VPC's fence, after checking
+            # no edge attachment uses it and no galactic-worker owns it.
+            # Without this mount GC reclaims neither.
             - name: edge-ownership
               mountPath: /var/lib/galactic-edge/ownership
             - name: gobgp-api

@@ -412,8 +412,9 @@ func (w *Worker) withdrawLocked(k module.ClaimKey, gen uint64, scope, reason str
 
 // fenceIfRepairing fences a scope whose last commit failed, so a repair that
 // holds a ticket while preparing its snapshot cannot commit state that still
-// includes a released claim. The next reconcile adopts the scope and commits
-// a snapshot from current desired state.
+// includes a released claim. It takes the scope over again in one step, which
+// advances the generation and requires a snapshot, so the next reconcile
+// commits one from current desired state.
 func (w *Worker) fenceIfRepairing(vpc string) {
 	w.mu.Lock()
 	s := w.scopes[vpc]
@@ -422,14 +423,9 @@ func (w *Worker) fenceIfRepairing(vpc string) {
 	if !repairing {
 		return
 	}
-	gen, err := w.d.Fence.Fence(module.Scope{VPC: vpc}.Name())
-	if err != nil {
+	if _, err := w.d.Fence.Takeover(module.Scope{VPC: vpc}.Name(), w.owner, workerOrUnowned); err != nil {
 		w.log.Error("fence scope for release", "vpc", vpc, "error", err)
-		return
 	}
-	w.mu.Lock()
-	w.scope(vpc).fenced = gen
-	w.mu.Unlock()
 }
 
 // refuse counts a refusal and returns it.

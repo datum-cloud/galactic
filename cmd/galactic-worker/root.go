@@ -27,11 +27,15 @@ import (
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 	"go.datum.net/galactic/internal/config"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/edge/maintenance"
+	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/ownership"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/worker"
 	"go.datum.net/galactic/internal/worker/auth"
+	"go.datum.net/galactic/internal/worker/hostscope"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/sources"
 	"go.datum.net/galactic/internal/worker/store"
@@ -66,6 +70,8 @@ type options struct {
 	renewInterval  time.Duration
 	claimLimit     int
 	resyncInterval time.Duration
+	pinDir         string
+	hostGrace      time.Duration
 }
 
 func (o *options) validate() error {
@@ -75,6 +81,9 @@ func (o *options) validate() error {
 	}
 	if o.allowlist == "" {
 		errs = append(errs, errors.New("--allowlist is required"))
+	}
+	if o.hostGrace <= 0 {
+		errs = append(errs, errors.New("--host-grace must be positive"))
 	}
 	if o.claimLimit < 1 {
 		errs = append(errs, errors.New("--claim-limit must be at least 1"))
@@ -149,14 +158,26 @@ func run(o *options) error {
 	if err != nil {
 		return fmt.Errorf("create API client: %w", err)
 	}
+	// Edge attachments keep their VPC's host state; without the guard Worker
+	// knows of none, so it reclaims nothing (gc.EdgeUsers).
+	var edge gc.EdgeUsers
+	if guard, err := maintenance.NewGuard(direct, o.nodeName, o.ownershipDir); err != nil {
+		slog.Error("edge attachment guard unavailable: Worker will reclaim no VPC host state", "error", err)
+		edge = maintenance.Unavailable{Err: err}
+	} else {
+		edge = guard
+	}
 	w, err := worker.New(worker.Config{
 		Node: o.nodeName, Lease: o.lease, RenewInterval: o.renewInterval,
-		ClaimLimit: o.claimLimit, ResyncInterval: o.resyncInterval,
+		ClaimLimit: o.claimLimit, ResyncInterval: o.resyncInterval, HostGrace: o.hostGrace,
 	}, worker.Deps{
 		Store:   st,
 		Fence:   fence,
 		Sources: sources.Kube{Reader: mgr.GetClient(), Namespace: o.namespace},
 		Modules: reg,
+		Host: &hostscope.Kernel{
+			K8s: direct, Namespace: o.namespace, Node: o.nodeName, PinDir: o.pinDir, Edge: edge,
+		},
 		Auth: &auth.Authenticator{
 			Reviewer:  auth.KubeTokenReviewer{Client: direct},
 			Pods:      auth.CgroupPodResolver{ProcRoot: o.procRoot},
@@ -169,6 +190,13 @@ func run(o *options) error {
 		return err
 	}
 	if err := sources.Watch(ctx, mgr.GetCache(), w.Changed); err != nil {
+		return err
+	}
+	// A CNI attachment's link joining or leaving a VPC's VRF requeues that
+	// VPC; the periodic resync covers a lost subscription.
+	if err := hostscope.Watch(ctx, w.HostChanged, func(err error) {
+		slog.Error("link event subscription failed; relying on periodic resync", "error", err)
+	}); err != nil {
 		return err
 	}
 
@@ -258,6 +286,9 @@ func newRootCommand() *cobra.Command {
 	f.IntVar(&o.claimLimit, "claim-limit", worker.DefaultClaimLimit, "Claims one caller may hold")
 	f.DurationVar(&o.resyncInterval, "resync-interval", worker.DefaultResyncInterval,
 		"How often every VPC scope is reconciled again")
+	f.StringVar(&o.pinDir, "pin-dir", attach.PinDir, "bpffs directory of the pinned uSID maps")
+	f.DurationVar(&o.hostGrace, "host-grace", worker.DefaultHostGrace,
+		"How long a VPC's host state must go unused before Worker reclaims it")
 	f.Bool("build-info", false, "Print build information and exit")
 	f.BoolP("version", "V", false, "Print version and exit")
 	logOpts.BindFlags(cmd.PersistentFlags())

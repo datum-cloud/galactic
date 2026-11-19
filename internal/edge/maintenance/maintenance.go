@@ -16,7 +16,7 @@
 //     attachment whose object is gone or unreadable but whose host state is
 //     not yet released.
 //
-// Reclaim decides again under the VPC's write fence (internal/edge/ownership),
+// Reclaim decides again under the VPC's write fence (internal/ownership),
 // which galactic-edge holds while it programs, so a reclaim decided from an
 // earlier view cannot remove state an attachment programmed since.
 package maintenance
@@ -33,7 +33,7 @@ import (
 
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/hostattach"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 )
 
 // ErrInUse is returned by Reclaim when an edge attachment uses the VPC.
@@ -123,11 +123,16 @@ func canonical(vpc string) string {
 // Reclaim runs reclaim, which removes vpc's shared state, with vpc's write
 // fence held, after confirming under the fence that no edge attachment uses
 // vpc. It returns an error wrapping ErrInUse, and runs nothing, when one does,
-// and runs nothing while ownership of vpc moves between galactic-edge
-// processes. The write makes every ticket galactic-edge holds for vpc stale,
+// and runs nothing while ownership of vpc moves between processes. It also
+// runs nothing, returning an error wrapping ownership.ErrWorkerOwned, when a
+// galactic-worker incarnation owns vpc's scope, since that Worker reclaims
+// the VPC's state itself. The write makes every ticket galactic-edge holds for vpc stale,
 // so a change it prepared before the reclaim is refused and prepared again.
 func (g *Guard) Reclaim(ctx context.Context, vpc string, reclaim func() error) error {
-	return g.Ownership.Exclusive(ownership.VPCScope(vpc), func() error {
+	return g.Ownership.ExclusiveIf(ownership.VPCScope(vpc), func(r ownership.Record) error {
+		if err := ownership.RefuseWorkerOwned(r); err != nil {
+			return err
+		}
 		ctx, cancel := context.WithTimeout(ctx, listTimeout)
 		defer cancel()
 		vpcs, err := g.VPCs(ctx)

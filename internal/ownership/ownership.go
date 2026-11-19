@@ -46,6 +46,7 @@
 package ownership
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +54,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -256,11 +258,40 @@ func (a *Authority) commit(t Ticket, snapshot bool, mutate func() error) (Ticket
 // authority for the same scope, and mutate must finish every write before it
 // returns.
 func (a *Authority) Exclusive(scope string, check, mutate func() error) error {
+	return a.ExclusiveIf(scope, func(Record) error { return check() }, mutate)
+}
+
+// transitionPoll is how often ExclusiveWait retries a scope whose ownership
+// is moving.
+const transitionPoll = 50 * time.Millisecond
+
+// ExclusiveWait is ExclusiveIf, retried while ownership of the scope moves
+// until ctx is done, when it returns the last ErrTransitioning joined with
+// ctx's error.
+func (a *Authority) ExclusiveWait(ctx context.Context, scope string, check func(Record) error,
+	mutate func() error) error {
+	for {
+		err := a.ExclusiveIf(scope, check, mutate)
+		if !errors.Is(err, ErrTransitioning) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(transitionPoll):
+		}
+	}
+}
+
+// ExclusiveIf is Exclusive with a check that also reads the scope's record as
+// it stands under the lock, so a writer can refuse a scope by its owner
+// without a window in which the owner changes.
+func (a *Authority) ExclusiveIf(scope string, check func(Record) error, mutate func() error) error {
 	return a.lockedStaged(scope, func(r *Record, persist func() error) error {
 		if r.Transitioning {
 			return ErrTransitioning
 		}
-		if err := check(); err != nil {
+		if err := check(*r); err != nil {
 			return err
 		}
 		pending := r.Pending
@@ -311,6 +342,67 @@ func (a *Authority) Adopt(scope, owner string, generation uint64) (Ticket, error
 		return true, nil
 	})
 	return t, err
+}
+
+// Takeover moves scope to owner in one step under the scope's lock: it
+// advances the generation, so no ticket issued before it can commit, names
+// owner, and returns a ticket that requires a snapshot commit. from decides,
+// from the record as it stands, whether the current owner may be replaced;
+// when it refuses, Takeover returns ErrNotOwner and changes nothing.
+//
+// Takeover leaves no window between fencing and adopting, so a process that
+// dies during the transfer cannot leave the scope transitioning and refuse
+// every Exclusive writer until it returns. It also completes a transfer an
+// earlier Fence left open.
+func (a *Authority) Takeover(scope, owner string, from func(Record) bool) (Ticket, error) {
+	if owner == "" {
+		return Ticket{}, ErrNoOwner
+	}
+	var t Ticket
+	err := a.locked(scope, func(r *Record) (bool, error) {
+		if !from(*r) {
+			return false, fmt.Errorf("%w: %q owns %q", ErrNotOwner, r.Owner, scope)
+		}
+		r.Owner, r.Generation, r.Transitioning, r.Pending = owner, r.Generation+1, false, true
+		t = ticket(scope, *r)
+		return true, nil
+	})
+	return t, err
+}
+
+// WorkerOwnerPrefix starts the owner ID of every galactic-worker
+// incarnation.
+const WorkerOwnerPrefix = "galactic-worker:"
+
+// WorkerOwned reports whether owner is a galactic-worker incarnation.
+func WorkerOwned(owner string) bool { return strings.HasPrefix(owner, WorkerOwnerPrefix) }
+
+// ErrWorkerOwned is returned by a writer that leaves a scope alone because a
+// galactic-worker incarnation owns it and does that writer's work there.
+var ErrWorkerOwned = errors.New("ownership: a galactic-worker incarnation owns the scope")
+
+// RefuseWorkerOwned is an ExclusiveIf check that refuses a scope a
+// galactic-worker incarnation owns with ErrWorkerOwned.
+func RefuseWorkerOwned(r Record) error {
+	if WorkerOwned(r.Owner) {
+		return fmt.Errorf("%w: %q", ErrWorkerOwned, r.Owner)
+	}
+	return nil
+}
+
+// Scopes returns the name of every scope with a record.
+func (a *Authority) Scopes() ([]string, error) {
+	entries, err := os.ReadDir(a.dir)
+	if err != nil {
+		return nil, fmt.Errorf("ownership: list %s: %w", a.dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if name, ok := strings.CutSuffix(e.Name(), ".json"); ok && scopeName.MatchString(name) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
 }
 
 // Read returns the scope's record.
