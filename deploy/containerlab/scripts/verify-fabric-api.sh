@@ -34,11 +34,22 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 WORK=$(mktemp -d)
+# stop_pf ends the gateway port-forward and waits for it, so no kubectl
+# outlives the script.
+PF_PID=
+stop_pf() {
+  [[ -n "${PF_PID}" ]] || return 0
+  kill "${PF_PID}" 2>/dev/null || true
+  wait "${PF_PID}" 2>/dev/null || true
+  PF_PID=
+}
 cleanup() {
-  [[ -n "${PF_PID:-}" ]] && kill "${PF_PID}" 2>/dev/null || true
+  stop_pf
   rm -rf "${WORK}"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "Building the fabric-api client..."
 (cd "${SCRIPT_DIR}/../../.." && CGO_ENABLED=0 go build -o "${WORK}/fabric-api" ./cmd/fabric-api)
@@ -252,7 +263,9 @@ for site in dfw iad sjc; do
 
   # Gateway debug service, through a port-forward to its Service.
   port=$((19346 + RANDOM % 1000))
-  k -n galactic-system port-forward svc/fabric-api-gateway "${port}:9346" >/dev/null 2>&1 &
+  # Call kubectl directly rather than through k: backgrounding a function
+  # forks a subshell, and $! would then name the subshell, not kubectl.
+  kubectl --kubeconfig "${kc}" -n galactic-system port-forward svc/fabric-api-gateway "${port}:9346" >/dev/null 2>&1 &
   PF_PID=$!
   for _ in $(seq 1 50); do
     (echo >/dev/tcp/127.0.0.1/${port}) 2>/dev/null && break
@@ -270,8 +283,7 @@ for site in dfw iad sjc; do
   else
     bad "${site} gateway: public probe of a loopback: ${r}"
   fi
-  kill "${PF_PID}" 2>/dev/null || true
-  PF_PID=
+  stop_pf
 
   # FabricQuery end to end, written as NSO would write it on the hub.
   k create namespace fabric-api-verify --dry-run=client -o yaml | k apply -f - >/dev/null
