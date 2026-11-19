@@ -1,0 +1,75 @@
+# dfw-worker4's guests: both VPCs' second attachments get the same address,
+# fd20:80:ff01::2:0:0, so the overlap holds on the second node too. Each
+# guest has its own attachment (84 in VPC 80, 85 in VPC 81; ns80-tap holds
+# 82), since scripts/publish-attachments.sh binds one attachment to one
+# pod's node.
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: vpc-a2
+  namespace: ns80
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "vpc-a2",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "80",
+          "vpcattachment": "84",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:80:ff01:0:0:2::/96",
+                "gateway": "fd20:80:ff01::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "80",
+          "vpcattachment": "84",
+          "namespace": "galactic-system"
+        }
+      ]
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: vpc-b2
+  namespace: ns80
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "vpc-b2",
+      "plugins": [
+        {
+          "type": "galactic-veth",
+          "vpc": "81",
+          "vpcattachment": "85",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:80:ff01:0:0:2::/96",
+                "gateway": "fd20:80:ff01::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "81",
+          "vpcattachment": "85",
+          "namespace": "galactic-system"
+        }
+      ]
+    }

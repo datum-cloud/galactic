@@ -25,7 +25,7 @@ WANT_V4=1420
 WANT_V6=1400
 CNI_METRICS_PORT=9180
 NAT_METRICS_PORT=9182
-CNI_NODES=(dfw-worker dfw-worker2 dfw-worker3 sjc-worker sjc-worker2 iad-worker iad-worker2)
+CNI_NODES=(dfw-worker dfw-worker2 dfw-worker3 dfw-worker4 sjc-worker sjc-worker2 iad-worker iad-worker2)
 SITES=(dfw sjc iad)
 declare -A FIRST_SHARD=([dfw]=dfw-worker2 [sjc]=sjc-worker2 [iad]=iad-worker2)
 

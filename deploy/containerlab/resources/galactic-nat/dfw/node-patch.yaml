@@ -8,12 +8,13 @@ spec:
       containers:
         - name: galactic-nat
           env:
-            # Both of an edge node's uplinks, each an LACP bond: bond0 to the
-            # transit (NAT replies arrive here) and bond1 to the site's
-            # compute node (encapsulated tenant egress arrives here). The shard
-            # runs from the XDP dispatcher on every member of both. Named
+            # Every one of an edge node's uplinks, each an LACP bond: bond0 to
+            # the transit (NAT replies arrive here), bond1 to dfw-worker and
+            # bond2 to dfw-worker4, the site's two compute nodes (encapsulated
+            # tenant egress arrives on those). The shard runs from the XDP
+            # dispatcher on every member of all three. Named
             # explicitly rather
             # than auto-detected: Kind's eth0 carries this node's IPv6 default
             # route, so detection would also claim the management bridge.
             - name: GALACTIC_NAT_UPLINK_INTERFACES
-              value: bond0,bond1
+              value: bond0,bond1,bond2

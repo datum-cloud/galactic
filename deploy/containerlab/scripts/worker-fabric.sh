@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR=$(cd "${SCRIPT_DIR}/../../.." && pwd)
-NODES=${NODES:-"dfw-worker sjc-worker"}
+NODES=${NODES:-"dfw-worker dfw-worker4 sjc-worker"}
 DIR=/opt/galactic-worker
 LOG=/var/log/galactic-worker.log
 PIN_DIR=/sys/fs/bpf/galactic
