@@ -108,7 +108,7 @@ Worker, even an incarnation that no longer runs: router GC
 (`maintenance.Guard.Reclaim`), galactic-router's tenant route writes, the
 installer's `vrf_table` repair and its sweep. `galactic-worker handback`
 (`internal/worker/handback`) is the only way such a scope returns to them
-(D30). It runs on the node after the Worker pod is gone:
+(D34). It runs on the node after the Worker pod is gone:
 
 1. It refuses while a process accepts connections on the Worker socket.
 2. For each scope a Worker incarnation owned when it started, `Relinquish`
