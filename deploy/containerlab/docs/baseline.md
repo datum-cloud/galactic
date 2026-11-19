@@ -88,20 +88,22 @@ The IPv4 check captures on `remote-host` itself and stops every tcpdump
 there, so `gateway-ipv4` has no `remote-host` capture point. The check's own
 client-side assertions stand in for it.
 
-### Intermittent TCP loss in the gateway checks
+### Gateway flow counts
 
-Both lab ingress checks lose a TCP flow now and then, with or without these
-captures: in three back-to-back runs of `verify-gateway-ingress-ipv4.sh --node
-dfw-worker2` with no capture running, one answered 6 of 8 TCP flows. The
-captures show that the lost flow is delivered. The request reaches the
-backend over the gateway, and the backend acknowledges it. Then the `ns60`
-responder (`socat ... fork SYSTEM:`) closes without writing a reply, 1 to
-2 ms after the client's FIN, and that close returns to the client over the
-DSR path. UDP flows are never lost.
-
-So each gateway scenario's exact flow counts and the check's exit status go
-to `volatile.tsv`, and `results.json` records only whether each protocol had
+Each gateway scenario's exact flow counts and the check's exit status go to
+`volatile.tsv`, and `results.json` records only whether each protocol had
 answered flows.
+
+The baseline was recorded while the `ns60` responder still lost flows: in
+three back-to-back runs of `verify-gateway-ingress-ipv4.sh --node dfw-worker2`
+with no capture running, one answered 6 of 8 TCP flows. The captures showed
+each lost request reaching its backend, which then closed without a reply.
+The responder ran `socat ... fork SYSTEM:"echo ..."`, and socat wrote the
+client's request into `echo` after `echo` had exited. When that write failed
+before socat relayed the reply, socat exited and closed the flow. UDP had the
+same fault, less often. Since #1452 the responder discards the request
+(`SYSTEM:...!!/dev/null`), and both ingress checks fail on any unanswered
+flow.
 
 ## Capture points
 
