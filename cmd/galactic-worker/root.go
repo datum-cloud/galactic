@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -31,12 +32,15 @@ import (
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/logging"
 	"go.datum.net/galactic/internal/metadata"
+	"go.datum.net/galactic/internal/nodelocator"
 	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/worker"
 	"go.datum.net/galactic/internal/worker/auth"
+	"go.datum.net/galactic/internal/worker/fabric"
 	"go.datum.net/galactic/internal/worker/hostscope"
 	"go.datum.net/galactic/internal/worker/module"
+	"go.datum.net/galactic/internal/worker/routes"
 	"go.datum.net/galactic/internal/worker/sources"
 	"go.datum.net/galactic/internal/worker/store"
 )
@@ -94,10 +98,6 @@ func (o *options) validate() error {
 	return errors.Join(errs...)
 }
 
-// modules returns the delivery modules this build runs. Local (#1435) and
-// Fabric (#1436) add themselves here.
-func modules() []module.Module { return nil }
-
 func run(o *options) error {
 	allow, err := auth.LoadAllowlist(o.allowlist)
 	if err != nil {
@@ -113,11 +113,6 @@ func run(o *options) error {
 	if err != nil {
 		return err
 	}
-	reg, err := module.NewRegistry(modules()...)
-	if err != nil {
-		return err
-	}
-
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(sources.AddToScheme(scheme))
@@ -167,6 +162,28 @@ func run(o *options) error {
 	} else {
 		edge = guard
 	}
+	// The tenant routes galactic-router hands Worker, which the Fabric
+	// module writes.
+	tenantRoutes := routes.New()
+	fabricDatapath := &fabric.Kernel{PinDir: o.pinDir, K8s: direct, Namespace: o.namespace, Node: o.nodeName}
+	defer func() { _ = fabricDatapath.Close() }()
+	fab, err := fabric.New(fabric.Config{
+		Routes:   tenantRoutes,
+		Datapath: fabricDatapath,
+		OwnLocator: func(ctx context.Context) (netip.Prefix, error) {
+			return nodelocator.Prefix(ctx, mgr.GetClient(), o.namespace, o.nodeName)
+		},
+		Log: slog.Default(),
+	})
+	if err != nil {
+		return err
+	}
+	fabric.InitMetrics()
+	// The delivery modules this build runs.
+	reg, err := module.NewRegistry(fab)
+	if err != nil {
+		return err
+	}
 	w, err := worker.New(worker.Config{
 		Node: o.nodeName, Lease: o.lease, RenewInterval: o.renewInterval,
 		ClaimLimit: o.claimLimit, ResyncInterval: o.resyncInterval, HostGrace: o.hostGrace,
@@ -184,7 +201,8 @@ func run(o *options) error {
 			Allowlist: allow,
 			Node:      o.nodeName,
 		},
-		Log: slog.Default(),
+		Routes: tenantRoutes,
+		Log:    slog.Default(),
 	})
 	if err != nil {
 		return err
@@ -196,6 +214,14 @@ func run(o *options) error {
 	// VPC; the periodic resync covers a lost subscription.
 	if err := hostscope.Watch(ctx, w.HostChanged, func(err error) {
 		slog.Error("link event subscription failed; relying on periodic resync", "error", err)
+	}); err != nil {
+		return err
+	}
+	// An underlay route or neighbor change requeues only the VPCs whose
+	// tenant routes it touches; the periodic resync covers a lost
+	// subscription.
+	if err := fab.Watch(ctx, w.RoutesChanged, func(err error) {
+		slog.Error("route and neighbor event subscription failed; relying on periodic resync", "error", err)
 	}); err != nil {
 		return err
 	}
