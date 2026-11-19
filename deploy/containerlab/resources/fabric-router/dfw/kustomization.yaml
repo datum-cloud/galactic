@@ -7,7 +7,7 @@ patches:
       kind: DaemonSet
       name: fabric-api-certs
 
-# One fabric-router.<nodename> ConfigMap per fabric-carrying node (dfw: compute, two edge workers),
+# One fabric-router.<nodename> ConfigMap per fabric-carrying node (dfw: two compute, two edge workers),
 # each carrying that node's frr.conf. Names must match exactly what
 # fabric-config-agent looks up, so no hash suffix; a change is applied live
 # by the agent's config-agent sidecar instead of by a rollout.
@@ -25,6 +25,9 @@ configMapGenerator:
   - name: fabric-router.dfw-worker3
     files:
       - frr.conf=frr.conf.dfw-worker3
+  - name: fabric-router.dfw-worker4
+    files:
+      - frr.conf=frr.conf.dfw-worker4
   # The fabric-api node sidecar reads site and cell from this ConfigMap once,
   # at start, so it ships with the DaemonSet. The gateway (deploy:fabric-api)
   # reads it too. The lab's cell, site and member cluster name are all the

@@ -27,7 +27,7 @@ source "${SCRIPT_DIR}/lib.sh"
 
 WANT_LIMIT=1460
 CNI_METRICS_PORT=9180
-CNI_NODES=(dfw-worker dfw-worker2 dfw-worker3 sjc-worker sjc-worker2 iad-worker iad-worker2)
+CNI_NODES=(dfw-worker dfw-worker2 dfw-worker3 dfw-worker4 sjc-worker sjc-worker2 iad-worker iad-worker2)
 SITES=(dfw sjc iad)
 HOST6="2001:db8:1:40::2"
 # ICMP payload sizes that make a 1500-byte and a 1460-byte packet.

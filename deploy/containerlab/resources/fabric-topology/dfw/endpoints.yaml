@@ -86,3 +86,83 @@ spec:
     ipv6: 2001:db8:1:13::2
   source:
     type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: dfw-worker2-link-14
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: hub
+spec:
+  routingDomain: lab
+  cell: dfw
+  routerRef:
+    name: dfw-worker2
+  transport: link-14
+  asn: 65000
+  addresses:
+    ipv4: 10.1.14.1
+    ipv6: 2001:db8:1:14::1
+  source:
+    type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: dfw-worker4-link-14
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: spoke
+spec:
+  routingDomain: lab
+  cell: dfw
+  routerRef:
+    name: dfw-worker4
+  transport: link-14
+  asn: 65000
+  addresses:
+    ipv4: 10.1.14.2
+    ipv6: 2001:db8:1:14::2
+  source:
+    type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: dfw-worker3-link-15
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: hub
+spec:
+  routingDomain: lab
+  cell: dfw
+  routerRef:
+    name: dfw-worker3
+  transport: link-15
+  asn: 65000
+  addresses:
+    ipv4: 10.1.15.1
+    ipv6: 2001:db8:1:15::1
+  source:
+    type: Manual
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: FabricEndpoint
+metadata:
+  name: dfw-worker4-link-15
+  namespace: galactic-system
+  labels:
+    lab.galactic.datumapis.com/role: spoke
+spec:
+  routingDomain: lab
+  cell: dfw
+  routerRef:
+    name: dfw-worker4
+  transport: link-15
+  asn: 65000
+  addresses:
+    ipv4: 10.1.15.2
+    ipv6: 2001:db8:1:15::2
+  source:
+    type: Manual
