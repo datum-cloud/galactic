@@ -45,6 +45,9 @@ router bgp 65000
  # iBGP to the compute node this edge node backs up.
  neighbor 2001:db8:1:13::2 remote-as 65000
  neighbor 10.1.13.2 remote-as 65000
+ # dfw-worker4, dfw's second compute node, on bond2.
+ neighbor 2001:db8:1:15::2 remote-as 65000
+ neighbor 10.1.15.2 remote-as 65000
  !
  address-family ipv6 unicast
   neighbor 2001:db8:1:12::1 activate
@@ -55,6 +58,9 @@ router bgp 65000
   # pair on its own client session and the reasoning for "force".
   neighbor 2001:db8:1:13::2 next-hop-self force
   neighbor 2001:db8:1:13::2 route-reflector-client
+  neighbor 2001:db8:1:15::2 activate
+  neighbor 2001:db8:1:15::2 next-hop-self force
+  neighbor 2001:db8:1:15::2 route-reflector-client
   # /128, not the site /48 -- a per-node peering loopback is the only
   # thing meant to cross the transit as a host route.
   network fc00:0:b::1/128
@@ -77,6 +83,9 @@ router bgp 65000
   neighbor 10.1.13.2 activate
   neighbor 10.1.13.2 next-hop-self force
   neighbor 10.1.13.2 route-reflector-client
+  neighbor 10.1.15.2 activate
+  neighbor 10.1.15.2 next-hop-self force
+  neighbor 10.1.15.2 route-reflector-client
   network 10.255.255.7/32
   # This site's IPv4 ingress VIP prefix, the IPv4 twin of the /64 above.
   network 198.51.100.0/26

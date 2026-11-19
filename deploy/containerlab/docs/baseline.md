@@ -14,18 +14,28 @@ run.
 ## Fixture
 
 `ns80` (`resources/tenants/ns80/`) holds two VPCs with the same guest address
-at each site:
+on each worker:
 
-| VPC  | Attachment | dfw-worker guest      | sjc-worker guest      | Kind                   |
-| ---- | ---------- | --------------------- | --------------------- | ---------------------- |
-| `80` | `vpc-a`    | `fd20:80:ff01::1:0:0` | `fd20:80:ff02::1:0:0` | veth (`galactic-veth`) |
-| `81` | `vpc-b`    | `fd20:80:ff01::1:0:0` | `fd20:80:ff02::1:0:0` | veth (`galactic-veth`) |
+| VPC  | Attachment | Node          | Guest                 | Kind                   |
+| ---- | ---------- | ------------- | --------------------- | ---------------------- |
+| `80` | `vpc-a`    | `dfw-worker`  | `fd20:80:ff01::1:0:0` | veth (`galactic-veth`) |
+| `80` | `vpc-a2`   | `dfw-worker4` | `fd20:80:ff01::2:0:0` | veth (`galactic-veth`) |
+| `80` | `vpc-a`    | `sjc-worker`  | `fd20:80:ff02::1:0:0` | veth (`galactic-veth`) |
+| `81` | `vpc-b`    | `dfw-worker`  | `fd20:80:ff01::1:0:0` | veth (`galactic-veth`) |
+| `81` | `vpc-b2`   | `dfw-worker4` | `fd20:80:ff01::2:0:0` | veth (`galactic-veth`) |
+| `81` | `vpc-b`    | `sjc-worker`  | `fd20:80:ff02::1:0:0` | veth (`galactic-veth`) |
 
-- **Two physical workers.** `dfw-worker` and `sjc-worker` are each their site's
-  only compute node. They have distinct SRv6 locators and reach each other over
+- **Two sites.** `dfw-worker` and `sjc-worker` are in
+  different cells. They have distinct SRv6 locators and reach each other over
   the routed underlay through their sites' edge nodes and the transit routers.
   Gateway and NAT run only on the edge nodes (`dfw-worker2`, `dfw-worker3`,
-  `sjc-worker2`), so this is dedicated placement.
+  `sjc-worker2`), so this is dedicated placement. The observations below use
+  these two workers.
+- **Two compute workers in one cell.** `dfw-worker4` is dfw's second compute
+  node, with its own locator (`2001:db8:ff01:1004::/64`), dual-homed to both
+  dfw edge nodes like `dfw-worker`. Its guests, `guest-a2` and `guest-b2`, let
+  a Worker claim span two workers in one cell. The observations below do not
+  send traffic to them.
 - **Identical addressing.** The guests take fixed addresses through IPAM's
   `addresses` path, so the overlap does not depend on allocation order. Each
   guest's gateway lies outside its `/96` and is reached on-link, as on every
@@ -38,7 +48,8 @@ at each site:
 
 `task deploy` deploys `ns80` as part of `deploy:scenarios`. `task deploy:ns80`
 redeploys it alone, and `task verify:ns80` (part of `task verify`) checks
-placement, the overlapping addresses and cross-site reachability.
+placement, the overlapping addresses, cross-site reachability, and
+reachability between dfw's two compute workers in each VPC.
 
 ## Running the observations
 
@@ -155,7 +166,8 @@ only when both runs pass and agree. Commit the new
 ## Running Galactic Worker on the fixture
 
 `scripts/worker-fabric.sh start` builds this checkout's `galactic-worker` and
-runs it as a process on `dfw-worker` and `sjc-worker`, with the cluster's
+runs it as a process on `dfw-worker`, `dfw-worker4` and `sjc-worker` (set
+`NODES` to change that), with the cluster's
 admin kubeconfig and an allowlist that grants galactic-router
 `fabric.routes`. It is lab-only: Worker has no manifests yet. galactic-router
 finds Worker through `GALACTIC_ROUTER_WORKER_SOCKET`, and Worker's Fabric
@@ -166,14 +178,15 @@ module then writes the tenant routes of every VPC on the node.
 | `worker-fabric.sh scopes NODE`  | The node's VPC fence records, with their owners      |
 | `worker-fabric.sh table NODE V` | The kernel table of VPC `V`'s VRF on the node        |
 | `worker-fabric.sh dump NODE V`  | VPC `V`'s `egress_route_table` entries, one per line |
-| `worker-fabric.sh stop`         | Stops Worker on both nodes                           |
+| `worker-fabric.sh stop`         | Stops Worker on every node in `NODES`                |
 
 Worker takes over every VPC scope on its node and never hands one back, so
 after `stop` the router leaves those VPCs' tenant routes to a Worker that is
 gone. Run `task destroy` and `task deploy` before reusing the lab.
 
-The fixture's workers belong to different clusters, and Worker resolves a
-claim's destinations only within its own cluster. A claim on one worker
-toward a guest on the other therefore reports `DestinationNotFound`, so the
-fixture shows Fabric's tenant routes and traffic, not claim readiness across
-the two workers.
+Worker resolves a claim's destinations only within its own cell. A claim on
+`dfw-worker` or `sjc-worker` toward a guest at the other site therefore
+reports `DestinationNotFound`. Claims inside dfw resolve: on `dfw-worker`, a
+claim toward `guest-a` (on the same node) resolves to Local, and one toward
+`guest-a2` (on `dfw-worker4`) resolves to Fabric. The same holds from
+`dfw-worker4` in reverse.
