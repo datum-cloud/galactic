@@ -774,6 +774,21 @@ tasks:
     cmds:
       - LAB={{.LAB}} ./scripts/verify-gateway-node-loss.sh
 
+  # Not part of `verify` (#1438, resources/gateway-local/): runs
+  # galactic-worker on dfw-worker2 and dfw-worker3, which takes over every
+  # VPC scope there and never hands one back, so the lab needs task destroy,
+  # task deploy and task baseline:twice after, as after
+  # verify:nat-local-shard. Through each dfw gateway in turn, a Local backend
+  # on the gateway's node and Fabric backends elsewhere answer IPv4 and IPv6
+  # VIPs over TCP and UDP; then local_rx removal, a TAP losing its reader and
+  # the public uplink losing its next hop on dfw-worker2. It stops with a
+  # PRECONDITION line, changing nothing, when the harness or the lab is not
+  # this branch's. The script's header lists every assertion.
+  "verify:gateway-local":
+    desc: Local and Fabric VIP backends through each dfw gateway, with local_rx, TAP and public-path failures; needs task destroy, task deploy and task baseline:twice after (resources/gateway-local/)
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-gateway-local.sh
+
   # Switches dfw's galactic-cni to hashed egress mode for its duration and
   # back to ordered mode at the end, so the NAT checks around it, which expect
   # dfw-worker2 to carry dfw's egress, see the lab as they left it. dfw is the

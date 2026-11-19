@@ -1,0 +1,42 @@
+# The edge guests' VPCAttachments, created before publish-attachments.sh,
+# which then only writes their status. The NetworkServices
+# (networkservices.yaml) select backends by these labels: gateway-local names
+# the one backend of a per-backend service, and gateway-local-pool puts it in
+# the pool service. verify-gateway-local.sh gives ns80's vpc-a (dfw-worker,
+# w1) and vpc-a2 (dfw-worker4, w4) the same labels for its duration. Worker
+# resolves a backend to the attachment holding its address, which it takes
+# only from spec.interface.addresses.
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: gwlocal-w2
+  namespace: ns80
+  labels:
+    lab.galactic.datumapis.com/gateway-local: w2
+    lab.galactic.datumapis.com/gateway-local-pool: "true"
+spec:
+  vpc:
+    name: "80"
+  interface:
+    name: eth0
+    mode: Netns
+    addresses:
+      - fd20:80:ff01::4:0:0/96
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: gwlocal-w3
+  namespace: ns80
+  labels:
+    lab.galactic.datumapis.com/gateway-local: w3
+    lab.galactic.datumapis.com/gateway-local-pool: "true"
+spec:
+  vpc:
+    name: "80"
+  interface:
+    name: eth0
+    mode: Netns
+    addresses:
+      - fd20:80:ff01::5:0:0/96
