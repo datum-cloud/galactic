@@ -70,35 +70,11 @@ type State struct {
 // Ensure returns ErrNoSRv6Identity, before creating anything, for a node whose
 // router has no SRv6 identity.
 func Ensure(ctx context.Context, cfg Config, vpc string) (State, error) {
-	router, err := LookupRouter(ctx, cfg.K8s, cfg.Node, cfg.Namespace)
+	p, err := prepare(ctx, cfg, vpc)
 	if err != nil {
 		return State{}, err
 	}
-	node := attachreg.Node{Locator: router.SRv6Locator, NodeID: router.NodeID}
-	if !node.Configured() {
-		return State{}, fmt.Errorf("%w: router %s", ErrNoSRv6Identity, router.Name)
-	}
-	block, err := node.Block()
-	if err != nil {
-		return State{}, err
-	}
-	vpcHex, err := intf.Base62ToHex(vpc)
-	if err != nil {
-		return State{}, fmt.Errorf("convert VPC %q to hex: %w", vpc, err)
-	}
-	rtValue, err := RouteTarget(int64(router.ASN), vpcHex)
-	if err != nil {
-		return State{}, fmt.Errorf("compute route target: %w", err)
-	}
-	// The number vpc_attribution_table names a VPC by holds 48 bits, which
-	// a base62 identifier can exceed. CNI ADD then leaves attribution out
-	// and forwards as usual; Ensure does too.
-	owner := attributionOwner{}
-	if n, err := strconv.ParseUint(vpcHex, 16, 48); err == nil {
-		owner = attributionOwner{vpc: n, known: true}
-	}
-	name := crdnames.BGPVRFInstanceName(vpc, cfg.Node)
-	want := func(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec { return InstanceSpec(router.Name, rtValue, vrfID) }
+	router, node, name, want, block, owner := p.router, p.node, p.name, p.want, p.block, p.owner
 
 	// A caller that runs Ensure on every pass finds everything in place
 	// almost always, so that is read first, without the node's locks, which
@@ -132,6 +108,63 @@ func Ensure(ctx context.Context, cfg Config, vpc string) (State, error) {
 		return State{}, err
 	}
 	return state, nil
+}
+
+// InPlace reports whether all of vpc's state Ensure creates is already on the
+// node, reading it without the node's locks and writing nothing. It returns
+// ErrNoSRv6Identity for a node whose router has no SRv6 identity.
+func InPlace(ctx context.Context, cfg Config, vpc string) (bool, error) {
+	p, err := prepare(ctx, cfg, vpc)
+	if err != nil {
+		return false, err
+	}
+	_, ok := current(ctx, cfg, vpc, p.name, p.want, p.block, p.owner)
+	return ok, nil
+}
+
+// prepared is what Ensure and InPlace derive from the node's router before
+// reading or writing vpc's state.
+type prepared struct {
+	router Router
+	node   attachreg.Node
+	name   string
+	want   func(int32) bgpv1alpha1.BGPVRFInstanceSpec
+	block  uint64
+	owner  attributionOwner
+}
+
+func prepare(ctx context.Context, cfg Config, vpc string) (prepared, error) {
+	router, err := LookupRouter(ctx, cfg.K8s, cfg.Node, cfg.Namespace)
+	if err != nil {
+		return prepared{}, err
+	}
+	node := attachreg.Node{Locator: router.SRv6Locator, NodeID: router.NodeID}
+	if !node.Configured() {
+		return prepared{}, fmt.Errorf("%w: router %s", ErrNoSRv6Identity, router.Name)
+	}
+	block, err := node.Block()
+	if err != nil {
+		return prepared{}, err
+	}
+	vpcHex, err := intf.Base62ToHex(vpc)
+	if err != nil {
+		return prepared{}, fmt.Errorf("convert VPC %q to hex: %w", vpc, err)
+	}
+	rtValue, err := RouteTarget(int64(router.ASN), vpcHex)
+	if err != nil {
+		return prepared{}, fmt.Errorf("compute route target: %w", err)
+	}
+	// The number vpc_attribution_table names a VPC by holds 48 bits, which
+	// a base62 identifier can exceed. CNI ADD then leaves attribution out
+	// and forwards as usual; Ensure does too.
+	owner := attributionOwner{}
+	if n, err := strconv.ParseUint(vpcHex, 16, 48); err == nil {
+		owner = attributionOwner{vpc: n, known: true}
+	}
+	return prepared{
+		router: router, node: node, name: crdnames.BGPVRFInstanceName(vpc, cfg.Node), block: block, owner: owner,
+		want: func(vrfID int32) bgpv1alpha1.BGPVRFInstanceSpec { return InstanceSpec(router.Name, rtValue, vrfID) },
+	}, nil
 }
 
 // ensureVRFRow makes the vrf_table row for s's (Block, Argument) map to s's

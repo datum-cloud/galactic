@@ -15,15 +15,27 @@ import (
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
 
+	"go.datum.net/galactic/internal/cni/vpcfence"
 	"go.datum.net/galactic/internal/cniipam"
 	"go.datum.net/galactic/internal/cnimaster"
 	"go.datum.net/galactic/internal/cnitestutil"
 )
 
+// TestMain points the VPC write fence at a temporary directory, so tests
+// neither need root to create it nor contend with a real node's.
 func TestMain(m *testing.M) {
 	_ = os.Setenv("GALACTIC_CNI_NODE_NAME", "test-node")
 	InitCNIConfig()
-	os.Exit(m.Run())
+	os.Exit(func() int {
+		dir, err := os.MkdirTemp("", "cni-vpcfence-")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		defer func() { _ = os.RemoveAll(dir) }()
+		vpcfence.Dir = dir
+		return m.Run()
+	}())
 }
 
 const (

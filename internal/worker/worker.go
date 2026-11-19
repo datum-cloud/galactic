@@ -9,7 +9,7 @@
 // sources and recorded durably before it returns; nothing is programmed on
 // the call path. Reconciliation runs per VPC scope from a deduplicating
 // queue. It resolves every destination, takes the scope's ticket from the
-// ownership fence (internal/edge/ownership), commits the complete desired
+// ownership fence (internal/ownership), commits the complete desired
 // state of the scope through the delivery modules and reads the host back to
 // report programmed and observed state. Desired state is durable;
 // programmed and observed state are rebuilt from the host after a restart.
@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,8 +31,9 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
-	"go.datum.net/galactic/internal/edge/ownership"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/worker/auth"
+	"go.datum.net/galactic/internal/worker/hostscope"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/sources"
 	"go.datum.net/galactic/internal/worker/store"
@@ -52,12 +54,10 @@ const (
 	// DefaultResyncInterval is how often every scope is reconciled again to
 	// refresh observed state.
 	DefaultResyncInterval = 30 * time.Second
+	// DefaultHostGrace is how long a VPC's host state goes unused before
+	// Worker reclaims it.
+	DefaultHostGrace = 60 * time.Second
 )
-
-// ownerPrefix starts the fence owner ID of every Worker incarnation, so a
-// new incarnation can tell a scope an earlier one owned from a scope another
-// writer owns.
-const ownerPrefix = "galactic-worker:"
 
 // Authenticator authenticates the caller of a call.
 type Authenticator interface {
@@ -76,6 +76,10 @@ type Config struct {
 	ResyncInterval time.Duration
 	// Reconcilers is the number of scopes reconciled at once.
 	Reconcilers int
+	// HostGrace is how long a VPC's host state must go unused, with no
+	// claim, attachment link or edge attachment, before Worker reclaims it.
+	// It keeps the state across an attachment's replacement.
+	HostGrace time.Duration
 }
 
 func (c *Config) defaults() {
@@ -100,6 +104,9 @@ func (c *Config) defaults() {
 	if c.Reconcilers == 0 {
 		c.Reconcilers = 4
 	}
+	if c.HostGrace == 0 {
+		c.HostGrace = DefaultHostGrace
+	}
 }
 
 // Deps are a Worker's collaborators.
@@ -108,8 +115,13 @@ type Deps struct {
 	Fence   *ownership.Authority
 	Sources sources.Sources
 	Modules *module.Registry
-	Auth    Authenticator
-	Log     *slog.Logger
+	// Host is the VPCs' canonical host state. With it, Worker owns every
+	// VPC scope on the node that no other writer owns, ensures the state for
+	// its claims and reclaims it once unused. Without it, Worker only runs
+	// its modules for scopes with claims.
+	Host hostscope.Host
+	Auth Authenticator
+	Log  *slog.Logger
 	// Now is the clock, time.Now when nil.
 	Now func() time.Time
 }
@@ -132,9 +144,9 @@ type scopeState struct {
 	resyncing bool
 	// repair is set after a failed commit, until a commit succeeds.
 	repair bool
-	// fenced is the fence generation of a Fence this incarnation started and
-	// has not yet adopted.
-	fenced uint64
+	// unreferencedSince is when Worker first found the scope's host state
+	// unused, or zero while something uses it.
+	unreferencedSince time.Time
 }
 
 // Worker is the reconciliation core and gRPC service.
@@ -159,6 +171,7 @@ type Worker struct {
 
 	shutting atomic.Bool
 	started  atomic.Bool
+	wg       sync.WaitGroup
 }
 
 // New returns a Worker. Start loads desired state and starts reconciling.
@@ -183,7 +196,7 @@ func New(cfg Config, d Deps) (*Worker, error) {
 	w := &Worker{
 		cfg:      cfg,
 		d:        d,
-		owner:    ownerPrefix + cfg.Node + ":" + hex.EncodeToString(id),
+		owner:    ownership.WorkerOwnerPrefix + cfg.Node + ":" + hex.EncodeToString(id),
 		log:      d.Log.With("component", "galactic-worker"),
 		claims:   map[module.ClaimKey]*claim{},
 		scopes:   map[string]*scopeState{},
@@ -232,18 +245,28 @@ func (w *Worker) Start(ctx context.Context) error {
 	for _, s := range scopes {
 		w.queue.Add(s)
 	}
+	w.discover(ctx)
 
 	for range w.cfg.Reconcilers {
-		go w.runReconciler(ctx)
+		w.wg.Go(func() { w.runReconciler(ctx) })
 	}
-	go func() {
+	w.wg.Go(func() {
 		<-ctx.Done()
 		w.queue.ShutDown()
-	}()
-	go w.every(ctx, w.cfg.RenewInterval, w.ExpireLeases)
-	go w.every(ctx, w.cfg.ResyncInterval, func() { w.Changed("") })
+	})
+	w.wg.Go(func() { w.every(ctx, w.cfg.RenewInterval, w.ExpireLeases) })
+	w.wg.Go(func() {
+		w.every(ctx, w.cfg.ResyncInterval, func() {
+			w.discover(ctx)
+			w.Changed("")
+		})
+	})
 	return nil
 }
+
+// Wait returns once every goroutine Start started has returned, which they do
+// after Start's context is done and any reconcile in progress has finished.
+func (w *Worker) Wait() { w.wg.Wait() }
 
 // Shutdown makes every later mutating call fail with UNAVAILABLE and
 // ShuttingDown. Forwarding continues: the datapath does not call Worker.
@@ -262,6 +285,50 @@ func (w *Worker) Changed(vpc string) {
 	w.mu.Unlock()
 	for _, n := range names {
 		w.queue.Add(n)
+	}
+}
+
+// HostChanged requeues vpc's scope after a change to its host state that
+// Worker did not make, such as a CNI attachment's link joining or leaving
+// the VPC's VRF. It starts tracking the scope when Worker did not know it.
+func (w *Worker) HostChanged(vpc string) {
+	if w.d.Host == nil {
+		return
+	}
+	w.mu.Lock()
+	w.scope(vpc)
+	w.mu.Unlock()
+	w.queue.Add(vpc)
+}
+
+// discover starts tracking, and queues, every VPC with host state on the
+// node.
+func (w *Worker) discover(ctx context.Context) {
+	if w.d.Host == nil {
+		return
+	}
+	vpcs, err := w.d.Host.Discover(ctx)
+	if err != nil {
+		w.log.Error("discover VPC host state", "error", err)
+		return
+	}
+	// A scope a Worker incarnation owns or left mid-transfer may have no
+	// VRF, such as one whose CNI ADD waits for the transfer to finish.
+	scopes, err := w.d.Fence.Scopes()
+	if err != nil {
+		w.log.Error("list VPC write fence scopes", "error", err)
+	}
+	for _, name := range scopes {
+		vpc, ok := strings.CutPrefix(name, "vpc-")
+		if !ok {
+			continue
+		}
+		if rec, err := w.d.Fence.Read(name); err == nil && ownership.WorkerOwned(rec.Owner) {
+			vpcs = append(vpcs, vpc)
+		}
+	}
+	for _, vpc := range vpcs {
+		w.HostChanged(vpc)
 	}
 }
 

@@ -21,9 +21,9 @@ import (
 	"go.datum.net/galactic/internal/edge/claim"
 	"go.datum.net/galactic/internal/edge/diag"
 	"go.datum.net/galactic/internal/edge/hostattach"
-	"go.datum.net/galactic/internal/edge/ownership"
 	"go.datum.net/galactic/internal/edge/provider"
 	"go.datum.net/galactic/internal/edge/route"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/forwardgatemap"
 )
 
