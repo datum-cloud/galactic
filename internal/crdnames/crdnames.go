@@ -38,24 +38,6 @@ const AnnotationAllocatedSubnetIPv4 = "galactic.datum.net/allocated-subnet-ipv4"
 // see NetNSKey.
 const AnnotationNetNS = "galactic.datum.net/netns"
 
-// AnnotationIngressHostIfindex and AnnotationIngressHostMAC carry the two facts
-// about an ingress sidecar's own pod that the host side of its return path
-// needs, and that only the sidecar can read.
-//
-// A reply for a sidecar gateway address must be redirected into the pod holding
-// it, so the host needs the ifindex of the host-side end of that pod's veth and
-// the pod-side MAC to address the frame to. Both are trivial to read from
-// inside the pod and unreadable from outside without entering the namespace.
-// The node agent deliberately does not cross that boundary; its CAP_SYS_ADMIN
-// grant is reserved for the eBPF datapath lifecycle.
-//
-// The side that can see them publishes them, on the advertisement the sidecar
-// already creates for this address, so one object describes one return path.
-const (
-	AnnotationIngressHostIfindex = "galactic.datum.net/ingress-host-ifindex"
-	AnnotationIngressHostMAC     = "galactic.datum.net/ingress-host-mac"
-)
-
 // AnnotationNoAddressing marks a BGPAdvertisement whose spec.prefixes is empty
 // by design, because the attachment's config carries no "ipam" block and no
 // address was ever requested. A VM managing its own addressing is a supported
@@ -176,27 +158,6 @@ func nameSegment(id string) string {
 // VPCSegment returns the leading segment every BGP CRD name starts with for a base62 VPC.
 func VPCSegment(vpc string) string {
 	return nameSegment(vpc)
-}
-
-// IngressAttachment is the synthetic vpcAttachment segment the ingress sidecar
-// publishes its per-VPC gateway address under. A sidecar has no real
-// VPCAttachment, since no CNI ADD ever runs for it, but BGPAdvertisementName
-// needs a middle segment, and one fixed value keeps the name deterministic and
-// one per (VPC, node).
-//
-// It lives here, in the package that owns every CRD name, rather than in the
-// sidecar that writes these advertisements, because the host side has to
-// recognise them, and two copies of the same literal is how that recognition
-// silently stops matching.
-const IngressAttachment = "ingress"
-
-// IngressAdvertisementSegment returns the middle name segment of every
-// BGPAdvertisement the ingress sidecar publishes, that is, what
-// BGPAdvertisementName renders IngressAttachment as. Exported so a reader can
-// identify a sidecar's gateway advertisement without re-deriving the
-// encoding.
-func IngressAdvertisementSegment() string {
-	return nameSegment(IngressAttachment)
 }
 
 // BGPVRFInstanceName returns the deterministic name for a BGPVRFInstance,

@@ -188,7 +188,7 @@ func TestEnsureEgressDatapath_AttachesToVethPeerNotVRF(t *testing.T) {
 			return fmt.Errorf("set VRF up: %w", err)
 		}
 
-		if err := ensureEgressDatapath("testvpc", tableID); err != nil {
+		if err := ensureEgressDatapath(tableID); err != nil {
 			return fmt.Errorf("ensureEgressDatapath: %w", err)
 		}
 

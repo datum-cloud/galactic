@@ -272,12 +272,11 @@ func ensureNodeSourceAddress() (wrote bool, err error) {
 // (block, argument) per ifindex, so a single registration could resolve at most
 // one VPC.
 //
-// tableID is the VPC's Linux routing table. vpc is used to derive that VPC's
-// return-path gateway address when one is configured.
+// tableID is the VPC's Linux routing table.
 //
 // Idempotent: every step is a replace, so a repeat call for an
 // already-provisioned VPC is in effect a no-op.
-func ensureEgressDatapath(vpc string, tableID uint32) error {
+func ensureEgressDatapath(tableID uint32) error {
 	// node_src_addr_table is a per-node singleton, not per-VPC. usid_egress
 	// fails open, uncounted, on every encapsulation attempt until something
 	// sets it, and the CNI path only registers it as a side effect of a real
@@ -307,13 +306,6 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	peerLink, err := ensureEgressVeth(vrfLink, inner, peer, ifindexvrfmap.SidecarIfindex(argument))
 	if err != nil {
 		return fmt.Errorf("ensure egress veth for VRF table %d: %w", tableID, err)
-	}
-
-	// Assign the return-path gateway address and install its reply redirect
-	// before this VPC can publish a route. A missing redirect would advertise
-	// a gateway whose VRF-bound Envoy sockets cannot receive replies.
-	if err := ensureGatewayAddress(vpc, inner); err != nil {
-		return fmt.Errorf("ensure gateway return path for vpc %s: %w", vpc, err)
 	}
 
 	registry, closer, err := usidmap.OpenPinnedRegistry(ebpfPinDir)
