@@ -5,7 +5,7 @@ sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::http
 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 install -y --no-install-recommends clang-18 llvm-18 linux-libc-dev
 export BPF2GO_CC=clang-18
 
-for pkg in prog edgeprog natprog xdpdispatch xmitdrops; do
+for pkg in prog edgeprog natprog xdpdispatch xmitdrops localprog; do
   go generate "./internal/plumbing/ebpf/$pkg/..."
 done
 go generate ./tests/handoffs/probe/...

@@ -447,6 +447,16 @@ const (
 	// holds. galactic-router's withdrawals keep them
 	// (UnregisterUnlessPassThroughAs).
 	PassThroughEdge PassThroughOwner = 1
+	// PassThroughLocal owns the entries Worker's Local module writes for the
+	// prefixes its own handoffs serve, such as a routed link's pod address.
+	// usid_egress passes them to the kernel like any pass-through.
+	PassThroughLocal PassThroughOwner = 2
+	// PassThroughLocalNAT owns the entries that steer a VPC's traffic into
+	// its service-internal veth pair: a tenant's packet that usid_egress
+	// passes through one of them is redirected into the pair by the Local
+	// tc program on the tenant's interface (internal/plumbing/ebpf/localprog).
+	// The resolver that selects a Local NAT shard writes them.
+	PassThroughLocalNAT PassThroughOwner = 3
 )
 
 // RegisterPassThroughAs is RegisterPassThrough for an entry owner owns.

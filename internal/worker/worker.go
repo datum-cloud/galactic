@@ -129,6 +129,11 @@ type Deps struct {
 	Log    *slog.Logger
 	// Now is the clock, time.Now when nil.
 	Now func() time.Time
+	// PodAlive reports whether a process of the pod with the given UID runs
+	// on this node. A routed_link or socket claim's link serves one pod, and
+	// a call from another pod of its owner is refused while that pod runs.
+	// Without it, such a call moves the claim to the calling pod.
+	PodAlive func(podUID string) bool
 }
 
 // claim is one claim's desired state and last status.
