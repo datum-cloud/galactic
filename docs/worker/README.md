@@ -18,12 +18,15 @@ yet, so the `local.*` capabilities report `ModuleNotRunning`.
 [#1434](https://github.com/datum-cloud/galactic/issues/1434) makes Worker the
 owner of each node and VPC scope, with CNI writing that state under the fence
 ([ownership](ownership.md#node-and-vpc-scope)).
+[#1440](https://github.com/datum-cloud/galactic/issues/1440) makes
+galactic-edge, run with `--worker-socket`, claim its edge links from Worker
+([connector](connector.md)).
 
 | Page                                   | Contents                                                                                  |
 | -------------------------------------- | ----------------------------------------------------------------------------------------- |
 | [Service contract](contract.md)        | Claims, operations, state model, errors, versions, trusted sources and worked transitions |
 | [Host state ownership](ownership.md)   | Writer inventory, one authority per resource class, bootstrap, adoption and transfer      |
-| [Connector decision](connector.md)     | Which component is the provider connector, and its entry point                            |
+| [Connector](connector.md)              | Which component is the provider connector, its claims, transfer step and rollback         |
 | [Branch workflow](branch-workflow.md)  | Base and start SHAs, PR target, CI, artifact tags and how Tasks close                     |
 | [Qualification plan](qualification.md) | Platform, handoffs, workload, comparison method and limits                                |
 
@@ -64,3 +67,4 @@ PR. "Confirmed" means the product owner approved the decision on the date given.
 | D27 | Local handoffs as #1444 proved them: native XDP on the veth peer, VLAN and checksum limits, per-path policy, Local pass-through                   | Proposed             | [Contract](contract.md#local-handoffs)                      |
 | D28 | Local owns its handoff links and tc filters, after CNI's; status lists them; fragments to a TAP are refused                                       | Accepted             | [Contract](contract.md#the-local-module)                    |
 | D29 | A routed link's pod end uses its attachment's addresses as `/128` routes; resolvers write steering entries                                        | Proposed             | [Contract](contract.md#the-local-module)                    |
+| D30 | A connector claim names galactic-edge's host link (`edge_link`); Worker registers it, galactic-edge keeps the link and its gates                  | Proposed             | [Connector](connector.md#connector-claims)                  |
