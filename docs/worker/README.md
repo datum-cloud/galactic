@@ -13,6 +13,9 @@ is built in yet: Local ([#1435](https://github.com/datum-cloud/galactic/issues/1
 and Fabric ([#1436](https://github.com/datum-cloud/galactic/issues/1436)) add
 them, so every capability reports `ModuleNotRunning` until then.
 `examples/worker-client` is an independent client of the published API.
+[#1434](https://github.com/datum-cloud/galactic/issues/1434) makes Worker the
+owner of each node and VPC scope, with CNI writing that state under the fence
+([ownership](ownership.md#node-and-vpc-scope)).
 
 | Page                                   | Contents                                                                                  |
 | -------------------------------------- | ----------------------------------------------------------------------------------------- |

@@ -67,7 +67,8 @@ func gcTestScheme(t *testing.T) *runtime.Scheme {
 // that as an error.
 func TestSweepEBPFVRFTable_MissingPinDirIsNoOp(t *testing.T) {
 	k8s := fake.NewClientBuilder().WithScheme(gcTestScheme(t)).Build()
-	result := SweepEBPFVRFTable(context.Background(), k8s, "default", "node-a", "/sys/fs/bpf/galactic-does-not-exist", Unfenced)
+	result := SweepEBPFVRFTable(context.Background(), k8s, "default", "node-a", "/sys/fs/bpf/galactic-does-not-exist",
+		Unfenced)
 	if result.Errors != 0 || result.EBPFVRFEntriesRemoved != 0 {
 		t.Errorf("result = %+v, want a zero-value result (no-op)", result)
 	}

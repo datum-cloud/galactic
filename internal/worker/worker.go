@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,7 @@ import (
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/worker/auth"
+	"go.datum.net/galactic/internal/worker/hostscope"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/sources"
 	"go.datum.net/galactic/internal/worker/store"
@@ -52,6 +54,9 @@ const (
 	// DefaultResyncInterval is how often every scope is reconciled again to
 	// refresh observed state.
 	DefaultResyncInterval = 30 * time.Second
+	// DefaultHostGrace is how long a VPC's host state goes unused before
+	// Worker reclaims it.
+	DefaultHostGrace = 60 * time.Second
 )
 
 // Authenticator authenticates the caller of a call.
@@ -71,6 +76,10 @@ type Config struct {
 	ResyncInterval time.Duration
 	// Reconcilers is the number of scopes reconciled at once.
 	Reconcilers int
+	// HostGrace is how long a VPC's host state must go unused, with no
+	// claim, attachment link or edge attachment, before Worker reclaims it.
+	// It keeps the state across an attachment's replacement.
+	HostGrace time.Duration
 }
 
 func (c *Config) defaults() {
@@ -95,6 +104,9 @@ func (c *Config) defaults() {
 	if c.Reconcilers == 0 {
 		c.Reconcilers = 4
 	}
+	if c.HostGrace == 0 {
+		c.HostGrace = DefaultHostGrace
+	}
 }
 
 // Deps are a Worker's collaborators.
@@ -103,8 +115,13 @@ type Deps struct {
 	Fence   *ownership.Authority
 	Sources sources.Sources
 	Modules *module.Registry
-	Auth    Authenticator
-	Log     *slog.Logger
+	// Host is the VPCs' canonical host state. With it, Worker owns every
+	// VPC scope on the node that no other writer owns, ensures the state for
+	// its claims and reclaims it once unused. Without it, Worker only runs
+	// its modules for scopes with claims.
+	Host hostscope.Host
+	Auth Authenticator
+	Log  *slog.Logger
 	// Now is the clock, time.Now when nil.
 	Now func() time.Time
 }
@@ -127,6 +144,9 @@ type scopeState struct {
 	resyncing bool
 	// repair is set after a failed commit, until a commit succeeds.
 	repair bool
+	// unreferencedSince is when Worker first found the scope's host state
+	// unused, or zero while something uses it.
+	unreferencedSince time.Time
 }
 
 // Worker is the reconciliation core and gRPC service.
@@ -224,6 +244,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	for _, s := range scopes {
 		w.queue.Add(s)
 	}
+	w.discover(ctx)
 
 	for range w.cfg.Reconcilers {
 		go w.runReconciler(ctx)
@@ -233,7 +254,10 @@ func (w *Worker) Start(ctx context.Context) error {
 		w.queue.ShutDown()
 	}()
 	go w.every(ctx, w.cfg.RenewInterval, w.ExpireLeases)
-	go w.every(ctx, w.cfg.ResyncInterval, func() { w.Changed("") })
+	go w.every(ctx, w.cfg.ResyncInterval, func() {
+		w.discover(ctx)
+		w.Changed("")
+	})
 	return nil
 }
 
@@ -254,6 +278,50 @@ func (w *Worker) Changed(vpc string) {
 	w.mu.Unlock()
 	for _, n := range names {
 		w.queue.Add(n)
+	}
+}
+
+// HostChanged requeues vpc's scope after a change to its host state that
+// Worker did not make, such as a CNI attachment's link joining or leaving
+// the VPC's VRF. It starts tracking the scope when Worker did not know it.
+func (w *Worker) HostChanged(vpc string) {
+	if w.d.Host == nil {
+		return
+	}
+	w.mu.Lock()
+	w.scope(vpc)
+	w.mu.Unlock()
+	w.queue.Add(vpc)
+}
+
+// discover starts tracking, and queues, every VPC with host state on the
+// node.
+func (w *Worker) discover(ctx context.Context) {
+	if w.d.Host == nil {
+		return
+	}
+	vpcs, err := w.d.Host.Discover(ctx)
+	if err != nil {
+		w.log.Error("discover VPC host state", "error", err)
+		return
+	}
+	// A scope a Worker incarnation owns or left mid-transfer may have no
+	// VRF, such as one whose CNI ADD waits for the transfer to finish.
+	scopes, err := w.d.Fence.Scopes()
+	if err != nil {
+		w.log.Error("list VPC write fence scopes", "error", err)
+	}
+	for _, name := range scopes {
+		vpc, ok := strings.CutPrefix(name, "vpc-")
+		if !ok {
+			continue
+		}
+		if rec, err := w.d.Fence.Read(name); err == nil && ownership.WorkerOwned(rec.Owner) {
+			vpcs = append(vpcs, vpc)
+		}
+	}
+	for _, vpc := range vpcs {
+		w.HostChanged(vpc)
 	}
 }
 
