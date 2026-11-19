@@ -214,11 +214,14 @@ leftovers() {
 }
 
 CLEANED=0
+# STAGE is the fixture's staging directory while it exists.
+STAGE=""
 cleanup() {
   local status=$? i left
   set +e
   [ "${CLEANED}" = 1 ] && return
   CLEANED=1
+  [ -n "${STAGE}" ] && rm -rf "${STAGE}"
   echo "=== cleanup ==="
   [ "${status}" -ne 0 ] && record run "the run completed" yes "no (exit ${status})"
   cap_stop
@@ -344,7 +347,8 @@ EOF
 unset tls
 
 echo "--- fixture ---"
-stage=$(mktemp -d)
+STAGE=$(mktemp -d)
+stage=${STAGE}
 cp -r "${RESOURCES_DIR}/envoy-socket" "${stage}/"
 cp -r "${CONFIG_DIR}/galactic-vrf" "${stage}/envoy-socket/dfw/galactic-vrf"
 if [ "${REMOTE}" = sjc ]; then
@@ -355,6 +359,7 @@ docker exec "${DFW}" rm -rf "${FIXTURE_DIR}"
 docker exec "${DFW}" mkdir -p "$(dirname "${FIXTURE_DIR}")"
 docker cp "${stage}/envoy-socket" "${DFW}:${FIXTURE_DIR}"
 rm -rf "${stage}"
+STAGE=""
 apply_k "${DFW}" "${FIXTURE_DIR}/dfw/" >"${OUT}/logs/apply.log"
 for v in 80 81; do
   kd -n "${NS}" patch vpcattachment "proxy-${v}" --subresource=status --type=merge \
