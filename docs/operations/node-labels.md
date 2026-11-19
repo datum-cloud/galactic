@@ -150,10 +150,46 @@ its VPC's canonical host VRF and uSID entry, which `galactic-cni` creates.
 ### `galactic.datumapis.com/galactic=router`
 
 Runs `galactic-cni` and `galactic-router` in its plain (non-reflector)
-mode, together, on every `compute` and every `edge` node.
+mode, together, on every `compute` and every `edge` node. Where Galactic
+Worker is installed, `galactic-worker` runs beside them on the same nodes
+(below).
 
 - `config/galactic-cni/daemonset.yaml`
 - `config/galactic-router/overlays/router/daemonset-patch.yaml`
+- `config/galactic-worker/base/daemonset.yaml`, when installed
+
+## Galactic Worker placement
+
+Galactic Worker ([docs/worker/](../worker/README.md)) adds no label. It runs
+on every `galactic=router` node that is `node=compute` or `node=edge`, because
+each service calls the Worker on its own node. Two placements use the labels
+above (D31 in the [decision log](../worker/README.md#decision-log)).
+
+### Dedicated placement
+
+Services run on `node=edge` nodes with their opt-ins (`gateway=enabled`,
+`nat=enabled`, `edge=enabled`), and tenant workloads run on `node=compute`
+nodes. Every guest a service reaches is on another node, so Worker delivers
+over Fabric.
+
+### Combined placement
+
+A `node=edge` node with the service opt-ins also hosts TAP-backed tenant
+guests. The role label stays `edge`, and each guest is pinned to the node, for
+example with a `kubernetes.io/hostname` affinity. A service reaches a guest
+on its own node through a Local handoff and every other guest through Fabric.
+
+A combined node needs:
+
+- `gateway=enabled`: `galactic-gateway`, in dispatch mode (its default), holds
+  the public slot of the node's XDP dispatcher that a `local.tap` handoff
+  receives through.
+- `galactic-nat` in dispatch mode, since it shares the uplinks
+  (`config/galactic-worker/profiles/combined`).
+
+The Worker allowlist is the same as in dedicated placement. To return a
+combined node to dedicated placement, move its pinned guests off the node
+([operations](../worker/operations.md#return-a-combined-node-to-dedicated-placement)).
 
 ### `galactic.datumapis.com/galactic=control`
 

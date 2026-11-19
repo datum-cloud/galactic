@@ -11,13 +11,16 @@ interface are implemented by
 [#1433](https://github.com/datum-cloud/galactic/issues/1433). The Fabric module
 ([#1436](https://github.com/datum-cloud/galactic/issues/1436)) serves
 `fabric.srv6` and `fabric.routes`, and is the only writer of the tenant routes
-of every VPC Worker owns. Local
-([#1435](https://github.com/datum-cloud/galactic/issues/1435)) is not built in
-yet, so the `local.*` capabilities report `ModuleNotRunning`.
+of every VPC Worker owns. The Local module
+([#1435](https://github.com/datum-cloud/galactic/issues/1435)) serves the
+`local.*` capabilities.
 `examples/worker-client` is an independent client of the published API.
 [#1434](https://github.com/datum-cloud/galactic/issues/1434) makes Worker the
 owner of each node and VPC scope, with CNI writing that state under the fence
 ([ownership](ownership.md#node-and-vpc-scope)).
+[#1441](https://github.com/datum-cloud/galactic/issues/1441) packages Worker
+for dedicated and combined placement, adds its operator diagnostics and the
+handback that returns its scopes ([operations](operations.md)).
 
 | Page                                   | Contents                                                                                  |
 | -------------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -26,6 +29,7 @@ owner of each node and VPC scope, with CNI writing that state under the fence
 | [Connector decision](connector.md)     | Which component is the provider connector, and its entry point                            |
 | [Branch workflow](branch-workflow.md)  | Base and start SHAs, PR target, CI, artifact tags and how Tasks close                     |
 | [Qualification plan](qualification.md) | Platform, handoffs, workload, comparison method and limits                                |
+| [Operations](operations.md)            | Install, diagnostics, flow tracing, drain, handback, uninstall and rollback               |
 
 ## Decision log
 
@@ -64,3 +68,6 @@ PR. "Confirmed" means the product owner approved the decision on the date given.
 | D27 | Local handoffs as #1444 proved them: native XDP on the veth peer, VLAN and checksum limits, per-path policy, Local pass-through                   | Proposed             | [Contract](contract.md#local-handoffs)                      |
 | D28 | Local owns its handoff links and tc filters, after CNI's; status lists them; fragments to a TAP are refused                                       | Accepted             | [Contract](contract.md#the-local-module)                    |
 | D29 | A routed link's pod end uses its attachment's addresses as `/128` routes; resolvers write steering entries                                        | Proposed             | [Contract](contract.md#the-local-module)                    |
+| D30 | `galactic-worker handback` relinquishes a stopped Worker's scopes to a `galactic-handback:` label; only it makes them reclaimable                 | Accepted             | [Ownership](ownership.md#handing-scopes-back)               |
+| D31 | Combined placement is a `node=edge` node with the service opt-ins and pinned guests; no new label                                                 | Accepted             | [Labels](../operations/node-labels.md#combined-placement)   |
+| D32 | Operators read Worker's state with `galactic-worker inspect` through `kubectl exec`, and its gauges; no network endpoint serves it                | Accepted             | [Operations](operations.md#read-the-diagnostics)            |
