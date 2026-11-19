@@ -11,7 +11,9 @@
 # gone. Redeploy the lab (task destroy, task deploy) before reusing it.
 #
 # Usage:
-#   worker-fabric.sh start          build, copy and start Worker on NODES
+#   worker-fabric.sh start          build, copy and start Worker on NODES, with the
+#                                   allowlist file WORKER_ALLOWLIST names, or one
+#                                   letting only galactic-router hand it routes
 #   worker-fabric.sh stop           stop Worker on NODES
 #   worker-fabric.sh scopes NODE    print the node's VPC fence records
 #   worker-fabric.sh table NODE VPC print VPC's VRF table ID on NODE
@@ -33,11 +35,15 @@ start() {
   bin=$(mktemp -d)
   trap 'rm -rf "${bin}"' RETURN
   (cd "${REPO_DIR}" && CGO_ENABLED=0 go build -o "${bin}/galactic-worker" ./cmd/galactic-worker)
-  cat >"${bin}/allowlist.yaml" <<'EOF'
+  if [ -n "${WORKER_ALLOWLIST:-}" ]; then
+    cp "${WORKER_ALLOWLIST}" "${bin}/allowlist.yaml"
+  else
+    cat >"${bin}/allowlist.yaml" <<'EOF'
 serviceAccounts:
   - serviceAccount: galactic-system/galactic-router
     capabilities: [fabric.routes]
 EOF
+  fi
   for node in ${NODES}; do
     kind get kubeconfig --name "$(site_of "${node}")" --internal >"${bin}/kubeconfig"
     docker exec "${node}" mkdir -p "${DIR}"
