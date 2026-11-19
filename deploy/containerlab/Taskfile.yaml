@@ -1437,6 +1437,25 @@ tasks:
     cmds:
       - LAB={{.LAB}} ./scripts/handoff-twice.sh {{.CLI_ARGS}}
 
+  # The Envoy socket checks (docs/envoy-socket.md). Not part of deploy or
+  # verify: they run Worker on dfw-worker, which never hands its VPC scopes
+  # back, so restore the lab with scripts/envoy-socket-restore.sh after.
+  # REMOTE=dfw-worker4|sjc picks the remote backends.
+  "deploy:ns80-envoy":
+    desc: Deploy the Envoy socket fixture (Envoy with galactic-vrf, Worker, backends) on dfw
+    cmds:
+      - ./scripts/envoy-socket.sh up {{.CLI_ARGS | default "../../bin/envoy-socket/up"}}
+
+  "delete:ns80-envoy":
+    desc: Remove the Envoy socket fixture from dfw and stop Worker on dfw-worker
+    cmds:
+      - ./scripts/envoy-socket.sh down {{.CLI_ARGS | default "../../bin/envoy-socket/down"}}
+
+  "envoy:socket":
+    desc: Prove Envoy's VRF-bound sockets through Worker socket claims, with captures (OUTDIR via task envoy:socket -- DIR)
+    cmds:
+      - ./scripts/envoy-socket.sh {{.CLI_ARGS | default "../../bin/envoy-socket/run"}}
+
   clean:
     desc: Destroy the lab and delete artifacts
     cmds:

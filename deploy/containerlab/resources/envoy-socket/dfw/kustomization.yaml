@@ -1,0 +1,35 @@
+# envoy-socket: the Envoy socket fixture (docs/envoy-socket.md). A real Envoy
+# with the galactic-vrf sidecar on dfw-worker, holding one Worker socket
+# claim per ns80 VPC, with ns80's guests as its backends. It is deployed only
+# for a run (task deploy:ns80-envoy, task envoy:socket) and removed after it,
+# so the ns80 baseline never sees it.
+#
+# galactic-vrf is the production Component, config/galactic-vrf. kubectl
+# apply -k loads nothing from outside the kustomization's root, so
+# scripts/envoy-socket.sh copies that directory into this one, as
+# galactic-vrf/, on the node before applying, as deploy-cni.sh does for
+# config/galactic-cni. Build it offline the same way: copy this directory
+# and config/galactic-vrf beside each other in a temporary directory.
+#
+# envoy.yaml names dfw-worker4's ns80 guest as the remote backend; a run
+# with REMOTE=sjc rewrites that address in its staged copy.
+namespace: ns80-envoy
+resources:
+  - namespace.yaml
+  - envoy.yaml
+  - attachments.yaml
+components:
+  - galactic-vrf
+configMapGenerator:
+  - name: envoy-config
+    files:
+      - envoy-config.yaml
+patches:
+  - path: sidecar-patch.yaml
+    target:
+      kind: Deployment
+      name: envoy
+images:
+  - name: ghcr.io/datum-cloud/galactic-vrf
+    newName: galactic-vrf
+    newTag: lab
