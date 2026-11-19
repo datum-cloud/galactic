@@ -1,14 +1,15 @@
 #!/bin/bash
 # worker-fabric.sh: run this checkout's galactic-worker on the compute nodes
 # of the dedicated-placement fixture (docs/baseline.md) and inspect what its
-# Fabric module programs. Lab-only: Worker has no manifests yet, so the
-# binary runs as a process inside each Kind node with the cluster's admin
-# kubeconfig. galactic-router finds it through GALACTIC_ROUTER_WORKER_SOCKET
-# and hands it every tenant route.
+# Fabric module programs. Lab-only: it runs the binary as a process inside
+# each Kind node with the cluster's admin kubeconfig, for quick iteration.
+# scripts/deploy-galactic-worker.sh installs Worker from its manifests
+# instead, as a deployment does. galactic-router finds it through
+# GALACTIC_ROUTER_WORKER_SOCKET and hands it every tenant route.
 #
-# Worker takes over every VPC scope on the node and never hands one back, so
-# after stop the router leaves those VPCs' tenant routes to a Worker that is
-# gone. Redeploy the lab (task destroy, task deploy) before reusing it.
+# Worker takes over every VPC scope on the node. After stop, run
+# `galactic-worker handback` on each node and restart galactic-router there
+# (docs/worker/operations.md), or redeploy the lab, before reusing it.
 #
 # Usage:
 #   worker-fabric.sh start          build, copy and start Worker on NODES, with the
@@ -141,7 +142,7 @@ case "${1:-}" in
   table) table "${2:?node}" "${3:?vpc}" ;;
   dump) dump "${2:?node}" "${3:?vpc}" ;;
   *)
-    sed -n '2,19p' "$0" >&2
+    sed -n '2,20p' "$0" >&2
     exit 2
     ;;
 esac
