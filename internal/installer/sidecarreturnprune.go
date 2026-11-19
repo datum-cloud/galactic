@@ -82,17 +82,24 @@ func startRetiredSidecarReturnPrune(ctx context.Context, st ebpfDatapathState) {
 		return
 	}
 	go func() {
+		// The VPCs are read from the API only for a retired vrf_table row,
+		// so a node with nothing left over makes no API call.
+		var once bool
 		vpcs := map[uint16]string{}
-		if st.k8sClient != nil && st.nodeName != "" {
-			found, err := sidecarReturnVPCs(ctx, st.k8sClient, st.namespace, st.nodeName)
-			if err != nil {
-				slog.Warn("Could not resolve VPCs for the retired sidecar return path's vrf_table rows; "+
-					"leaving those rows to the GC sweep", "err", err)
-			} else {
-				vpcs = found
-			}
-		}
 		vpcOf := func(argument uint16) (string, bool) {
+			if !once {
+				once = true
+				if st.k8sClient == nil || st.nodeName == "" {
+					return "", false
+				}
+				found, err := sidecarReturnVPCs(ctx, st.k8sClient, st.namespace, st.nodeName)
+				if err != nil {
+					slog.Warn("Could not resolve VPCs for the retired sidecar return path's vrf_table rows; "+
+						"leaving those rows to the GC sweep", "err", err)
+				} else {
+					vpcs = found
+				}
+			}
 			vpc, ok := vpcs[argument]
 			return vpc, ok
 		}
