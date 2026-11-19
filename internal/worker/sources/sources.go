@@ -46,6 +46,10 @@ type Attachment struct {
 	// without their prefix lengths. A VPCAttachment whose guest manages its
 	// own addressing records none, and neither does an EdgeAttachment.
 	Addresses []netip.Addr
+	// HostInterface is the host-side link CNI created for a VPCAttachment,
+	// as its status records: the TAP or host veth. It is empty for an
+	// attachment not yet attached and for an EdgeAttachment.
+	HostInterface string
 }
 
 // Sources answers Worker's trusted-source lookups.
@@ -90,7 +94,8 @@ func (k Kube) Attachment(ctx context.Context, uid string) (Attachment, bool, err
 	if len(vas.Items) == 1 {
 		a := vas.Items[0]
 		return Attachment{UID: uid, Kind: KindVPCAttachment, VPC: a.Status.VPC, Node: a.Status.Node,
-			Admitted: a.DeletionTimestamp.IsZero(), Addresses: interfaceAddresses(a.Spec.Interface.Addresses)}, true, nil
+			Admitted: a.DeletionTimestamp.IsZero(), Addresses: interfaceAddresses(a.Spec.Interface.Addresses),
+			HostInterface: a.Status.HostInterface}, true, nil
 	}
 	var eas galacticv1alpha1.EdgeAttachmentList
 	if err := k.Reader.List(ctx, &eas, client.MatchingFields{uidIndex: uid}); err != nil {

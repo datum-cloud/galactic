@@ -78,3 +78,43 @@ func Unpad(s string) string {
 	}
 	return "0"
 }
+
+// The links Worker's Local module creates for a claim. Each name carries the
+// VPC, a 3-character key derived from the claim's attachment and one of these
+// role letters, which no CNI-created link uses.
+const (
+	// LocalRolePairNAT is the NAT end of a service-internal veth pair, in
+	// the host's namespace.
+	LocalRolePairNAT = "N"
+	// LocalRolePairTenant is the tenant end of the pair, in the VPC's VRF.
+	LocalRolePairTenant = "T"
+	// LocalRoleRoutedHost is the host end of a pod-to-host routed link, in
+	// the VPC's VRF.
+	LocalRoleRoutedHost = "R"
+	// LocalRoleRoutedPod is the routed link's end in the caller's pod.
+	LocalRoleRoutedPod = "P"
+)
+
+// localLinkNameRegex matches every name GenerateInterfaceNameLocal produces.
+var localLinkNameRegex = regexp.MustCompile(`^G[A-Za-z0-9]{9}[A-Za-z0-9]{3}[NTRP]$`)
+
+// cniLinkNameRegex matches CNI's host and guest link names and the VPC VRF.
+var cniLinkNameRegex = regexp.MustCompile(`^G[A-Za-z0-9]{9}([A-Za-z0-9]{3}[HG]|V)$`)
+
+// GenerateInterfaceNameLocal returns the name of a Local link: the VPC's
+// base62 ID, key (3 base62 characters) and role, one of the LocalRole*
+// letters.
+func GenerateInterfaceNameLocal(vpc, key, role string) string {
+	return fmt.Sprintf(interfaceNameTemplate, vpc, key, role)
+}
+
+// IsLocalLinkName reports whether name is a link Worker's Local module
+// creates.
+func IsLocalLinkName(name string) bool { return localLinkNameRegex.MatchString(name) }
+
+// IsGalacticLinkName reports whether name is any link Galactic creates per
+// VPC: a CNI attachment's host or guest end, a VPC's VRF, or a Local link.
+// None of them is ever a node's uplink.
+func IsGalacticLinkName(name string) bool {
+	return cniLinkNameRegex.MatchString(name) || localLinkNameRegex.MatchString(name)
+}

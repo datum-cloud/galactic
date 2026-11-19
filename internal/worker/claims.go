@@ -247,9 +247,14 @@ func (w *Worker) put(ctx context.Context, caller auth.Caller, key *workerv1alpha
 	w.mu.Lock()
 	c := w.claims[k]
 	noop, err := decide(c, caller.ServiceAccount, gen, hash, update)
+	heldBy := heldPod(c, caller)
 	if err == nil && noop {
 		st := proto.Clone(c.status).(*workerv1alpha1.ClaimStatus)
+		rec := c.rec
 		w.mu.Unlock()
+		if err := w.followPod(k, rec, caller, heldBy); err != nil {
+			return nil, err
+		}
 		return st, nil
 	}
 	if err == nil {
@@ -263,6 +268,9 @@ func (w *Worker) put(ctx context.Context, caller auth.Caller, key *workerv1alpha
 			fmt.Sprintf("a caller may hold at most %d claims", w.cfg.ClaimLimit), nil)
 	}
 	w.mu.Unlock()
+	if err == nil && heldBy != "" {
+		err = w.heldByAnotherPod(heldBy)
+	}
 	if err != nil {
 		return nil, w.refuse(err)
 	}
@@ -280,7 +288,7 @@ func (w *Worker) put(ctx context.Context, caller auth.Caller, key *workerv1alpha
 		return nil, refusal.New(codes.Internal, workerv1alpha1.ReasonMalformedSpec, "encode spec", nil)
 	}
 	rec := store.Record{Node: k.Node, VPC: k.VPC, AttachmentUID: k.AttachmentUID, Owner: caller.ServiceAccount,
-		Capabilities: caller.Capabilities, Generation: gen, SpecHash: hash, Spec: raw}
+		PodUID: caller.PodUID, Capabilities: caller.Capabilities, Generation: gen, SpecHash: hash, Spec: raw}
 	if err := w.d.Store.Put(rec); err != nil {
 		w.log.Error("record claim", "error", err)
 		return nil, refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "cannot record the claim durably", nil)
@@ -308,6 +316,71 @@ func (w *Worker) put(ctx context.Context, caller auth.Caller, key *workerv1alpha
 	updateClaimGauge(w)
 	w.queue.Add(k.VPC)
 	return st, nil
+}
+
+// heldPod returns the pod claim c's link serves when caller calls from
+// another pod of its owner, and "" otherwise. A routed link serves one pod: a
+// call from another pod moves the claim only once the pod it serves is gone.
+func heldPod(c *claim, caller auth.Caller) string {
+	if c == nil || c.rec.Releasing || !podBound(c.spec) || caller.PodUID == "" || c.rec.PodUID == "" ||
+		c.rec.PodUID == caller.PodUID {
+		return ""
+	}
+	return c.rec.PodUID
+}
+
+// followPod handles a duplicate Request from another pod of the owner of the
+// claim at k: refused while heldBy, the pod the claim serves, runs, and moving
+// the claim to the caller's pod once it is gone. With heldBy empty it does
+// nothing.
+func (w *Worker) followPod(k module.ClaimKey, rec store.Record, caller auth.Caller, heldBy string) error {
+	if heldBy == "" {
+		return nil
+	}
+	if err := w.heldByAnotherPod(heldBy); err != nil {
+		return w.refuse(err)
+	}
+	// The owner calls from a new pod, as after its pod was replaced.
+	// Nothing else changes, but the routed link follows the pod.
+	if err := w.repod(k, rec, caller.PodUID); err != nil {
+		w.log.Error("record the claim's new pod", "error", err)
+		return refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "cannot record the claim durably", nil)
+	}
+	return nil
+}
+
+// podBound reports whether a claim's handoff serves one pod: a routed link,
+// which the socket handoff also uses.
+func podBound(spec *workerv1alpha1.ClaimSpec) bool {
+	h := spec.GetHandoff()
+	return h == workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK || h == workerv1alpha1.Handoff_HANDOFF_SOCKET
+}
+
+// heldByAnotherPod refuses a call from another pod while the claim's pod,
+// podUID, still runs.
+func (w *Worker) heldByAnotherPod(podUID string) error {
+	if w.d.PodAlive == nil || !w.d.PodAlive(podUID) {
+		return nil
+	}
+	return refusal.New(codes.FailedPrecondition, workerv1alpha1.ReasonClaimHeldByAnotherPod,
+		"the claim's link serves another pod of its owner, which still runs", nil)
+}
+
+// repod records podUID as the pod the owner of the claim at k calls from,
+// when the claim is still rec, and requeues its scope. The caller holds k's
+// key lock.
+func (w *Worker) repod(k module.ClaimKey, rec store.Record, podUID string) error {
+	rec.PodUID = podUID
+	if err := w.d.Store.Put(rec); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	if c := w.claims[k]; c != nil && c.rec.Generation == rec.Generation && !c.rec.Releasing {
+		c.rec.PodUID = podUID
+	}
+	w.mu.Unlock()
+	w.queue.Add(k.VPC)
+	return nil
 }
 
 // countOwned counts the live claims of caller. w.mu must be held.

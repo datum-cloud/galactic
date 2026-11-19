@@ -35,10 +35,13 @@ import (
 	"go.datum.net/galactic/internal/nodelocator"
 	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/localprog"
+	"go.datum.net/galactic/internal/plumbing/ebpf/xdpdispatch"
 	"go.datum.net/galactic/internal/worker"
 	"go.datum.net/galactic/internal/worker/auth"
 	"go.datum.net/galactic/internal/worker/fabric"
 	"go.datum.net/galactic/internal/worker/hostscope"
+	"go.datum.net/galactic/internal/worker/local"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/routes"
 	"go.datum.net/galactic/internal/worker/sources"
@@ -75,6 +78,8 @@ type options struct {
 	claimLimit     int
 	resyncInterval time.Duration
 	pinDir         string
+	localPinDir    string
+	dispatchDir    string
 	hostGrace      time.Duration
 }
 
@@ -179,8 +184,16 @@ func run(o *options) error {
 		return err
 	}
 	fabric.InitMetrics()
+	pods := &local.ProcPods{ProcRoot: o.procRoot, Pods: auth.CgroupPodResolver{ProcRoot: o.procRoot}}
+	localKernel := &local.Kernel{PinDir: o.pinDir, LocalPinDir: o.localPinDir, DispatchDir: o.dispatchDir,
+		Pods: pods}
+	defer func() { _ = localKernel.Close() }()
+	loc, err := local.New(local.Config{Kernel: localKernel, Node: o.nodeName, Log: slog.Default()})
+	if err != nil {
+		return err
+	}
 	// The delivery modules this build runs.
-	reg, err := module.NewRegistry(fab)
+	reg, err := module.NewRegistry(fab, loc)
 	if err != nil {
 		return err
 	}
@@ -201,8 +214,9 @@ func run(o *options) error {
 			Allowlist: allow,
 			Node:      o.nodeName,
 		},
-		Routes: tenantRoutes,
-		Log:    slog.Default(),
+		Routes:   tenantRoutes,
+		Log:      slog.Default(),
+		PodAlive: pods.Alive,
 	})
 	if err != nil {
 		return err
@@ -222,6 +236,13 @@ func run(o *options) error {
 	// subscription.
 	if err := fab.Watch(ctx, w.RoutesChanged, func(err error) {
 		slog.Error("route and neighbor event subscription failed; relying on periodic resync", "error", err)
+	}); err != nil {
+		return err
+	}
+	// A receiving device, a pair's NAT end or a failed tenant neighbor
+	// changing requeues the VPCs whose Local handoffs it touches.
+	if err := loc.Watch(ctx, w.HostChanged, func(err error) {
+		slog.Error("Local link and neighbor event subscription failed; relying on periodic resync", "error", err)
 	}); err != nil {
 		return err
 	}
@@ -313,6 +334,9 @@ func newRootCommand() *cobra.Command {
 	f.DurationVar(&o.resyncInterval, "resync-interval", worker.DefaultResyncInterval,
 		"How often every VPC scope is reconciled again")
 	f.StringVar(&o.pinDir, "pin-dir", attach.PinDir, "bpffs directory of the pinned uSID maps")
+	f.StringVar(&o.localPinDir, "local-pin-dir", localprog.PinDir, "bpffs directory of the Local handoff maps")
+	f.StringVar(&o.dispatchDir, "xdp-dispatch-dir", xdpdispatch.PinDir,
+		"bpffs directory of the shared XDP dispatcher, read to find public receiving devices")
 	f.DurationVar(&o.hostGrace, "host-grace", worker.DefaultHostGrace,
 		"How long a VPC's host state must go unused before Worker reclaims it")
 	f.Bool("build-info", false, "Print build information and exit")

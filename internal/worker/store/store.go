@@ -34,6 +34,9 @@ type Record struct {
 	AttachmentUID string `json:"attachmentUID"`
 	// Owner is the ServiceAccount, "namespace/name", that created the claim.
 	Owner string `json:"owner"`
+	// PodUID is the UID of the pod the owner last called from. A routed
+	// link's pod end is created in that pod, and only there.
+	PodUID string `json:"podUID,omitempty"`
 	// Capabilities are the capabilities the owner was allowed when the
 	// generation was accepted. Reconciliation programs no destination
 	// whose capability is missing from them.
