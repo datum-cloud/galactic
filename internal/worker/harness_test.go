@@ -238,7 +238,8 @@ func (e *env) start() {
 }
 
 // crash stops the incarnation without any cleanup, as a killed process
-// would. Host, store and fence state stay.
+// would, and waits for its goroutines to return. Host, store and fence state
+// stay.
 func (e *env) crash() {
 	if e.cancel == nil {
 		return
@@ -251,6 +252,10 @@ func (e *env) crash() {
 		e.local.Resume()
 		e.local.ResumePlan()
 	}
+	// A killed process writes nothing more; waiting for the reconcile in
+	// progress keeps its late writes out of the next incarnation's run and
+	// the test's temporary directories.
+	e.w.Wait()
 }
 
 // ctx returns a call context for caller with a live session.
