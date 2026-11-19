@@ -108,17 +108,25 @@ func TestCrashBeforeReleaseRecorded(t *testing.T) {
 	e.store.failDelete.Store(1)
 	e.mustOK(e.release(natSA, key(vpcA, "svc-a"), 1))
 	e.eventually("rows removed", func() bool { return len(e.host.Rows(vpcA)) == 0 })
-	e.idle()
+	e.eventually("record delete attempted", func() bool { return e.store.failDelete.Load() == 0 })
 	if recs, _ := e.store.List(); len(recs) != 1 || !recs[0].Releasing {
 		t.Fatalf("records = %+v, want the releasing record kept", recs)
 	}
 
 	e.crash()
 	e.cfg.RetryMin, e.cfg.RetryMax = 5*time.Millisecond, 50*time.Millisecond
+	// Hold the restart's first reconcile at Plan, before it can confirm the
+	// removal and delete the record.
+	e.pauseOnStart = true
 	e.start()
+	<-e.startPaused
 	if st := e.status(k); st == nil || condOf(st, workerv1alpha1.ConditionWithdrawing).GetStatus() != condTrue {
 		t.Fatalf("restored status = %v, want Withdrawing", st)
 	}
+	if recs, _ := e.store.List(); len(recs) != 1 || !recs[0].Releasing {
+		t.Fatalf("records before the restart's reconcile = %+v, want the releasing record", recs)
+	}
+	e.local.ResumePlan()
 	e.waitGone(k)
 	if recs, _ := e.store.List(); len(recs) != 0 {
 		t.Fatalf("records after restart = %+v", recs)
@@ -249,6 +257,13 @@ func TestAuthorizationRevoked(t *testing.T) {
 	e.waitReady(k, 1)
 	stream, err := e.api.Observe(e.ctx(natSA), &workerv1alpha1.ObserveRequest{Key: key(vpcA, "svc-a")})
 	e.mustOK(err)
+	// Observe returns before the server subscribes. The first snapshot
+	// proves the subscription exists, so the revocation cannot be missed.
+	first, err := stream.Recv()
+	e.mustOK(err)
+	if !isTrue(first.GetStatus(), workerv1alpha1.ConditionReady) || first.GetStatus().GetReleased() {
+		t.Fatalf("first snapshot = %v, want the Ready claim", first.GetStatus())
+	}
 
 	a, _, _ := e.src.Attachment(t.Context(), "svc-a")
 	a.Admitted = false
