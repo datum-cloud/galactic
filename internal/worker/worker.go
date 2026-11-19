@@ -171,6 +171,7 @@ type Worker struct {
 
 	shutting atomic.Bool
 	started  atomic.Bool
+	wg       sync.WaitGroup
 }
 
 // New returns a Worker. Start loads desired state and starts reconciling.
@@ -247,19 +248,25 @@ func (w *Worker) Start(ctx context.Context) error {
 	w.discover(ctx)
 
 	for range w.cfg.Reconcilers {
-		go w.runReconciler(ctx)
+		w.wg.Go(func() { w.runReconciler(ctx) })
 	}
-	go func() {
+	w.wg.Go(func() {
 		<-ctx.Done()
 		w.queue.ShutDown()
-	}()
-	go w.every(ctx, w.cfg.RenewInterval, w.ExpireLeases)
-	go w.every(ctx, w.cfg.ResyncInterval, func() {
-		w.discover(ctx)
-		w.Changed("")
+	})
+	w.wg.Go(func() { w.every(ctx, w.cfg.RenewInterval, w.ExpireLeases) })
+	w.wg.Go(func() {
+		w.every(ctx, w.cfg.ResyncInterval, func() {
+			w.discover(ctx)
+			w.Changed("")
+		})
 	})
 	return nil
 }
+
+// Wait returns once every goroutine Start started has returned, which they do
+// after Start's context is done and any reconcile in progress has finished.
+func (w *Worker) Wait() { w.wg.Wait() }
 
 // Shutdown makes every later mutating call fail with UNAVAILABLE and
 // ShuttingDown. Forwarding continues: the datapath does not call Worker.
