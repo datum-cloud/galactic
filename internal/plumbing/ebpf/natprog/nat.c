@@ -685,9 +685,108 @@ struct {
 	__type(value, struct icmp_bucket);
 } icmp_rate_bucket SEC(".maps");
 
+// ---------------------------------------------------------------------
+// Local shard delivery (Galactic Worker's local.veth_pair handoff).
+// ---------------------------------------------------------------------
+//
+// A tenant on this node reaches this shard through its VPC's
+// service-internal veth pair instead of over the fabric. Worker's Local
+// module redirects the tenant's packet into the pair's tenant end, bare and
+// unencapsulated, and this program, attached native to the pair's NAT end,
+// receives it. The pair is per VPC, so the NAT end it arrives on names the
+// tenant: nat_local_pair maps that end to the SID Worker reports for the
+// VPC on this node (its source SID completed with the VPC's Argument), and
+// the forward legs key the session by it exactly as they key a remote
+// tenant's by the outer source. One nat_conn_table serves both entries.
+//
+// A reply whose session's backend_usid has a nat_local_return row goes back
+// into that pair, unencapsulated, instead of over the fabric. galactic-nat
+// writes both maps from Worker's claim status.
+
+// struct nat_local_pair_value is a NAT end's tenant SID.
+struct nat_local_pair_value {
+	__u8 tenant_sid[16];
+};
+
+// nat_local_pair: NAT-end ifindex to the SID naming its VPC on this node.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u32);
+	__type(value, struct nat_local_pair_value);
+} nat_local_pair SEC(".maps");
+
+struct nat_local_return_key {
+	__u8 tenant_sid[16];
+};
+
+// struct nat_local_return_value is where a reply for a tenant SID goes: the
+// pair's NAT end, framed from the NAT end (smac) to the tenant end (dmac).
+struct nat_local_return_value {
+	__u32 ifindex;
+	__u8 smac[6];
+	__u8 dmac[6];
+};
+
+// nat_local_return: tenant SID to the NAT end a reply for it enters.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct nat_local_return_key);
+	__type(value, struct nat_local_return_value);
+} nat_local_return SEC(".maps");
+
+// struct nat_vlan_egress_value is a VLAN device's lower device and tag.
+// A native XDP_REDIRECT to a VLAN device fails, since it has no XDP transmit,
+// so a Local forward whose route leaves through a VLAN pushes the tag itself
+// and redirects to the lower device (docs/worker/contract.md, Local
+// handoffs). Returning XDP_PASS is no alternative: the reply comes back past
+// netfilter, so conntrack would drop the flow's later packets as invalid.
+struct nat_vlan_egress_value {
+	__u32 lower_ifindex;
+	__be16 vid;
+	__be16 proto;
+};
+
+// nat_vlan_egress: VLAN ifindex to its lower device and tag.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u32);
+	__type(value, struct nat_vlan_egress_value);
+} nat_vlan_egress SEC(".maps");
+
+// enum nat_local_stat indexes nat_local_stats, mirrored in Go by
+// natprog.LocalStat.
+enum nat_local_stat {
+	// A tenant packet from a pair's NAT end, translated and sent.
+	NAT_LOCAL_STAT_FORWARD = 0,
+	// A reply sent back into a pair.
+	NAT_LOCAL_STAT_RETURN = 1,
+	// A reply whose session names a pair the redirect could not reach.
+	NAT_LOCAL_STAT_RETURN_NO_PAIR = 2,
+	// A packet from a pair's NAT end this shard does not translate.
+	NAT_LOCAL_STAT_FORWARD_UNCLAIMED = 3,
+	NAT_LOCAL_STAT_COUNT = 4,
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, NAT_LOCAL_STAT_COUNT);
+	__type(key, __u32);
+	__type(value, __u64);
+} nat_local_stats SEC(".maps");
+
 static NAT_ALWAYS_INLINE void count_drop(__u32 reason)
 {
 	__u64 *counter = bpf_map_lookup_elem(&drop_reasons, &reason);
+	if (counter)
+		*counter += 1;
+}
+
+static NAT_ALWAYS_INLINE void count_local(__u32 stat)
+{
+	__u64 *counter = bpf_map_lookup_elem(&nat_local_stats, &stat);
 	if (counter)
 		*counter += 1;
 }
@@ -1236,6 +1335,104 @@ static NAT_ALWAYS_INLINE int leave_translated(struct xdp_md *ctx, __u32 egress_i
 	return rc;
 }
 
+// NAT_NOT_LOCAL is local_return's answer for a session whose tenant is not
+// on this node: the caller re-encapsulates as before.
+#define NAT_NOT_LOCAL -1
+
+// local_return sends a translated reply into the veth pair of the tenant SID
+// usid names, when nat_local_return has a row for it, and otherwise returns
+// NAT_NOT_LOCAL. The packet is the bare, rewritten tenant packet behind its
+// Ethernet header: nothing is encapsulated, since the tenant end's tc
+// program delivers it into the VPC itself. family is the nat_traffic family.
+static NAT_ALWAYS_INLINE int local_return(struct xdp_md *ctx, const __u8 usid[16], __u32 family)
+{
+	struct nat_local_return_key k;
+	__builtin_memcpy(k.tenant_sid, usid, 16);
+	struct nat_local_return_value *lr = bpf_map_lookup_elem(&nat_local_return, &k);
+	if (!lr)
+		return NAT_NOT_LOCAL;
+
+	__u32 ifindex = lr->ifindex;
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+	struct nat_ethhdr *eth = data;
+	if ((void *) (eth + 1) > data_end || ifindex == 0) {
+		count_local(NAT_LOCAL_STAT_RETURN_NO_PAIR);
+		return XDP_DROP;
+	}
+	__builtin_memcpy(eth->h_source, lr->smac, 6);
+	__builtin_memcpy(eth->h_dest, lr->dmac, 6);
+	eth->h_proto = __builtin_bswap16(NAT_ETH_P_IPV6);
+
+	__u64 len = data_end - data;
+	if (bpf_redirect(ifindex, 0) != XDP_REDIRECT) {
+		count_local(NAT_LOCAL_STAT_RETURN_NO_PAIR);
+		return XDP_DROP;
+	}
+	count_local(NAT_LOCAL_STAT_RETURN);
+	__u32 slot = family * 4 + NAT_TRAFFIC_RETURN * 2 + NAT_TRAFFIC_REDIRECT;
+	struct nat_traffic_counter *c = bpf_map_lookup_elem(&nat_traffic, &slot);
+	if (c) {
+		c->packets += 1;
+		c->bytes += len > sizeof(struct nat_ethhdr) ? len - sizeof(struct nat_ethhdr) : 0;
+	}
+	return XDP_REDIRECT;
+}
+
+#define NAT_VLAN_HLEN 4
+
+// vlan_push_if_needed is for a Local forward, whose program runs native on a
+// pair's NAT end: when the route egresses through a VLAN device, it pushes
+// the device's tag and moves the egress to the lower device. A packet whose
+// egress is no VLAN is left alone. Returns 0, or -1 when the push failed.
+static NAT_ALWAYS_INLINE int vlan_push_if_needed(struct xdp_md *ctx, __u32 *egress_ifindex)
+{
+	__u32 key = *egress_ifindex;
+	struct nat_vlan_egress_value *v = bpf_map_lookup_elem(&nat_vlan_egress, &key);
+	if (!v)
+		return 0;
+	__u32 lower = v->lower_ifindex;
+	__be16 vid = v->vid;
+	__be16 proto = v->proto;
+
+	void *data = (void *) (long) ctx->data;
+	void *data_end = (void *) (long) ctx->data_end;
+	if (data + sizeof(struct nat_ethhdr) > data_end)
+		return -1;
+	struct nat_ethhdr saved;
+	__builtin_memcpy(&saved, data, sizeof(saved));
+
+	if (bpf_xdp_adjust_head(ctx, -NAT_VLAN_HLEN) != 0)
+		return -1;
+	data = (void *) (long) ctx->data;
+	data_end = (void *) (long) ctx->data_end;
+	if (data + sizeof(struct nat_ethhdr) + NAT_VLAN_HLEN > data_end)
+		return -1;
+	__u8 *p = data;
+	__builtin_memcpy(p, saved.h_dest, 6);
+	__builtin_memcpy(p + 6, saved.h_source, 6);
+	__builtin_memcpy(p + 12, &proto, 2);
+	__builtin_memcpy(p + 14, &vid, 2);
+	__builtin_memcpy(p + 16, &saved.h_proto, 2);
+	*egress_ifindex = lower;
+	return 0;
+}
+
+// leave_local_forward is leave_translated for a Local forward: the VLAN tag
+// is pushed first where the route needs one, and the packet is counted as a
+// Local forward.
+static NAT_ALWAYS_INLINE int leave_local_forward(struct xdp_md *ctx, __u32 egress_ifindex, __u32 family)
+{
+	if (vlan_push_if_needed(ctx, &egress_ifindex) != 0) {
+		count_drop(DROP_REASON_NAT_ADJUST_HEAD_FAILED);
+		return XDP_DROP;
+	}
+	int rc = leave_translated(ctx, egress_ifindex, family, NAT_TRAFFIC_OUTBOUND);
+	if (rc == XDP_TX || rc == XDP_REDIRECT)
+		count_local(NAT_LOCAL_STAT_FORWARD);
+	return rc;
+}
+
 // push_outer_header uses the same mechanism as the other datapath programs'
 // function of the same name. Copied rather than shared, since each program
 // defines its own surrounding header structs.
@@ -1586,29 +1783,41 @@ static NAT_ALWAYS_INLINE int nat66_forward_leg(struct xdp_md *ctx, const int icm
 	struct nat_ethhdr *eth = data;
 	if ((void *) (eth + 1) > data_end)
 		return XDP_PASS;
-	struct nat_ip6hdr *outer = (void *) (eth + 1);
-	if ((void *) (outer + 1) > data_end)
-		return XDP_PASS;
 
 	__u32 cfg_key = 0;
 	struct shard_config *cfg = bpf_map_lookup_elem(&shard_config_table, &cfg_key);
 	if (!cfg)
 		return XDP_PASS;
 
-	__u32 tenant_arg = read_argument(outer->daddr);
+	const __u32 malformed = icmp ? DROP_REASON_NAT66_ICMP_MALFORMED : DROP_REASON_NAT66_MALFORMED_FORWARD;
+
 	// The tenant's worker-node uSID, needed below to build the reply's
 	// re-encapsulation destination, must be captured into a local now. Stripping
 	// the outer header adjusts the packet head twice, which invalidates every
 	// pointer derived before it, so reading it afterward is a stale access the
 	// verifier rejects.
+	//
+	// A Local forward arrives bare on a pair's NAT end, and that end's
+	// nat_local_pair row is the tenant's SID: it stands in for the outer
+	// source and Argument, and there is nothing to strip.
+	__u32 tenant_arg;
 	__u8 tenant_usid[16];
-	__builtin_memcpy(tenant_usid, outer->saddr, 16);
-
-	const __u32 malformed = icmp ? DROP_REASON_NAT66_ICMP_MALFORMED : DROP_REASON_NAT66_MALFORMED_FORWARD;
-
-	if (strip_outer_header(ctx, &eth) != 0) {
-		count_drop(malformed);
-		return XDP_DROP;
+	__u32 in_ifindex = ctx->ingress_ifindex;
+	struct nat_local_pair_value *lp = bpf_map_lookup_elem(&nat_local_pair, &in_ifindex);
+	const int local = lp != 0;
+	if (lp) {
+		__builtin_memcpy(tenant_usid, lp->tenant_sid, 16);
+		tenant_arg = read_argument(tenant_usid);
+	} else {
+		struct nat_ip6hdr *outer = (void *) (eth + 1);
+		if ((void *) (outer + 1) > data_end)
+			return XDP_PASS;
+		tenant_arg = read_argument(outer->daddr);
+		__builtin_memcpy(tenant_usid, outer->saddr, 16);
+		if (strip_outer_header(ctx, &eth) != 0) {
+			count_drop(malformed);
+			return XDP_DROP;
+		}
 	}
 
 	data_end = (void *) (long) ctx->data_end;
@@ -1707,6 +1916,8 @@ static NAT_ALWAYS_INLINE int nat66_forward_leg(struct xdp_md *ctx, const int icm
 		return XDP_DROP;
 	}
 
+	if (local)
+		return leave_local_forward(ctx, egress_ifindex, NAT_TRAFFIC_NAT66);
 	return leave_translated(ctx, egress_ifindex, NAT_TRAFFIC_NAT66, NAT_TRAFFIC_OUTBOUND);
 }
 
@@ -1904,6 +2115,12 @@ static NAT_ALWAYS_INLINE int reencap_to_tenant(struct xdp_md *ctx, struct shard_
 
 	__u8 backend_usid[16];
 	__builtin_memcpy(backend_usid, usid, 16);
+
+	// A tenant on this node is answered through its VPC's pair, never over
+	// the underlay.
+	int lr = local_return(ctx, backend_usid, family);
+	if (lr != NAT_NOT_LOCAL)
+		return lr;
 
 	// The outer source is this shard's own SRv6-reachable identity, not any
 	// field of the connection row. The tenant's worker node decapsulates this
@@ -2183,16 +2400,29 @@ static NAT_ALWAYS_INLINE int nat64_forward_leg(struct xdp_md *ctx, const int icm
 	struct nat_ethhdr *eth = data;
 	if ((void *) (eth + 1) > data_end)
 		return XDP_PASS;
-	struct nat_ip6hdr *outer = (void *) (eth + 1);
-	if ((void *) (outer + 1) > data_end)
-		return XDP_PASS;
 
 	__u32 cfg_key = 0;
 	struct shard_config *cfg = bpf_map_lookup_elem(&shard_config_table, &cfg_key);
 	if (!cfg)
 		return XDP_PASS;
 
-	__u32 tenant_arg = read_argument(outer->daddr);
+	// See nat66_forward_leg: a Local forward's tenant is its NAT end's
+	// nat_local_pair row, and it carries no outer header.
+	__u32 in_ifindex = ctx->ingress_ifindex;
+	struct nat_local_pair_value *lp = bpf_map_lookup_elem(&nat_local_pair, &in_ifindex);
+	const int local = lp != 0;
+	__u32 tenant_arg;
+	__u8 tenant_usid[16];
+	if (lp) {
+		__builtin_memcpy(tenant_usid, lp->tenant_sid, 16);
+		tenant_arg = read_argument(tenant_usid);
+	} else {
+		struct nat_ip6hdr *outer = (void *) (eth + 1);
+		if ((void *) (outer + 1) > data_end)
+			return XDP_PASS;
+		tenant_arg = read_argument(outer->daddr);
+		__builtin_memcpy(tenant_usid, outer->saddr, 16);
+	}
 
 	// A shard advertising a NAT64 prefix it has no public IPv4 address to
 	// translate into would otherwise fail as an unexplained forward-path drop.
@@ -2203,12 +2433,9 @@ static NAT_ALWAYS_INLINE int nat64_forward_leg(struct xdp_md *ctx, const int icm
 		return XDP_DROP;
 	}
 
-	__u8 tenant_usid[16];
-	__builtin_memcpy(tenant_usid, outer->saddr, 16);
-
 	const __u32 malformed = icmp ? DROP_REASON_NAT64_ICMP_MALFORMED : DROP_REASON_NAT64_MALFORMED_FORWARD;
 
-	if (strip_outer_header(ctx, &eth) != 0) {
+	if (!local && strip_outer_header(ctx, &eth) != 0) {
 		count_drop(malformed);
 		return XDP_DROP;
 	}
@@ -2400,6 +2627,8 @@ static NAT_ALWAYS_INLINE int nat64_forward_leg(struct xdp_md *ctx, const int icm
 		return XDP_DROP;
 	}
 
+	if (local)
+		return leave_local_forward(ctx, egress_ifindex, NAT_TRAFFIC_NAT64);
 	return leave_translated(ctx, egress_ifindex, NAT_TRAFFIC_NAT64, NAT_TRAFFIC_OUTBOUND);
 }
 
@@ -2559,6 +2788,10 @@ static NAT_ALWAYS_INLINE int nat64_return_leg(struct xdp_md *ctx, struct shard_c
 
 	__be16 inner_payload_len_plus_ip6hdr =
 		__builtin_bswap16((__u16) (sizeof(struct nat_ip6hdr) + l4_len));
+
+	int lr = local_return(ctx, cv.backend_usid, NAT_TRAFFIC_NAT64);
+	if (lr != NAT_NOT_LOCAL)
+		return lr;
 
 	__u32 egress_ifindex = 0;
 	__u16 frag_mtu = 0;
@@ -3078,6 +3311,36 @@ int nat_ingress(struct xdp_md *ctx)
 	struct shard_config *cfg = bpf_map_lookup_elem(&shard_config_table, &cfg_key);
 	if (!cfg)
 		return XDP_PASS;
+
+	// A pair's NAT end carries only its VPC's tenants, bare. Nothing from it
+	// may reach the host's stack, which would route a tenant packet outside
+	// its VPC: anything this shard does not translate is dropped, except
+	// Neighbor Discovery and other link-scoped IPv6, which stays on the pair.
+	__u32 in_ifindex = ctx->ingress_ifindex;
+	if (bpf_map_lookup_elem(&nat_local_pair, &in_ifindex)) {
+		if (eth->h_proto != __builtin_bswap16(NAT_ETH_P_IPV6)) {
+			count_local(NAT_LOCAL_STAT_FORWARD_UNCLAIMED);
+			return XDP_DROP;
+		}
+		struct nat_ip6hdr *ip6 = (void *) (eth + 1);
+		if ((void *) (ip6 + 1) > data_end) {
+			count_local(NAT_LOCAL_STAT_FORWARD_UNCLAIMED);
+			return XDP_DROP;
+		}
+		if (ip6->daddr[0] == 0xff || (ip6->daddr[0] == 0xfe && (ip6->daddr[1] & 0xc0) == 0x80))
+			return XDP_PASS;
+		if (cfg->serves_v4 && (nat64_prefix_matches(ip6->daddr, cfg->nat64_prefix) ||
+				       ((cfg->flags & NAT_SHARD_FLAG_WKP) && wkp_matches(ip6->daddr)))) {
+			bpf_tail_call(ctx, &nat_progs, ip6->nexthdr == NAT_IPPROTO_ICMPV6 ?
+						       NAT_PROG_NAT64_ICMP_FORWARD : NAT_PROG_NAT64_FORWARD);
+		} else if (cfg->serves_v6) {
+			bpf_tail_call(ctx, &nat_progs, ip6->nexthdr == NAT_IPPROTO_ICMPV6 ?
+						       NAT_PROG_NAT66_ICMP_FORWARD : NAT_PROG_NAT66_FORWARD);
+		}
+		count_local(NAT_LOCAL_STAT_FORWARD_UNCLAIMED);
+		return XDP_DROP;
+	}
+
 	// An array map's lookup never misses, so an unconfigured shard reads its
 	// all-zero row rather than NULL. Serving no family is what "not configured"
 	// looks like, and it has to be tested here: a zero shard_sid still matches

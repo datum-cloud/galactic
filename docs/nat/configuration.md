@@ -12,16 +12,18 @@ flags, or a combination of both (CLI flags take precedence), with the
 
 Logging takes `--log-level` (`LOG_LEVEL`), without the `GALACTIC_NAT` prefix and the standard `--zap-*` flags; see [Logging](../observability/logging.md).
 
-| Option             | Environment Variable             | CLI Flag                  | Default       | Required |
-| ------------------ | -------------------------------- | ------------------------- | ------------- | -------- |
-| Node name          | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —             | Yes      |
-| Uplink interfaces  | `GALACTIC_NAT_UPLINK_INTERFACES` | `--nat-uplink-interfaces` | auto-detected | No       |
-| XDP attach mode    | `GALACTIC_NAT_XDP_ATTACH`        | `--nat-xdp-attach`        | `direct`      | No       |
-| Datapath enabled   | `GALACTIC_NAT_DATAPATH_ENABLED`  | `--nat-datapath-enabled`  | `true`        | No       |
-| Echo responder     | `GALACTIC_NAT_ECHO_RESPONDER`    | `--nat-echo-responder`    | `false`       | No       |
-| Procfs sysctl root | `GALACTIC_NAT_PROC_SYS_PATH`     | `--nat-proc-sys-path`     | `/proc/sys`   | No       |
-| Metrics port       | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`        | No       |
-| gRPC health port   | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`        | No       |
+| Option             | Environment Variable             | CLI Flag                  | Default                                  | Required |
+| ------------------ | -------------------------------- | ------------------------- | ---------------------------------------- | -------- |
+| Node name          | `GALACTIC_NAT_NODE_NAME`         | `--node-name`             | —                                        | Yes      |
+| Uplink interfaces  | `GALACTIC_NAT_UPLINK_INTERFACES` | `--nat-uplink-interfaces` | auto-detected                            | No       |
+| XDP attach mode    | `GALACTIC_NAT_XDP_ATTACH`        | `--nat-xdp-attach`        | `direct`                                 | No       |
+| Datapath enabled   | `GALACTIC_NAT_DATAPATH_ENABLED`  | `--nat-datapath-enabled`  | `true`                                   | No       |
+| Echo responder     | `GALACTIC_NAT_ECHO_RESPONDER`    | `--nat-echo-responder`    | `false`                                  | No       |
+| Procfs sysctl root | `GALACTIC_NAT_PROC_SYS_PATH`     | `--nat-proc-sys-path`     | `/proc/sys`                              | No       |
+| Worker socket      | `GALACTIC_NAT_WORKER_SOCKET`     | `--worker-socket`         | empty (off)                              | No       |
+| Worker token       | `GALACTIC_NAT_WORKER_TOKEN_FILE` | `--worker-token-file`     | `/var/run/secrets/galactic-worker/token` | No       |
+| Metrics port       | `GALACTIC_NAT_METRICS_PORT`      | `--metrics-port`          | `9182`                                   | No       |
+| gRPC health port   | `GALACTIC_NAT_GRPC_HEALTH_PORT`  | `--grpc-health-port`      | `5182`                                   | No       |
 
 `config/galactic-nat/base/daemonset.yaml` leaves `GALACTIC_NAT_XDP_ATTACH`
 at the binary's default, `direct`. `dispatch` is the mode to move to: it is
@@ -197,6 +199,38 @@ node where something else already turned forwarding on passes with the
 default too. SELinux policy on an enforcing node can still refuse the write,
 and the shard then says so at startup.
 
+**`--worker-socket` / `GALACTIC_NAT_WORKER_SOCKET`**
+Galactic Worker's socket, normally `/run/galactic-worker/worker.sock`. When
+set, the shard serves the tenants on its own node through each VPC's
+service-internal veth pair instead of only over the fabric
+([Worker contract](../worker/contract.md#local-handoffs)):
+
+1. It finds this node's `EgressShard` once the datapath is programmed with it,
+   and the VPCs with a `VPCAttachment` on this node.
+2. For each VPC it asks Worker for a `local.veth_pair` claim whose attachment
+   and one destination are that `EgressShard`.
+3. For each pair Worker reports, it attaches `nat_ingress` native to the
+   pair's NAT end, whatever mode the uplinks use, with a bpf link pinned under
+   `/sys/fs/bpf/galactic-nat/links`, and writes `nat_local_pair` and
+   `nat_local_return`. The VPC's sessions are keyed by the tenant SID Worker
+   reports, the node's source SID completed with the VPC's Argument, so the
+   one session table serves both the pairs and the uplinks.
+4. A reply for such a session goes back into its pair unencapsulated; every
+   other reply is encapsulated toward its tenant's node as before.
+
+Empty, the default, leaves all of this off. The shard then claims no pair and
+behaves exactly as without Worker. The pinned links and rows survive a
+restart, so a pair keeps translating while the process is down; the next
+process prunes the ones whose claim it no longer holds once every claim has
+reported. `galactic_nat_worker_session_up`,
+`galactic_nat_worker_capability_available`,
+`galactic_nat_local_handoff_ready` and `galactic_nat_local_packets_total`
+report the integration's state.
+
+**`--worker-token-file` / `GALACTIC_NAT_WORKER_TOKEN_FILE`**
+The projected ServiceAccount token, audience `galactic-worker`, the shard
+presents to Worker.
+
 ### Capabilities and host requirements
 
 `galactic-nat` runs `hostNetwork: true` and needs:
@@ -358,7 +392,8 @@ spec:
 `config/galactic-nat/rbac.yaml` grants the `galactic-nat`
 ServiceAccount exactly: `get`/`list`/`watch`/`update`/`patch` on
 `egressshards` (+`/status`), full CRUD on `bgpadvertisements`, and
-read-only `get`/`list`/`watch` on `bgprouters` — nothing more. It
+read-only `get`/`list`/`watch` on `bgprouters` and `vpcattachments`
+(read only with `--worker-socket` set) — nothing more. It
 deliberately does **not** grant `networkegresspolicies`; that CRD belongs
 to an earlier, superseded design this sharded egress tier replaced.
 
