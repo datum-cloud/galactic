@@ -32,6 +32,7 @@ import (
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/module/fake"
 	"go.datum.net/galactic/internal/worker/refusal"
+	"go.datum.net/galactic/internal/worker/routes"
 	"go.datum.net/galactic/internal/worker/sources"
 	"go.datum.net/galactic/internal/worker/store"
 )
@@ -43,9 +44,10 @@ const (
 	vpcA      = "vpcA"
 	vpcB      = "vpcB"
 
-	natSA   = "galactic-system/nat"
-	gwSA    = "galactic-system/gateway"
-	otherSA = "galactic-system/other"
+	natSA    = "galactic-system/nat"
+	gwSA     = "galactic-system/gateway"
+	otherSA  = "galactic-system/other"
+	routerSA = "galactic-system/galactic-router"
 
 	callerMD = "x-test-caller"
 )
@@ -55,9 +57,10 @@ var (
 	locB = netip.MustParsePrefix("2001:db8:0:2::/64")
 
 	testCaps = map[string][]string{
-		natSA:   {workerv1alpha1.CapabilityLocalVethPair, workerv1alpha1.CapabilityFabricSRv6},
-		gwSA:    {workerv1alpha1.CapabilityLocalTap},
-		otherSA: {workerv1alpha1.CapabilityLocalVethPair, workerv1alpha1.CapabilityFabricSRv6},
+		natSA:    {workerv1alpha1.CapabilityLocalVethPair, workerv1alpha1.CapabilityFabricSRv6},
+		gwSA:     {workerv1alpha1.CapabilityLocalTap},
+		otherSA:  {workerv1alpha1.CapabilityLocalVethPair, workerv1alpha1.CapabilityFabricSRv6},
+		routerSA: {workerv1alpha1.CapabilityFabricRoutes},
 	}
 )
 
@@ -119,6 +122,9 @@ type env struct {
 	// hostState, when set, is the VPCs' canonical host state each
 	// incarnation reconciles.
 	hostState hostscope.Host
+	// routes, when set, is the tenant route table the Routes service
+	// records into.
+	routes *routes.Table
 	// pauseOnStart pauses the Local module's Plan before Start, so the
 	// first reconcile of a restart holds until the test resumes it.
 	pauseOnStart bool
@@ -211,7 +217,7 @@ func (e *env) start() {
 		e.t.Fatal(err)
 	}
 	w, err := New(e.cfg, Deps{Store: e.store, Fence: e.fence, Sources: e.src, Modules: reg, Auth: metaAuth{},
-		Host: e.hostState, Now: e.clock.Now})
+		Host: e.hostState, Routes: e.routes, Now: e.clock.Now})
 	if err != nil {
 		e.t.Fatal(err)
 	}

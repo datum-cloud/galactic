@@ -72,7 +72,7 @@ enum CapabilityState {
 
 message Capability {
   // name is one of local.tap, local.veth_pair, local.routed_link,
-  // local.socket and fabric.srv6.
+  // local.socket, fabric.srv6 and fabric.routes.
   string name = 1;
   CapabilityState state = 2;
   // reason is a machine reason when the capability is unavailable, such as
@@ -224,11 +224,20 @@ message DestinationStatus {
   Mode mode = 2;
   bool resolved = 3;
   bool programmed = 4;
+  // ready is true when both forward_ready and return_ready are true.
   bool ready = 5;
   // reason explains the first of resolved, programmed and ready that is
   // false.
   string reason = 6;
   string message = 7;
+  // forward_ready is true when traffic from the handoff can reach the
+  // destination: for a Fabric destination, a route toward the destination's
+  // locator covers each of its addresses and the underlay next hop resolves.
+  bool forward_ready = 8;
+  // return_ready is true when traffic from the destination can come back to
+  // the handoff: for a Fabric destination, this node decapsulates the VPC's
+  // SID into the VPC's table.
+  bool return_ready = 9;
 }
 
 // ClaimStatus is a complete snapshot of one claim. A client drops a

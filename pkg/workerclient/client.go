@@ -63,9 +63,10 @@ type Options struct {
 
 // Client is a Worker client.
 type Client struct {
-	opts Options
-	cc   *grpc.ClientConn
-	api  workerv1alpha1.WorkerClient
+	opts   Options
+	cc     *grpc.ClientConn
+	api    workerv1alpha1.WorkerClient
+	routes workerv1alpha1.RoutesClient
 
 	mu      sync.Mutex
 	session string
@@ -115,7 +116,8 @@ func Dial(ctx context.Context, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("workerclient: %w", err)
 	}
-	c := &Client{opts: opts, cc: cc, api: workerv1alpha1.NewWorkerClient(cc), stop: make(chan struct{})}
+	c := &Client{opts: opts, cc: cc, api: workerv1alpha1.NewWorkerClient(cc),
+		routes: workerv1alpha1.NewRoutesClient(cc), stop: make(chan struct{})}
 	if err := c.openSession(ctx, false); err != nil {
 		_ = cc.Close()
 		return nil, err
@@ -240,6 +242,39 @@ func (c *Client) Observe(ctx context.Context, key *workerv1alpha1.ClaimKey) (*Ob
 		return nil, err
 	}
 	return &Observer{stream: stream, last: map[string]uint64{}}, nil
+}
+
+// RouteStream is an open Routes.Sync stream.
+type RouteStream = grpc.BidiStreamingClient[workerv1alpha1.RoutesSyncRequest, workerv1alpha1.RoutesSyncResponse]
+
+// SyncRoutes opens a Routes.Sync stream, which hands Worker tenant routes.
+// Only a caller allowed fabric.routes may open one. Cancel ctx to close it.
+func (c *Client) SyncRoutes(ctx context.Context) (RouteStream, error) {
+	var stream RouteStream
+	err := c.retry(ctx, func(ctx context.Context) error {
+		s, err := c.routes.Sync(ctx)
+		if err != nil {
+			return err
+		}
+		// Worker sends headers once it admits the stream; a stream that
+		// ends without them was refused.
+		md, err := s.Header()
+		if err != nil {
+			return err
+		}
+		if md == nil {
+			if _, err := s.Recv(); err != nil {
+				return err
+			}
+			return errors.New("workerclient: Routes.Sync stream ended without headers")
+		}
+		stream = s
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return stream, nil
 }
 
 // Reason returns the contract reason of a Worker error, or "".

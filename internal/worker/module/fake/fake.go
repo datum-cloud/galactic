@@ -346,6 +346,7 @@ func (m *Module) Read(_ context.Context, scope module.Scope) (module.State, erro
 				ok, reason := ready(k, id)
 				st.Ready, st.Reason = ok, reason
 			}
+			st.ForwardReady, st.ReturnReady = st.Ready, st.Ready
 			out[k][id] = st
 		}
 	}
