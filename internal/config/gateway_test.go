@@ -61,6 +61,9 @@ func TestGatewayConfigEnvOverride(t *testing.T) {
 	}
 }
 
+// testWorkerSocket is a galactic-worker socket path.
+const testWorkerSocket = "/run/galactic-worker/worker.sock"
+
 func TestGatewayConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -71,6 +74,26 @@ func TestGatewayConfigValidate(t *testing.T) {
 			name:    testCaseMissingNodeName,
 			envVars: map[string]string{EnvGatewayPublicInterface: testGatewayIface, EnvGatewaySRv6Address: testGatewaySRv6},
 			wantErr: testErrNodeNameRequired,
+		},
+		{
+			// The Local handoff takes its packets from a dispatcher slot's
+			// metadata (#1438).
+			name: "worker socket needs the dispatcher",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewayWorkerSocket:    testWorkerSocket,
+				EnvGatewayXDPAttach:       GatewayXDPAttachDirect,
+			},
+			wantErr: EnvGatewayWorkerSocket + " needs",
+		},
+		{
+			name: "worker socket with the dispatcher",
+			envVars: map[string]string{
+				EnvGatewayNodeName:        testGatewayNodeName,
+				EnvGatewayPublicInterface: testGatewayIface,
+				EnvGatewayWorkerSocket:    testWorkerSocket,
+			},
 		},
 		{
 			name:    "missing public interface",

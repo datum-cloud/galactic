@@ -169,8 +169,8 @@ func NewNATConfig() *NATConfig {
 	v.SetDefault("datapath_enabled", true)
 	v.SetDefault("echo_responder", false)
 	v.SetDefault("proc_sys_path", DefaultProcSysPath)
-	v.SetDefault("worker_socket", "")
-	v.SetDefault("worker_token_file", "")
+	v.SetDefault(keyWorkerSocket, "")
+	v.SetDefault(keyWorkerTokenFile, "")
 
 	cfg := &NATConfig{
 		v:      v,
@@ -195,8 +195,8 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{"nat-datapath-enabled", "datapath_enabled"},
 		{"nat-echo-responder", "echo_responder"},
 		{"nat-proc-sys-path", "proc_sys_path"},
-		{"worker-socket", "worker_socket"},
-		{"worker-token-file", "worker_token_file"},
+		{"worker-socket", keyWorkerSocket},
+		{"worker-token-file", keyWorkerTokenFile},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -223,8 +223,8 @@ func (c *NATConfig) readFields() {
 	c.DatapathEnabled = c.v.GetBool("datapath_enabled")
 	c.EchoResponder = c.v.GetBool("echo_responder")
 	c.ProcSysPath = c.v.GetString("proc_sys_path")
-	c.WorkerSocket = c.v.GetString("worker_socket")
-	c.WorkerTokenFile = c.v.GetString("worker_token_file")
+	c.WorkerSocket = c.v.GetString(keyWorkerSocket)
+	c.WorkerTokenFile = c.v.GetString(keyWorkerTokenFile)
 }
 
 // Validate checks that the required configuration fields are set.

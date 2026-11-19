@@ -75,6 +75,15 @@ func decision(state bgpv1alpha1.BackendHealthState) *bgpv1alpha1.ServiceVIPBindi
 	}
 }
 
+// localNotReadyDecision is galactic-router's decision for a backend whose
+// gateway reports its Local handoff not ready.
+func localNotReadyDecision() *bgpv1alpha1.ServiceVIPBindingHealth {
+	return &bgpv1alpha1.ServiceVIPBindingHealth{
+		State: bgpv1alpha1.BackendHealthUnhealthy, Reason: bgpv1alpha1.BackendHealthReasonLocalHandoffNotReady,
+		AttachmentUID: testGatewayHealthUID, Port: testBackendPort,
+	}
+}
+
 func backendAddrs(backends []gateway.DesiredBackend) []string {
 	out := make([]string, 0, len(backends))
 	for _, b := range backends {
@@ -168,6 +177,28 @@ func TestBuildDesiredRule_Health(t *testing.T) {
 			sick:          decision(bgpv1alpha1.BackendHealthUnhealthy),
 			wantBackends:  []string{testHealthyAddr, testSickAddr},
 		},
+		{
+			name:          "a rule without a healthCheck leaves out a backend whose Local handoff is not ready",
+			noHealthCheck: true,
+			gate:          applied,
+			sick:          localNotReadyDecision(),
+			wantBackends:  []string{testHealthyAddr},
+			want:          ruleHealth{unhealthy: []string{sickAddrPort}},
+		},
+		{
+			name:         "a Local handoff decision applies whatever port it names",
+			gate:         applied,
+			sick:         func() *bgpv1alpha1.ServiceVIPBindingHealth { h := localNotReadyDecision(); h.Port = 1; return h }(),
+			wantBackends: []string{testHealthyAddr},
+			want:         ruleHealth{unhealthy: []string{sickAddrPort}},
+		},
+		{
+			name:          "a Local handoff decision is not applied while health does not apply",
+			noHealthCheck: true,
+			gate:          healthGate{why: "backend health is off on gateway node gw-a"},
+			sick:          localNotReadyDecision(),
+			wantBackends:  []string{testHealthyAddr, testSickAddr},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -191,6 +222,17 @@ func TestBuildDesiredRule_Health(t *testing.T) {
 			}
 			if got := backendAddrs(dr.Backends); !slices.Equal(got, tt.wantBackends) {
 				t.Errorf("backends = %v, want %v", got, tt.wantBackends)
+			}
+			// Every backend stays placed, whatever health left out, so the
+			// gateway on its node keeps claiming its Local handoff.
+			if len(dr.PlacedBackends) != 2 {
+				t.Errorf("placed = %+v, want both backends", dr.PlacedBackends)
+			}
+			for _, p := range dr.PlacedBackends {
+				if p.Node != testComputeNodeName || p.AttachmentUID != string(testGatewayHealthUID) || p.Slot == 0 ||
+					!p.USID.IsValid() {
+					t.Errorf("placed backend = %+v", p)
+				}
 			}
 			if !slices.Equal(rh.unhealthy, tt.want.unhealthy) || rh.noneHealthy != tt.want.noneHealthy ||
 				rh.notApplied != tt.want.notApplied {

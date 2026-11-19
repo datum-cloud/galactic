@@ -79,6 +79,28 @@ type DesiredRule struct {
 	// backend.
 	Backends     []DesiredBackend
 	IPv4Backends []DesiredBackend
+
+	// PlacedBackends are every backend the rule resolved, of either family,
+	// with its node and attachment, before health filtering. The engine
+	// ignores them. galactic-gateway hands those on its own node to their
+	// TAPs through Galactic Worker (internal/gateway/localhandoff), and must
+	// keep claiming one that health left out, so that it can become ready
+	// again.
+	PlacedBackends []PlacedBackend
+}
+
+// PlacedBackend is one resolved backend and where it runs.
+type PlacedBackend struct {
+	// Node is the node the backend's attachment runs on.
+	Node string
+	// AttachmentUID is the backend's VPCAttachment UID.
+	AttachmentUID string
+	// VPC is the attachment's VPC identity (VPCAttachment.status.vpc).
+	VPC string
+	// Slot is the backend's uSID slot (srv6.BackendSlot).
+	Slot uint16
+	// USID is the uSID the gateway encapsulates toward.
+	USID netip.Addr
 }
 
 // backendsFor returns the backends that serve vip.
