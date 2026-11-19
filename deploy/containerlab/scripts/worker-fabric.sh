@@ -95,22 +95,37 @@ dump() {
   # The node's bpffs is reachable through its /proc root; bpftool runs on the
   # host, since the node image has none.
   sudo bpftool -j map dump pinned "/proc/${pid}/root${PIN_DIR}/egress_route_table" |
-    jq -r --argjson t "${tbl}" '
-      .[] | .formatted | select(.key.table_id == $t)
-      | [.key.family, .key.prefixlen - 40, (.key.addr | @json), (.value.sid | @json),
-         .value.link_ifindex, (.value.dmac | @json)] | @tsv' |
     python3 -c '
-import ipaddress, json, sys
-for line in sys.stdin:
-    fam, plen, addr, sid, link, dmac = line.rstrip("\n").split("\t")
-    a = bytes(json.loads(addr))
-    ip = ipaddress.IPv6Address(a) if fam == "0" else ipaddress.IPv4Address(a[:4])
-    s = ipaddress.IPv6Address(bytes(json.loads(sid)))
-    mac = ":".join("%02x" % b for b in json.loads(dmac))
-    link = int(link)
+import ipaddress, json, struct, sys
+
+table = int(sys.argv[1])
+
+def raw(field):
+    return bytes(int(b, 16) for b in field)
+
+out = []
+for e in json.load(sys.stdin):
+    f = e.get("formatted")
+    if f:
+        k, v = f["key"], f["value"]
+        tid, fam, plen = k["table_id"], k["family"], k["prefixlen"] - 40
+        addr, sid = bytes(k["addr"]), bytes(v["sid"])
+        link, dmac = v["link_ifindex"], bytes(v["dmac"])
+    else:
+        # struct egress_route_key and egress_route_value, packed, little endian.
+        kb, vb = raw(e["key"]), raw(e["value"])
+        plen, tid = struct.unpack_from("<II", kb)
+        plen -= 40
+        fam, addr = kb[8], kb[9:25]
+        sid, link, dmac = vb[:16], struct.unpack_from("<I", vb, 16)[0], vb[20:26]
+    if tid != table:
+        continue
+    ip = ipaddress.IPv6Address(addr) if fam == 0 else ipaddress.IPv4Address(addr[:4])
     kind = "pass-through" if link == 0 else "group" if link == 0xFFFFFFFF else "encap"
-    print(f"{ip}/{plen} {kind} sid={s} link={link} dmac={mac}")
-' | sort
+    mac = ":".join("%02x" % b for b in dmac)
+    out.append(f"{ip}/{plen} {kind} sid={ipaddress.IPv6Address(sid)} link={link} dmac={mac}")
+print("\n".join(sorted(out)))
+' "${tbl}"
 }
 
 case "${1:-}" in
