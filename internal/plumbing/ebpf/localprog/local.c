@@ -95,6 +95,8 @@ enum lt_stat {
 	LT_STAT_GUARD_PASS,
 	LT_STAT_GUARD_DROP,
 	LT_STAT_LINK_TOO_BIG,
+	LT_STAT_LINK_LOCAL_SHARD,
+	LT_STAT_LINK_LOCAL_SHARD_NO_PAIR,
 	LT_STAT_COUNT = 32,
 };
 
@@ -464,11 +466,25 @@ int local_link_rx(struct __sk_buff *skb)
 		return bpf_redirect_neigh(rx, 0, 0, 0);
 	}
 
-	__u8 dst[16];
+	// usid_egress placed the packet on this node's own NAT shard and left
+	// the marker (USID_CB_LOCAL_SHARD) with the VRF table it decided in. Only
+	// a marker for this interface's own table counts; it is cleared so no
+	// later program reads it again.
+	int local_shard = skb->cb[0] == USID_CB_LOCAL_SHARD && skb->cb[1] == table;
 
-	__builtin_memcpy(dst, ip6->daddr, 16);
-	if (!pair || !lt_nat_route(table, dst))
-		return TC_ACT_UNSPEC;
+	if (local_shard) {
+		skb->cb[0] = 0;
+		if (!pair) {
+			lt_count(LT_STAT_LINK_LOCAL_SHARD_NO_PAIR);
+			return TC_ACT_SHOT;
+		}
+	} else {
+		__u8 dst[16];
+
+		__builtin_memcpy(dst, ip6->daddr, 16);
+		if (!pair || !lt_nat_route(table, dst))
+			return TC_ACT_UNSPEC;
+	}
 	if (!lt_fits(skb, pair)) {
 		lt_count(LT_STAT_LINK_TOO_BIG);
 		return TC_ACT_SHOT;
@@ -488,7 +504,7 @@ int local_link_rx(struct __sk_buff *skb)
 		return TC_ACT_SHOT;
 	__builtin_memcpy(eth->h_source, smac, 6);
 	__builtin_memcpy(eth->h_dest, dmac, 6);
-	lt_count(LT_STAT_LINK_NAT);
+	lt_count(local_shard ? LT_STAT_LINK_LOCAL_SHARD : LT_STAT_LINK_NAT);
 	return bpf_redirect(pair, 0);
 }
 

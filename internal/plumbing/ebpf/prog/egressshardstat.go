@@ -14,7 +14,8 @@ const (
 	EgressShardStatMaglev      uint32 = 3
 	EgressShardStatShardDead   uint32 = 4
 	EgressShardStatParseFailed uint32 = 5
-	EgressShardStatCount       uint32 = 6
+	EgressShardStatLocal       uint32 = 6
+	EgressShardStatCount       uint32 = 7
 )
 
 // EgressShardStatNames maps each index to a short, stable, metrics-friendly
@@ -26,4 +27,5 @@ var EgressShardStatNames = map[uint32]string{
 	EgressShardStatMaglev:      "maglev",
 	EgressShardStatShardDead:   "shard_dead",
 	EgressShardStatParseFailed: "parse_failed",
+	EgressShardStatLocal:       "local",
 }

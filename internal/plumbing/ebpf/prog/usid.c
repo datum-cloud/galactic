@@ -905,6 +905,10 @@ enum egress_shard_stat {
 	EGRESS_SHARD_STAT_SHARD_DEAD = 4,
 	// Reading the tenant's addresses out of the packet failed. Dropped.
 	EGRESS_SHARD_STAT_PARSE_FAILED = 5,
+	// The packet was placed on this node's own shard, from the group's local
+	// view, and handed on unencapsulated for the Local module's tc program
+	// to send into the VPC's service-internal veth pair.
+	EGRESS_SHARD_STAT_LOCAL = 6,
 	__EGRESS_SHARD_STAT_COUNT,
 };
 
@@ -1541,6 +1545,48 @@ struct {
 	__type(key, __u32);
 	__array(values, struct egress_shard_group_inner);
 } egress_shard_groups SEC(".maps");
+
+// egress_shard_local_groups holds each group's local view: the same members,
+// slots and generations as its egress_shard_groups snapshot, built as if this
+// node's own shard resolved, so a LOCAL member is also ALIVE and has a share
+// of the Maglev table. galactic-cni publishes one only while the group has a
+// local member. A packet reads it only when its VRF table has an
+// egress_local_shard row; every other packet reads egress_shard_groups and
+// takes the path it took before local views existed.
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+	__uint(max_entries, USID_EGRESS_MAX_GROUPS);
+	__type(key, __u32);
+	__array(values, struct egress_shard_group_inner);
+} egress_shard_local_groups SEC(".maps");
+
+// struct egress_local_shard_value is one egress_local_shard row: the VPC whose
+// VRF table keys it has a ready service-internal veth pair into this node's own
+// NAT shard. shard_sid is that shard's base SID, pair_ifindex the pair's tenant
+// end. flags is reserved and zero.
+struct egress_local_shard_value {
+	__u8 shard_sid[16];
+	__u32 pair_ifindex;
+	__u32 flags;
+};
+
+// egress_local_shard: one row per VRF table whose tenants may use this node's
+// own NAT shard. Galactic Worker writes a row while the VPC's pair is ready
+// and removes it when it is not; usid_egress and galactic-cni's egress sweep
+// only read it.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u32);
+	__type(value, struct egress_local_shard_value);
+} egress_local_shard SEC(".maps");
+
+// USID_CB_LOCAL_SHARD is the marker usid_egress writes to skb->cb[0], with the
+// VRF table ID in skb->cb[1], when a group placed the packet on this node's own
+// shard. local_link_rx, the next filter on the same tc ingress, reads both and
+// sends the packet into the VPC's pair. Nothing else in either program uses
+// skb->cb.
+#define USID_CB_LOCAL_SHARD 0x4c534844
 
 // egress_shard_pin: see struct egress_shard_pin_key. An LRU, so a pin is
 // evicted under pressure rather than refusing a new one. An evicted pin falls
@@ -5716,9 +5762,16 @@ static USID_ALWAYS_INLINE int load_egress_shard_key(struct __sk_buff *skb, struc
 // group's pin_idle_sec; a draining shard keeps its pins. Otherwise the Maglev
 // table chooses, and with pins on, the choice is pinned.
 //
-// Returns 0 when the route is ready and -1 when the packet must be dropped,
-// already counted in egress_shard_stats. Not inlined: usid_egress is already
-// close to the verifier's per-function stack and complexity budgets.
+// A packet whose VRF table has an egress_local_shard row reads the group's
+// local view from egress_shard_local_groups when one is published, so this
+// node's own shard takes its share of the VPC's tenants. Every other packet
+// reads egress_shard_groups, whose LOCAL members are never ALIVE.
+//
+// Returns 0 when the route is ready, 1 when the packet was placed on this
+// node's own shard (a member that is both LOCAL and ALIVE, which only a local
+// view holds) and goes on unencapsulated, and -1 when the packet must be
+// dropped, already counted in egress_shard_stats. Not inlined: usid_egress is
+// already close to the verifier's per-function stack and complexity budgets.
 static USID_NOINLINE int resolve_egress_group(struct __sk_buff *skb, __u32 table_id, __u32 family, __u32 group_id,
 					      __u32 function_argument)
 {
@@ -5732,14 +5785,26 @@ static USID_NOINLINE int resolve_egress_group(struct __sk_buff *skb, __u32 table
 		return -1;
 	}
 
-	void *snapshot = bpf_map_lookup_elem(&egress_shard_groups, &group_id);
+	struct egress_shard_group_value *g = (void *) 0;
 
-	if (!snapshot) {
-		count_egress_shard_stat(EGRESS_SHARD_STAT_GROUP_EMPTY);
-		return -1;
+	if (bpf_map_lookup_elem(&egress_local_shard, &table_id)) {
+		void *local = bpf_map_lookup_elem(&egress_shard_local_groups, &group_id);
+
+		if (local) {
+			g = bpf_map_lookup_elem(local, &zero);
+			if (g && !(g->flags & USID_EGRESS_GROUP_ENABLED))
+				g = (void *) 0;
+		}
 	}
+	if (!g) {
+		void *snapshot = bpf_map_lookup_elem(&egress_shard_groups, &group_id);
 
-	struct egress_shard_group_value *g = bpf_map_lookup_elem(snapshot, &zero);
+		if (!snapshot) {
+			count_egress_shard_stat(EGRESS_SHARD_STAT_GROUP_EMPTY);
+			return -1;
+		}
+		g = bpf_map_lookup_elem(snapshot, &zero);
+	}
 
 	if (!g || !(g->flags & USID_EGRESS_GROUP_ENABLED)) {
 		count_egress_shard_stat(EGRESS_SHARD_STAT_GROUP_EMPTY);
@@ -5822,6 +5887,19 @@ static USID_NOINLINE int resolve_egress_group(struct __sk_buff *skb, __u32 table
 	index &= USID_EGRESS_MAX_SHARDS - 1;
 
 	struct egress_shard_member *shard = &g->shards[index];
+	__u32 counter_key = group_id * USID_EGRESS_MAX_SHARDS + index;
+
+	if ((shard->flags & (USID_EGRESS_SHARD_LOCAL | USID_EGRESS_SHARD_ALIVE)) ==
+	    (USID_EGRESS_SHARD_LOCAL | USID_EGRESS_SHARD_ALIVE)) {
+		struct egress_shard_counter *lc = bpf_map_lookup_elem(&egress_shard_counters, &counter_key);
+
+		if (lc) {
+			lc->packets += 1;
+			lc->bytes += skb->len;
+		}
+		count_egress_shard_stat(EGRESS_SHARD_STAT_LOCAL);
+		return 1;
+	}
 
 	__builtin_memcpy(s->route.sid, shard->sid, sizeof(s->route.sid));
 	s->route.sid[8] = (__u8) ((s->route.sid[8] & 0xF0) | ((function_argument >> 8) & 0x0F));
@@ -5830,7 +5908,6 @@ static USID_NOINLINE int resolve_egress_group(struct __sk_buff *skb, __u32 table
 	__builtin_memcpy(s->route.dmac, shard->dmac, sizeof(s->route.dmac));
 	__builtin_memcpy(s->route.smac, shard->smac, sizeof(s->route.smac));
 
-	__u32 counter_key = group_id * USID_EGRESS_MAX_SHARDS + index;
 	struct egress_shard_counter *counter = bpf_map_lookup_elem(&egress_shard_counters, &counter_key);
 
 	if (counter) {
@@ -6257,8 +6334,19 @@ int usid_egress(struct __sk_buff *skb)
 		__builtin_memcpy(&group_id, rv->sid, sizeof(group_id));
 		__u32 function_argument = ((__u32) rv->sid[8] << 8) | rv->sid[9];
 
-		if (resolve_egress_group(skb, vrf->vrf_table_id, route_family, group_id, function_argument))
+		int placed = resolve_egress_group(skb, vrf->vrf_table_id, route_family, group_id, function_argument);
+
+		if (placed < 0)
 			return TC_ACT_SHOT;
+		if (placed > 0) {
+			// This node's own shard: no encapsulation. The Local module's
+			// tc program, next on this ingress, sends the packet into the
+			// VPC's service-internal veth pair. The egress decision above
+			// already ran on the route's path.
+			skb->cb[0] = USID_CB_LOCAL_SHARD;
+			skb->cb[1] = vrf->vrf_table_id;
+			return TC_ACT_UNSPEC;
+		}
 
 		__u32 shard_scratch_key = 0;
 		struct egress_shard_scratch_value *shard_scratch =
