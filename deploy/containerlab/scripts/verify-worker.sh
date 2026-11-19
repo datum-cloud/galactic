@@ -303,7 +303,13 @@ kc -n "${NS}" get pods -l app.kubernetes.io/name=galactic-worker -o wide >"${OUT
 # Least privilege, from the running pods: the capabilities in effect and
 # what the ServiceAccount may and may not do.
 for node in "${NODES[@]}"; do
-  pid=$(docker exec "${node}" pgrep -f '^/galactic-worker' | head -1)
+  # Anchored and with -o, so neither a shell holding the pattern nor a
+  # pipe closing early decides the result.
+  pid=$(docker exec "${node}" pgrep -o -f '^/galactic-worker' || true)
+  if [ -z "${pid}" ]; then
+    fail "privileges: no galactic-worker process on ${node}"
+    continue
+  fi
   docker exec "${node}" grep -E '^Cap(Prm|Eff|Bnd)' "/proc/${pid}/status" | sed "s/^/${node} /" >>"${OUT}/capabilities.txt"
 done
 caps=$(awk '/CapEff/ {print $3}' "${OUT}/capabilities.txt" | sort -u)
