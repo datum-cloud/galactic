@@ -13,6 +13,10 @@
 # promises ("advertised into BGP... so every other node learns a kernel
 # SEG6 route toward it").
 #
+# vpcattachments (get/list/watch) is read only with --worker-socket set: the
+# shard claims a local veth pair from Galactic Worker for each VPC with a
+# tenant attachment on its node, and learns those VPCs from the attachments.
+#
 # networkegresspolicies is deliberately NOT granted here: EgressShardReconciler
 # never reads or writes that CRD (it belongs to the earlier, now-superseded
 # #865 egress-policy stack this sharded-egress design replaces), so granting
@@ -39,6 +43,10 @@ rules:
   - apiGroups: ["galactic.datumapis.com"]
     resources:
       - bgprouters
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["galactic.datumapis.com"]
+    resources:
+      - vpcattachments
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
