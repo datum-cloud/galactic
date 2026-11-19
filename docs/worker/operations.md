@@ -279,6 +279,12 @@ node back to that mode:
    earlier galactic-edge refuses a handed-back scope.
 4. Restart galactic-router on the node.
 
+## Lab check
+
+`task worker:verify` in `deploy/containerlab` installs each placement on the
+lab's dfw site, injects a route, attachment and hook failure, and checks the
+handback ([lab guide](../../deploy/containerlab/docs/worker.md)).
+
 ## Return a combined node to dedicated placement
 
 1. Move the guests pinned to the node elsewhere. CNI DEL removes each TAP, and

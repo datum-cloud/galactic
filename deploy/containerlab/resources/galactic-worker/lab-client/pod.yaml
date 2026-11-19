@@ -1,0 +1,49 @@
+# Runs as a service agent would: joined to Worker's socket group, with a
+# token of audience galactic-worker. It keeps its own network namespace, so a
+# routed_link claim can place the link's pod end in it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: worker-lab-client-REPLACE_WITH_NODE_NAME
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: worker-lab-client
+spec:
+  nodeName: REPLACE_WITH_NODE_NAME
+  serviceAccountName: galactic-worker-lab-client
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 1
+  tolerations:
+    - operator: Exists
+  securityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
+    supplementalGroups: [65441]
+  containers:
+    - name: client
+      image: worker-claim:latest
+      imagePullPolicy: Never
+      command: ["/worker-claim", "-hold", "4h"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - name: socket
+          mountPath: /run/galactic-worker
+        - name: token
+          mountPath: /var/run/secrets/galactic-worker
+          readOnly: true
+  volumes:
+    - name: socket
+      hostPath:
+        path: /run/galactic-worker
+        type: Directory
+    - name: token
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: galactic-worker
+              expirationSeconds: 3600
+              path: token

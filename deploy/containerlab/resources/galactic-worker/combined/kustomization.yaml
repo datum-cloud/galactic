@@ -1,0 +1,28 @@
+# The lab's combined Worker install (docs/worker/operations.md): this
+# checkout's config/galactic-worker, which scripts/worker-lab.sh copies to
+# ../config on the site's control plane, with the lab's local image and an
+# allowlist that also admits the lab's claim client. The lab's NAT already
+# runs in dispatch mode (../../galactic-nat/base), so only Worker is applied
+# here.
+namespace: galactic-system
+resources:
+  - ../config
+  - ../config/base
+components:
+  - ../config/profiles/combined
+  - ../lab-allowlist
+images:
+  - name: ghcr.io/datum-cloud/galactic-worker
+    newName: galactic-worker
+    newTag: latest
+patches:
+  - target:
+      kind: DaemonSet
+      name: galactic-worker
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --log-level=debug
