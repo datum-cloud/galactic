@@ -697,6 +697,17 @@ func (g *egressGroup) refresh(
 	table *egressroutemap.EgressRouteTable, foreignTableIDs map[uint32]struct{}, shardSIDs []net.IP,
 	classOf map[uint32]egressroutemap.TranslationClass, opts ...egressroutemap.RefreshOption,
 ) (egressroutemap.RefreshResult, error) {
+	// Worker's Fabric module keeps the tenant routes of the VPCs it owns
+	// current. A sweep that cannot tell which those are would rewrite them
+	// outside their fence, so it is skipped, as for the sidecar's tables.
+	workerTables, err := workerTenantTablesFn()
+	if err != nil {
+		g.ctl.SweepError("refresh")
+		slog.Error("egress_route_table refresh sweep skipped: could not read which VPCs galactic-worker owns",
+			"err", err)
+		return egressroutemap.RefreshResult{}, err
+	}
+	opts = append(opts, egressroutemap.WithoutTenantRoutes(workerTables))
 	result, err := table.Refresh(foreignTableIDs, shardSIDs, opts...)
 	if err != nil {
 		g.ctl.SweepError("refresh")
