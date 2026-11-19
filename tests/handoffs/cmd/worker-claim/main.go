@@ -11,12 +11,18 @@
 //
 //	worker-claim -node N -vpc V -attachment UID -handoff tap|veth_pair|routed_link|socket \
 //	    -dest UID[,UID...] [-generation G] [-wait D] [-release]
+//	worker-claim -hold D
 //
 // It prints the claim's last status snapshot as one line of JSON, after the
 // status describes the generation and is Programmed, or once -wait passes.
 // With -release it releases the claim at -generation and waits until Worker
-// reports it released. It exits 0 whatever the status says, and 1 only when
-// it cannot reach Worker or Worker refuses the call.
+// reports it released, printing Release's own answer when no snapshot follows.
+// It exits 0 whatever the status says, and 1 only when it cannot reach Worker
+// or Worker refuses the call.
+//
+// Worker withdraws a caller's claims once the caller has held no session for
+// its lease, so a check that outlasts the lease runs -hold, which keeps one
+// session of the caller open for D, or until it is stopped.
 package main
 
 import (
@@ -25,7 +31,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -53,8 +61,12 @@ func run() error {
 		generation = flag.Uint64("generation", 1, "the claim generation")
 		wait       = flag.Duration("wait", 60*time.Second, "how long to wait for the status to settle")
 		release    = flag.Bool("release", false, "release the claim instead of requesting it")
+		hold       = flag.Duration("hold", 0, "keep a session open this long, renewing the caller's claims")
 	)
 	flag.Parse()
+	if *hold > 0 {
+		return holdSession(*socket, *tokenFile, *hold)
+	}
 	h, ok := workerv1alpha1.Handoff_value["HANDOFF_"+strings.ToUpper(*handoff)]
 	if !ok || *node == "" || *vpc == "" || *attachment == "" {
 		return errors.New("-node, -vpc, -attachment and a known -handoff are required")
@@ -71,9 +83,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("observe: %w", err)
 	}
+	var released *workerv1alpha1.ClaimStatus
 	if *release {
-		if _, err := c.Release(ctx, key, *generation); err != nil {
+		st, err := c.Release(ctx, key, *generation)
+		if err != nil {
 			return fmt.Errorf("release: %w", err)
+		}
+		released = st
+		if released == nil {
+			// No such claim: nothing is left to release.
+			released = &workerv1alpha1.ClaimStatus{Key: key, Released: true}
 		}
 	} else {
 		spec := &workerv1alpha1.ClaimSpec{Handoff: workerv1alpha1.Handoff(h)}
@@ -88,11 +107,33 @@ func run() error {
 		}
 	}
 	last := settle(ctx, obs, *generation, *release, *wait)
+	if last == nil || (*release && !last.GetReleased()) {
+		if released != nil {
+			last = released
+		}
+	}
 	b, err := protojson.MarshalOptions{UseProtoNames: true}.Marshal(last)
 	if err != nil {
 		return err
 	}
 	fmt.Println(string(b))
+	return nil
+}
+
+// holdSession keeps one session of the caller open for d, or until the
+// process is stopped, and with it the caller's claims.
+func holdSession(socket, tokenFile string, d time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	c, err := workerclient.Dial(ctx, workerclient.Options{SocketPath: socket, TokenFile: tokenFile})
+	if err != nil {
+		return fmt.Errorf("dial Worker: %w", err)
+	}
+	defer c.Close() //nolint:errcheck // the claims outlive the session
+	fmt.Println("holding session", c.Session())
+	<-ctx.Done()
 	return nil
 }
 
