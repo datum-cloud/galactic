@@ -1,6 +1,13 @@
 # Privileges the rendered manifests beside this file grant, checked by
 # hack/check-privileges in task test:manifests. Review every change.
 # Regenerate with check-privileges -write, then task lint-fix.
+#
+# galactic-worker in this placement: NET_ADMIN programs VRFs, links, routes,
+# neighbors and tc filters; BPF opens the pinned maps and loads the Local
+# programs, which need no PERFMON. hostNetwork puts it in the namespace it
+# programs, and hostPID lets it map a caller's SO_PEERCRED PID to its pod.
+# No routed links here: Worker reports local.routed_link and local.socket
+# unavailable (RoutedLinkUnavailable) and needs no SYS_PTRACE or SYS_ADMIN.
 bindings:
   ClusterRoleBinding/galactic-cni:
     - ServiceAccount/galactic-system/galactic-cni -> ClusterRole/galactic-cni
@@ -355,12 +362,9 @@ workloads:
   DaemonSet/galactic-system/galactic-worker:
     containers:
       galactic-worker:
-        allowPrivilegeEscalation: true
         capabilities:
           - BPF
           - NET_ADMIN
-          - SYS_ADMIN
-          - SYS_PTRACE
         dropsAll: true
         hostPaths:
           - /run/galactic-worker:rw

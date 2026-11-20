@@ -104,6 +104,13 @@ func main() {
 		header := "# Privileges the rendered manifests beside this file grant, checked by\n" +
 			"# hack/check-privileges in task test:manifests. Review every change.\n" +
 			"# Regenerate with check-privileges -write, then task lint-fix.\n"
+		// An existing record's leading comments, such as why the profile
+		// grants each privilege, are kept.
+		if b, err := os.ReadFile(*expect); err == nil {
+			if c := leadingComments(b); c != "" {
+				header = c
+			}
+		}
 		if err := os.WriteFile(*expect, append([]byte(header), out...), 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -126,6 +133,18 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// leadingComments returns the comment lines that open b.
+func leadingComments(b []byte) string {
+	var out strings.Builder
+	for line := range strings.Lines(string(b)) {
+		if !strings.HasPrefix(line, "#") {
+			break
+		}
+		out.WriteString(line)
+	}
+	return out.String()
 }
 
 // Summarize reads a YAML stream of rendered manifests.

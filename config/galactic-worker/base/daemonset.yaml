@@ -103,18 +103,13 @@ spec:
           # dropped.
           # - NET_ADMIN: VRFs, links, routes, neighbors and tc filters.
           # - BPF: the pinned maps and the Local programs, which the verifier
-          #   accepts without PERFMON.
-          # - SYS_PTRACE: a routed link's pod end is found through the pod's
-          #   /proc/<pid>/ns/net, whose open the kernel's ptrace access check
-          #   refuses for a process of another user, as a pod's is.
-          # - SYS_ADMIN: setting the pod end up enters the pod's network
-          #   namespace (setns).
-          # internal/worker/local's capability tests load the programs and
-          # set up a pod end with exactly this set, and show each of the last
-          # two refused without it; the lab's routed link claim failed with
-          # "permission denied" before they were granted. The
+          #   accepts without PERFMON (internal/worker/local's capability
+          #   test loads them with exactly this set).
+          # local.routed_link and local.socket need two more, which only
+          # the routed-link profile Component adds; without them Worker
+          # reports both unavailable with RoutedLinkUnavailable. The
           # privileges.yaml beside each tests/manifests/worker-profiles
-          # fixture records this set, and task test:manifests refuses any
+          # fixture records its set, and task test:manifests refuses any
           # other.
           securityContext:
             runAsUser: 0
@@ -127,11 +122,7 @@ spec:
               add:
                 - NET_ADMIN
                 - BPF
-                - SYS_PTRACE
-                - SYS_ADMIN
-            # The API refuses allowPrivilegeEscalation: false beside
-            # SYS_ADMIN, which grants escalation anyway; the process is root
-            # already and runs no setuid program.
+            allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
           resources:
             requests:

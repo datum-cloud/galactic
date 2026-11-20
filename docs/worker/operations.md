@@ -48,12 +48,26 @@ Install in this order:
 `task test:manifests` renders both profiles and compares every container's
 capabilities, host namespaces and hostPath mounts, every RBAC rule and the
 allowlist against `privileges.yaml` beside each fixture. Galactic Worker runs
-with `hostNetwork`, `hostPID` and four capabilities. `NET_ADMIN` and `BPF`
-program the host. `SYS_PTRACE` and `SYS_ADMIN` let it open and enter a pod's
-network namespace for a routed link's pod end: the kernel refuses the open to
-a process of another user without `SYS_PTRACE`, and `setns` without
-`SYS_ADMIN`. Kubernetes then requires the container to allow privilege
-escalation.
+with `hostNetwork`, `hostPID` and the capabilities `NET_ADMIN`, which
+programs VRFs, links, routes, neighbors and tc filters, and `BPF`, which
+opens the pinned maps and loads the Local programs.
+
+Routed links (`local.routed_link` and `local.socket`, which the galactic-vrf
+sidecar uses) need two more. Compose `config/galactic-worker/profiles/routed-link`
+into a placement whose allowlist grants either:
+
+- `SYS_PTRACE`, because Worker finds a routed link's pod end through the
+  pod's `/proc/<pid>/ns/net`, and the kernel's ptrace access check refuses
+  that open for another user's process.
+- `SYS_ADMIN`, because setting the pod end up enters that namespace with
+  `setns`. Kubernetes refuses `allowPrivilegeEscalation: false` beside it, so
+  the Component removes that setting.
+
+Without the Component, Worker detects the missing capabilities at start,
+logs it, and reports both capabilities unavailable with
+`RoutedLinkUnavailable`. A claim that needs one is accepted and reports
+`Programmed=False` with that reason. The privilege record beside each fixture
+says why that placement grants what it grants.
 
 The cluster's CNI must not claim Galactic's interfaces. Pin Cilium's devices
 to the uplinks (the lab uses `eth0 bond+`). Worker creates links named
