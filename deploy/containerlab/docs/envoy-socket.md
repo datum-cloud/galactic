@@ -36,6 +36,13 @@ after `--`: `results.json`, `volatile.tsv` (ports, nonces, pod UIDs and
 interface names), `pcap/<window>/` and `logs/`. It exits non-zero when any
 check fails.
 
+Worker runs here as a bare process inside `dfw-worker` (`worker-fabric.sh`),
+not as the packaged DaemonSet. A packaged Worker needs the routed-link profile
+Component for `local.socket` ([Worker operations](../../../docs/worker/operations.md#install)),
+so the run records the process's effective capabilities and checks that they
+include `NET_ADMIN`, `SYS_PTRACE`, `SYS_ADMIN` and `BPF`, and that the
+sidecar's session reports `local.socket` and `fabric.srv6` available.
+
 Before it changes anything it checks that the lab runs, that `ns80` passes
 `verify-ns80.sh`, that this checkout has `galactic-worker handback`, and that
 no `ns80-envoy`, Worker, Worker-owned scope, Worker advertisement, Local link
