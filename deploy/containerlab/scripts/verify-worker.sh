@@ -200,6 +200,22 @@ fixture_gone() {
     kc -n "${NS}" get bgpadvertisements -o json </dev/null |
       jq -r '.items[] | select((.metadata.name + " " + (.spec | tostring)) | test("(^|[^0-9])8[01]([^0-9]|$)"))
         | "\(.metadata.name) router=\(.spec.routerRef.name // "-")"'
+    # What GC weighs before it reclaims a VPC's VRF on the node.
+    echo "--- BGPRouters targeting ${node}"
+    kc -n "${NS}" get bgprouters -o json </dev/null |
+      jq -r --arg n "${node}" '.items[] | select(.spec.targetRef.name == $n) | .metadata.name'
+    echo "--- fence records of VPC 80 and 81"
+    docker exec "${node}" sh -c 'for f in /var/lib/galactic-edge/ownership/vpc-8[01].json; do [ -e "$f" ] && echo "$f $(cat "$f")"; done'
+    echo "--- links enslaved to the fixture's VRFs"
+    for vpc in 80 81; do
+      docker exec "${node}" ip -o link show master "G$(printf '%09s' "${vpc}" | tr ' ' 0)V" 2>&1
+    done
+    echo "--- EdgeAttachments"
+    kc get edgeattachments -A -o wide </dev/null 2>&1
+    echo "--- galactic-router GC log on ${node}"
+    pod=$(kc -n "${NS}" get pod -l app.kubernetes.io/name=galactic-router --field-selector "spec.nodeName=${node}" \
+      -o jsonpath='{.items[0].metadata.name}' </dev/null)
+    kc -n "${NS}" logs "${pod}" </dev/null 2>&1 | grep -E 'GC|VRF|vpc-8[01]|00000008[01]' | tail -60
   } >"${OUT}/fixture-leftovers.txt" 2>&1
   fail "cleanup: the combined fixture left${left} after 6 minutes (fixture-leftovers.txt)"
 }
