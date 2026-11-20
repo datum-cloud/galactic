@@ -120,6 +120,9 @@ roles:
     - galactic.datumapis.com/egressshards:patch
     - galactic.datumapis.com/egressshards:update
     - galactic.datumapis.com/egressshards:watch
+    - galactic.datumapis.com/vpcattachments:get
+    - galactic.datumapis.com/vpcattachments:list
+    - galactic.datumapis.com/vpcattachments:watch
   ClusterRole/galactic-router:
     - coordination.k8s.io/leases:create
     - coordination.k8s.io/leases:delete
