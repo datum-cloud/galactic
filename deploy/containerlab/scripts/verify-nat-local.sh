@@ -96,7 +96,7 @@ cleanup() {
   set +e
   [ "${rc}" -ne 0 ] && diagnostics
   log "restoring"
-  docker exec "${REMOTE}" sh -c 'pkill -f "socat UDP" || true'
+  docker exec "${REMOTE}" sh -c "pkill -f 'socat UDP[46]-RECVFROM:${ECHO_PORT},' || true"
   set_drain "${LOCAL_SHARD}" "${SAVED_DRAIN}"
   set_drain "${REMOTE_SHARD}" "${SAVED_DRAIN_R}"
   local args=() v
@@ -367,11 +367,17 @@ wait_true "galactic-nat's Local handoffs on ${EDGE} are not ready after 300s" 30
 wait_true "${EDGE} holds no egress_local_shard row for both VPCs after 120s" 120 local_rows
 echo "    both VPCs' Local handoffs ready; egress_local_shard rows present"
 
-docker exec -d "${REMOTE}" sh -c "socat UDP6-RECVFROM:${ECHO_PORT},ipv6only=1,fork EXEC:cat"
-docker exec -d "${REMOTE}" sh -c "socat UDP4-RECVFROM:${ECHO_PORT},fork EXEC:cat"
-sleep 1
-n=$(docker exec "${REMOTE}" sh -c 'pgrep -f "socat UDP" | wc -l')
-[ "${n}" -eq 2 ] || die "remote-host runs ${n} UDP echo servers, want 2"
+# Started without a shell, so the cleanup's pattern matches these two
+# servers alone; checked by their sockets, not their processes.
+docker exec -d "${REMOTE}" socat "UDP6-RECVFROM:${ECHO_PORT},ipv6only=1,fork" EXEC:cat
+docker exec -d "${REMOTE}" socat "UDP4-RECVFROM:${ECHO_PORT},fork" EXEC:cat
+echo_up() {
+  local socks
+  socks=$(docker exec "${REMOTE}" ss -Hlun "sport = :${ECHO_PORT}") || return 1
+  grep -E '^UNCONN.* 0\.0\.0\.0:'"${ECHO_PORT}"' ' <<<"${socks}" >/dev/null &&
+    grep -E '^UNCONN.* \[::\]:'"${ECHO_PORT}"' ' <<<"${socks}" >/dev/null
+}
+wait_true "remote-host's UDP echo servers on port ${ECHO_PORT} are not both listening after 15s" 15 echo_up
 
 # --- 2. ordered: the local shard --------------------------------------------------------
 
