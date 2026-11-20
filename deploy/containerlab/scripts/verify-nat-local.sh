@@ -96,6 +96,7 @@ cleanup() {
   set +e
   [ "${rc}" -ne 0 ] && diagnostics
   log "restoring"
+  [ -n "${KA_PID:-}" ] && kill "${KA_PID}" 2>/dev/null
   docker exec "${REMOTE}" sh -c "pkill -f 'socat UDP[46]-RECVFROM:${ECHO_PORT},' || true"
   set_drain "${LOCAL_SHARD}" "${SAVED_DRAIN}"
   set_drain "${REMOTE_SHARD}" "${SAVED_DRAIN_R}"
@@ -347,6 +348,63 @@ udp_tuple() {
   grep -oE ' IP6? [0-9a-f:.]+ >' "${cap}" | awk '{print $2}' | head -1
 }
 
+# tuple_from GUEST ADDR repeats udp_tuple until the flow leaves from ADDR, at
+# most 10 times 3 seconds apart, and prints that tuple. The egress sweep moves
+# a class route between shards on its next one-second poll, so the first
+# datagram after a change may still take the old shard.
+tuple_from() {
+  local t i
+  for i in $(seq 10); do
+    t=$(udp_tuple "$1" 6)
+    if [ "${t%.*}" = "$2" ]; then
+      echo "${t}"
+      return 0
+    fi
+    sleep 3
+  done
+  die "$1's flow still leaves from ${t%.*} after 10 tries, want $2"
+}
+
+# groups_hold_routes reports whether dfw-worker2's galactic-cni has one route
+# per tenant VRF on each class's group, as verify-nat-active-active.sh waits
+# for after a switch to hashed mode.
+NAT64_CLASS='nat64:2001:db8:64::/96'
+groups_hold_routes() {
+  local links vrfs metrics class got
+  links=$(docker exec "${EDGE}" ip -br link show type vrf) || return 1
+  vrfs=$(grep -c '^G' <<<"${links}" || true)
+  metrics=$(docker exec "${EDGE}" curl -s --max-time 4 "${CNI_METRICS}") || return 1
+  for class in nat66 "${NAT64_CLASS}"; do
+    got=$(awk -v m="galactic_cni_egress_group_routes{class=\"${class}\"}" '$1 == m {print $2}' <<<"${metrics}")
+    [ "${got}" = "${vrfs}" ] || return 1
+  done
+}
+
+# no_group_routes reports whether no route on dfw-worker2 names a group, as
+# after a return to ordered mode.
+no_group_routes() {
+  local sum
+  sum=$(docker exec "${EDGE}" curl -s --max-time 4 "${CNI_METRICS}" |
+    awk 'index($1, "galactic_cni_egress_group_routes") == 1 {s += $2} END {print s + 0}') || return 1
+  [ "${sum%.*}" = 0 ]
+}
+
+# keepalive_start GUEST sends one datagram a second from source port 40000,
+# the flow udp_tuple uses, until keepalive_stop or 300 seconds, so the
+# session outlives a galactic-nat restart's wait.
+keepalive_start() {
+  KA_GUEST=$1
+  pod_exec "$1" sh -c "rm -f /tmp/nat-local-ka-stop; i=0
+    while [ ! -e /tmp/nat-local-ka-stop ] && [ \$i -lt 300 ]; do
+      echo ka | nc -u -w1 -p 40000 ${HOST6} ${ECHO_PORT} >/dev/null 2>&1; i=\$((i + 1)); sleep 1
+    done" &
+  KA_PID=$!
+}
+keepalive_stop() {
+  pod_exec "${KA_GUEST}" touch /tmp/nat-local-ka-stop
+  wait "${KA_PID}" || true
+}
+
 # --- 1. setup ------------------------------------------------------------------------
 
 log "1. setup: edge guests, galactic-worker and galactic-nat's claims on ${EDGE}"
@@ -382,6 +440,7 @@ wait_true "remote-host's UDP echo servers on port ${ECHO_PORT} are not both list
 # --- 2. ordered: the local shard --------------------------------------------------------
 
 log "2. ordered mode: every family and protocol leaves from ${EDGE}'s own shard"
+for g in "${GUESTS[@]}"; do tuple_from "${g}" "${L6}" >/dev/null; done
 fwd0=$(nat_metric_sum 'galactic_nat_local_packets_total{stat="forward"}')
 ret0=$(nat_metric_sum 'galactic_nat_local_packets_total{stat="return"}')
 hairpin_start
@@ -406,6 +465,7 @@ log "3. hashed mode, flow hash: flows leave from ${EDGE} (Local) and dfw-worker3
 kc -n galactic-system set env daemonset/galactic-cni -c credential-refresh \
   GALACTIC_CNI_EGRESS_MODE=hashed GALACTIC_CNI_EGRESS_HASH=flow GALACTIC_CNI_EGRESS_PIN_IDLE=0s >/dev/null
 wait_mode hashed
+wait_true "${EDGE}'s class routes are not all on the shard groups after 120s" 120 groups_hold_routes
 for g in "${GUESTS[@]}"; do
   expect tcp6 "${g}" 24 "${L6}" "${R6}"
   [ "$(wc -l <"${STATE}/seen")" -eq 2 ] || die "${g}'s NAT66 flows used one shard: $(cat "${STATE}/seen")"
@@ -419,15 +479,17 @@ log "4. recovery: the same UDP flow keeps its masquerade port"
 kc -n galactic-system set env daemonset/galactic-cni -c credential-refresh GALACTIC_CNI_EGRESS_MODE- \
   GALACTIC_CNI_EGRESS_HASH- GALACTIC_CNI_EGRESS_PIN_IDLE- >/dev/null
 wait_mode ordered
-before=$(udp_tuple guest-a-edge 6)
-[ "${before%.*}" = "${L6}" ] || die "ordered mode sent guest-a-edge to ${before}, not ${EDGE}"
+wait_true "a route on ${EDGE} still names a shard group after 120s" 120 no_group_routes
+before=$(tuple_from guest-a-edge "${L6}")
 
 nat_pod=$(kc -n galactic-system get pods -l app.kubernetes.io/name=galactic-nat \
   --field-selector "spec.nodeName=${EDGE}" -o jsonpath='{.items[0].metadata.name}')
+keepalive_start guest-a-edge
 kc -n galactic-system delete pod "${nat_pod}" --wait >/dev/null
 kc -n galactic-system rollout status daemonset/galactic-nat --timeout=600s >/dev/null
 wait_true "Local handoffs not ready after galactic-nat restarted" 300 handoffs_ready
-after=$(udp_tuple guest-a-edge 6)
+keepalive_stop
+after=$(tuple_from guest-a-edge "${L6}")
 echo "    galactic-nat restart: ${before} -> ${after}"
 [ "${after}" = "${before}" ] || die "the session was not reused across a galactic-nat restart"
 
@@ -449,7 +511,7 @@ pair_back() {
 wait_true "VPC 80's pair is not back with galactic-nat's program after 300s" 300 pair_back
 wait_true "Local handoffs not ready after the pair was recreated" 300 handoffs_ready
 wait_true "egress_local_shard rows not back after the pair was recreated" 120 local_rows
-after=$(udp_tuple guest-a-edge 6)
+after=$(tuple_from guest-a-edge "${L6}")
 echo "    pair recreated (${nat_end}): ${before} -> ${after}"
 [ "${after}" = "${before}" ] || die "the session was not reused after the pair was recreated"
 
@@ -459,6 +521,7 @@ log "5. drain: a pinned flow keeps its shard and masquerade port"
 kc -n galactic-system set env daemonset/galactic-cni -c credential-refresh \
   GALACTIC_CNI_EGRESS_MODE=hashed GALACTIC_CNI_EGRESS_HASH=source GALACTIC_CNI_EGRESS_PIN_IDLE=1h >/dev/null
 wait_mode hashed
+wait_true "${EDGE}'s class routes are not all on the shard groups after 120s" 120 groups_hold_routes
 for g in "${GUESTS[@]}"; do
   pinned=$(udp_tuple "${g}" 6)
   case "${pinned%.*}" in
