@@ -10,6 +10,8 @@ resources:
   - ../config/base
 components:
   - ../config/profiles/combined
+  # The combined run's routed link claim needs what this grants.
+  - ../config/profiles/routed-link
   - ../lab-allowlist
 images:
   - name: ghcr.io/datum-cloud/galactic-worker
