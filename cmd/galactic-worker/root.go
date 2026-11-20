@@ -190,7 +190,14 @@ func run(o *options) error {
 	localKernel := &local.Kernel{PinDir: o.pinDir, LocalPinDir: o.localPinDir, DispatchDir: o.dispatchDir,
 		Pods: pods}
 	defer func() { _ = localKernel.Close() }()
-	loc, err := local.New(local.Config{Kernel: localKernel, Node: o.nodeName, Log: slog.Default()})
+	// Routed links and sockets need capabilities only a placement that
+	// enables them grants; without them those capabilities report why.
+	podAccess := local.PodAccess()
+	if podAccess != nil {
+		slog.Info("local.routed_link and local.socket are unavailable", "reason", podAccess.Error())
+	}
+	loc, err := local.New(local.Config{Kernel: localKernel, Node: o.nodeName, Log: slog.Default(),
+		PodAccess: podAccess})
 	if err != nil {
 		return err
 	}

@@ -50,6 +50,11 @@ type Config struct {
 	// Node is this node, the node of every claim key.
 	Node string
 	Log  *slog.Logger
+	// PodAccess is nil when Worker can open and enter a pod's network
+	// namespace, which a routed link's pod end needs (PodAccess), and the
+	// reason otherwise. local.routed_link and local.socket are then
+	// unavailable with ReasonRoutedLinkUnavailable.
+	PodAccess error
 }
 
 // Module is the Local delivery module.
@@ -108,6 +113,17 @@ func (m *Module) Capabilities() []module.Capability {
 			caps[i].Available = false
 			caps[i].Reason = workerv1alpha1.ReasonDatapathNotLoaded
 			caps[i].Message = err.Error()
+		}
+		return caps
+	}
+	if err := m.cfg.PodAccess; err != nil {
+		for i := range caps {
+			if caps[i].Name == workerv1alpha1.CapabilityLocalRoutedLink ||
+				caps[i].Name == workerv1alpha1.CapabilityLocalSocket {
+				caps[i].Available = false
+				caps[i].Reason = workerv1alpha1.ReasonRoutedLinkUnavailable
+				caps[i].Message = err.Error()
+			}
 		}
 	}
 	return caps

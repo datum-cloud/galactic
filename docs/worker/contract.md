@@ -70,7 +70,10 @@ learns the outcome from `Observe`.
 `local.veth_pair`, `local.routed_link`, `local.socket`, `fabric.srv6` and
 `fabric.routes`. Each row is `Available` or `Unavailable` with a machine reason, for example
 `DatapathNotLoaded`, `HookUnsupported` (an XDP mode or device the
-[qualified platform](qualification.md) excludes) or `ModuleNotRunning`. A claim
+[qualified platform](qualification.md) excludes), `RoutedLinkUnavailable`
+(`local.routed_link` and `local.socket` on a Worker deployed without the
+capabilities a pod end needs, see [operations](operations.md#install)) or
+`ModuleNotRunning`. A claim
 that needs an unavailable capability is accepted and reports `Programmed=False`
 with the same reason, so a client can tell a temporary module outage from a
 refused request.
@@ -432,6 +435,7 @@ Status carries these reasons besides the ones above:
 | `DispatcherSlotUnclaimed`                          | `Ready`               | No receiving device's XDP dispatcher runs a live public slot for a `local.tap` destination                |
 | `HandoffMTUTooSmall`                               | `Ready`               | A Local destination's MTU is below its receiving path's                                                   |
 | `HookUnsupported`                                  | `Ready`               | A hook runs in a mode the handoff cannot use, such as the NAT end's program in generic mode               |
+| `RoutedLinkUnavailable`                            | `Programmed`          | Worker lacks the capabilities a routed link or socket pod end needs; see operations                       |
 | `ReturnPathNotProgrammed`                          | `Ready`               | This node does not yet decapsulate the VPC's SID into the VPC's table                                     |
 
 Clients retry with exponential backoff from 200 ms to 30 s with full jitter.

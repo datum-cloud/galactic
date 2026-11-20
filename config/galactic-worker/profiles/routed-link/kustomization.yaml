@@ -1,0 +1,23 @@
+# Routed links: lets galactic-worker serve local.routed_link and
+# local.socket, whose pod end it opens and sets up in the client pod's
+# network namespace. Compose it only into a placement whose allowlist grants
+# one of them, such as one running the galactic-vrf sidecar; every other
+# placement keeps Worker at NET_ADMIN and BPF.
+#
+# - SYS_PTRACE: Worker finds the pod end's namespace through the pod's
+#   /proc/<pid>/ns/net, whose open the kernel's ptrace access check refuses
+#   for a process of another user, as a pod's is.
+# - SYS_ADMIN: setting the pod end up enters that namespace (setns).
+#
+# The API refuses allowPrivilegeEscalation: false beside SYS_ADMIN, which
+# grants escalation anyway, so this Component removes it; Worker is root
+# already and runs no setuid program. internal/worker/local's root tests
+# show each capability refused without it and the pod end set up with this
+# set.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-worker

@@ -112,3 +112,13 @@ func TestCompareFailsBothWays(t *testing.T) {
 		t.Fatal("an unsupported workload kind passed")
 	}
 }
+
+func TestLeadingCommentsKept(t *testing.T) {
+	got := leadingComments([]byte("# why\n# each grant\nworkloads: {}\n# not this\n"))
+	if got != "# why\n# each grant\n" {
+		t.Fatalf("leading comments %q", got)
+	}
+	if got := leadingComments([]byte("workloads: {}\n")); got != "" {
+		t.Fatalf("no comments, got %q", got)
+	}
+}

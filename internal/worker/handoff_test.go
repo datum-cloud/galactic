@@ -162,3 +162,35 @@ func TestRoutedLinkServesOnePod(t *testing.T) {
 		t.Fatal("the claim's new pod was not recorded durably")
 	}
 }
+
+// TestRoutedLinkUnavailableWithoutPodAccess checks that a routed_link claim
+// on a Worker without the capabilities a pod end needs is accepted and
+// reports RoutedLinkUnavailable, with nothing programmed, while a tap claim
+// on the same Worker proceeds.
+func TestRoutedLinkUnavailableWithoutPodAccess(t *testing.T) {
+	e := newEnv(t)
+	e.modules = func(h *fake.Host) []module.Module {
+		local := fake.New("local", workerv1alpha1.Mode_MODE_LOCAL, h)
+		for _, c := range []string{workerv1alpha1.CapabilityLocalRoutedLink, workerv1alpha1.CapabilityLocalSocket} {
+			local.SetCapability(module.Capability{Name: c, Reason: workerv1alpha1.ReasonRoutedLinkUnavailable,
+				Message: "Worker lacks CAP_SYS_PTRACE and CAP_SYS_ADMIN"})
+		}
+		return []module.Module{local, fake.New("fabric", workerv1alpha1.Mode_MODE_FABRIC, h)}
+	}
+	e.start()
+	ctx := metadata.AppendToOutgoingContext(e.ctx(routedSA), podMD, "pod-1")
+	_, err := e.api.Request(ctx, &workerv1alpha1.RequestRequest{Key: key(vpcA, "svc-a"), Generation: 1,
+		Spec: spec(workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK, "guest-a1")})
+	e.mustOK(err)
+	st := e.waitObserved(mkey(vpcA, "svc-a"))
+	if c := condOf(st, workerv1alpha1.ConditionProgrammed); c.GetStatus() != condFalse ||
+		c.GetReason() != workerv1alpha1.ReasonRoutedLinkUnavailable {
+		t.Fatalf("Programmed = %v, want False/RoutedLinkUnavailable", c)
+	}
+	if rows := e.host.Rows(vpcA); len(rows) != 0 {
+		t.Fatalf("a routed link without pod access programmed %v", rowIDs(rows))
+	}
+
+	e.mustOK(e.request(gwSA, key(vpcA, "svc-a2"), 1, spec(workerv1alpha1.Handoff_HANDOFF_TAP, "guest-a1")))
+	e.waitReady(mkey(vpcA, "svc-a2"), 1)
+}
