@@ -268,7 +268,8 @@ if [ "${PROFILE}" = dedicated ]; then
   CLAIM_NODE=dfw-worker
   CLAIM_NS=ns80
   CLAIM_ATT=vpc-a
-  RELATED_VPCS=80
+  # The routed link refusal claims in VPC 81, ns80's other VPC.
+  RELATED_VPCS="80 81"
 else
   CLAIM_NODE=dfw-worker2
   CLAIM_NS=ns80-tap
@@ -512,7 +513,13 @@ else
       [ "${after:-0}" != "${before:-0}" ] && break
       sleep 2
     done
-    save_diagnostics fault-hook
+    # inspect reads Worker's status snapshot, written within 5 seconds of
+    # the repair the counter already shows.
+    for _ in $(seq 15); do
+      save_diagnostics fault-hook
+      grep -q "repaired drift .*galactic_local_rx.*${rx}" "${OUT}/fault-hook/inspect-${CLAIM_NODE}.txt" && break
+      sleep 2
+    done
     if [ "${after:-0}" = "${before:-0}" ]; then
       fail "hook fault: galactic_worker_drift_repairs_total{module=\"local\"} stayed ${before}"
     elif ! grep -q "repaired drift .*galactic_local_rx.*${rx}" "${OUT}/fault-hook/inspect-${CLAIM_NODE}.txt"; then
