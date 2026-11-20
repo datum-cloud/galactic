@@ -151,14 +151,40 @@ snapshot() {
         | "link \(.ifname) master=\(.master // "-") xdp=\(.xdp.prog.id // "-")"'
     for dev in $(docker exec "${node}" ip -j link show | jq -r '.[].ifname | select(test("^(eth|bond)[0-9]+$"))'); do
       for dir in ingress egress; do
-        docker exec "${node}" tc filter show dev "${dev}" "${dir}" 2>/dev/null |
-          grep -E "^filter " | grep -v galactic_local | sed "s/^/tc ${dev} ${dir} /"
+        # JSON, so a filter's program name is on the same entry as its
+        # priority and Local's own filters (galactic_local_*) can be left out.
+        docker exec "${node}" tc -j filter show dev "${dev}" "${dir}" 2>/dev/null |
+          jq -r --arg d "${dev} ${dir}" '.[] | select(.options != null)
+            | select((.options.bpf_name // "") | startswith("galactic_local") | not)
+            | "tc \($d) pref \(.pref) \(.kind) \(.options.bpf_name // .options.handle // "-")"' 
       done
     done
+    # A row of a table no VRF holds is garbage galactic-router's GC sweeps
+    # within one interval; it is kept apart as stale_egress_row, which the
+    # comparison leaves out and the leak check counts.
+    vrfs=$(docker exec "${node}" ip -j -d link show type vrf | jq -r '[.[].linkinfo.info_data.table] | join("|")')
     pid=$(docker inspect -f '{{.State.Pid}}' "${node}")
     sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic/egress_route_table" |
-      python3 -I "${SCRIPT_DIR}/worker-rows.py" "${tables}"
+      python3 -I "${SCRIPT_DIR}/worker-rows.py" "${tables}" "${vrfs:-none}"
   } | sort
+}
+
+# no_stale_rows waits up to one GC interval and a minute for every node to
+# have no egress_route_table row of a table no VRF holds, and fails naming
+# the nodes that still do: rows a run's VPCs left behind would be a leak.
+no_stale_rows() {
+  local left="" node
+  for _ in $(seq 36); do
+    left=""
+    for node in "${NODES[@]}"; do
+      if snapshot "${node}" | grep -q '^stale_egress_row '; then
+        left="${left} ${node}"
+      fi
+    done
+    [ -z "${left}" ] && return 0
+    sleep 10
+  done
+  fail "$1: egress_route_table rows of a table no VRF holds remain on${left} after 6 minutes"
 }
 
 # snap_all LABEL writes every Worker node's snapshot under OUT/LABEL.
@@ -174,7 +200,8 @@ snap_all() {
 compare() {
   local label="$1" node
   for node in "${NODES[@]}"; do
-    if ! diff -u "${OUT}/baseline/${node}.txt" "${OUT}/${label}/${node}.txt" >"${OUT}/${label}/${node}.diff"; then
+    if ! diff -u <(grep -v '^stale_egress_row ' "${OUT}/baseline/${node}.txt") \
+      <(grep -v '^stale_egress_row ' "${OUT}/${label}/${node}.txt") >"${OUT}/${label}/${node}.diff"; then
       fail "${label}: ${node}'s unrelated host state changed (${label}/${node}.diff)"
     else
       rm -f "${OUT}/${label}/${node}.diff"
@@ -270,6 +297,10 @@ cleanup() {
   fi
   if [ "${PROFILE}" = combined ]; then
     "${SCRIPT_DIR}/handoff-fixture.sh" down >>"${OUT}/steps.log" 2>&1 || fail "cleanup: ns80-tap removal failed"
+  fi
+  if [ "${status}" -eq 0 ] && [ "${#NODES[@]}" -gt 0 ]; then
+    log "leak check: rows of tables no VRF holds"
+    no_stale_rows "cleanup"
   fi
   if [ -s "${OUT}/failures" ]; then
     echo "FAILED: $(wc -l <"${OUT}/failures") checks; see ${OUT}/failures"
@@ -453,7 +484,11 @@ if [ "${PROFILE}" = dedicated ]; then
 else
   kc -n ns80-tap scale deployment tap-guest-a --replicas=0 >>"${OUT}/steps.log"
   kc -n ns80-tap wait --for=delete pod -l app=vpc-a-tap --timeout=120s >>"${OUT}/steps.log"
-  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${LOCAL_UID}" ' HandoffInterfaceMissing$' "attachment fault identified"
+  # The guest's TAP goes with it (HandoffInterfaceMissing), or its
+  # attachment's node with its pod (LocatorUnknown), whichever Worker reads
+  # first.
+  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${LOCAL_UID}" ' (HandoffInterfaceMissing|LocatorUnknown)$' \
+    "attachment fault identified"
   save_diagnostics fault-attachment
   kc -n ns80-tap scale deployment tap-guest-a --replicas=1 >>"${OUT}/steps.log"
   kc -n ns80-tap wait --for=condition=Ready pod -l app=vpc-a-tap --timeout=240s >>"${OUT}/steps.log"
