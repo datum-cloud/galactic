@@ -136,13 +136,18 @@ snapshot() {
   done
   {
     for fam in -4 -6; do
+      # Left out as not Worker's and not stable: routes of Local links and
+      # of Cilium's pod interfaces (lxc*, such as the claim client's), the
+      # kernel's link-local routes, which a pod replaced by the drain
+      # changes, and which of the two bonds an underlay route uses.
       docker exec "${node}" ip "${fam}" route show table all |
-        grep -v -E " table local|proto ra| cache|dev G[A-Za-z0-9]{12}[NTRP]( |$)" |
+        grep -v -E " table local|proto ra| cache|dev G[A-Za-z0-9]{12}[NTRP]( |$)|dev lxc|fe80::" |
         grep -v -E " table (${tables:-none})( |$)" |
-        sed -E 's/ expires [0-9]+sec//; s/ +$//' | sed "s/^/route${fam} /"
+        sed -E 's/ expires [0-9]+sec//; s/ via (inet6 )?[^ ]+ dev bond[0-9]+/ via underlay/; s/ +$//' |
+        sed "s/^/route${fam} /"
     done
     docker exec "${node}" ip -j -d link show |
-      jq -r '.[] | select(.ifname | test("^G[A-Za-z0-9]{12}[NTRP]$") | not)
+      jq -r '.[] | select(.ifname | test("^G[A-Za-z0-9]{12}[NTRP]$|^lxc") | not)
         | "link \(.ifname) master=\(.master // "-") xdp=\(.xdp.prog.id // "-")"'
     for dev in $(docker exec "${node}" ip -j link show | jq -r '.[].ifname | select(test("^(eth|bond)[0-9]+$"))'); do
       for dir in ingress egress; do
@@ -240,7 +245,10 @@ if [ "${PROFILE}" = dedicated ]; then
 else
   CLAIM_NODE=dfw-worker2
   CLAIM_NS=ns80-tap
-  CLAIM_ATT=vpc-a-tap
+  # The claim's own handoff attachment, a gateway's in production, is not
+  # its Local destination: removing the destination's guest must leave the
+  # claim standing.
+  CLAIM_ATT=vpc-a-svc
   # The routed link probe claims in VPC 81.
   RELATED_VPCS="80 81"
 fi
@@ -280,6 +288,10 @@ if [ "${PROFILE}" = combined ]; then
   copy_to "${CP}" galactic-worker
   apply_k "${CP}" /galactic/resources/galactic-worker/ns80-tap-combined/ >>"${OUT}/steps.log"
   "${SCRIPT_DIR}/publish-attachments.sh" ns80-tap dfw >>"${OUT}/steps.log"
+  # vpc-a-svc has no pod or NAD, so publish-attachments leaves it; its status
+  # places it on the combined node, as an attachment controller would.
+  kc -n ns80-tap patch vpcattachment vpc-a-svc --subresource=status --type=merge \
+    -p '{"status":{"vpc":"80","node":"dfw-worker2"}}' >>"${OUT}/steps.log"
   kc -n ns80-tap wait --for=condition=Ready pod -l 'app in (vpc-a-tap,vpc-b-tap)' --timeout=240s >>"${OUT}/steps.log"
 fi
 
@@ -351,9 +363,9 @@ for node in "${NODES[@]}"; do
   docker exec "${node}" grep -E '^Cap(Prm|Eff|Bnd)' "/proc/${pid}/status" | sed "s/^/${node} /" >>"${OUT}/capabilities.txt"
 done
 caps=$(awk '/CapEff/ {print $3}' "${OUT}/capabilities.txt" | sort -u)
-# NET_ADMIN is bit 12 and BPF bit 39.
-if [ "${caps}" != "0000008000001000" ]; then
-  fail "privileges: Worker's effective capabilities are ${caps}, want NET_ADMIN and BPF only (0000008000001000)"
+# NET_ADMIN is bit 12, SYS_PTRACE 19, SYS_ADMIN 21 and BPF 39.
+if [ "${caps}" != "0000008000281000" ]; then
+  fail "privileges: Worker's effective capabilities are ${caps}, want NET_ADMIN, SYS_PTRACE, SYS_ADMIN and BPF only (0000008000281000)"
 fi
 SA=system:serviceaccount:${NS}:galactic-worker
 while read -r want verb resource ns; do
@@ -385,12 +397,13 @@ REMOTE_UID=$(uid_of ns80 vpc-a2)
 if [ "${PROFILE}" = dedicated ]; then
   DESTS=${REMOTE_UID}
 else
-  DESTS=${ATT_UID},${REMOTE_UID}
+  LOCAL_UID=$(uid_of ns80-tap vpc-a-tap)
+  DESTS=${LOCAL_UID},${REMOTE_UID}
 fi
 claim "${CLAIM_NODE}" "${ATT_UID}" tap "${DESTS}" >/dev/null
 wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${REMOTE_UID}" '^fabric true true true AsExpected$' "Fabric destination ready"
 if [ "${PROFILE}" = combined ]; then
-  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${ATT_UID}" '^local true true true AsExpected$' "Local destination ready"
+  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${LOCAL_UID}" '^local true true true AsExpected$' "Local destination ready"
   # A routed link's pod end goes into the client pod's network namespace.
   ROUTED_UID=$(uid_of ns80-tap vpc-b-tap)
   VPC=81 claim "${CLAIM_NODE}" "${ROUTED_UID}" routed_link "${ROUTED_UID}" >"${OUT}/routed-link.json" || true
@@ -413,7 +426,8 @@ if [ "${PROFILE}" = dedicated ]; then
   # Worker reads the change.
   kc -n ns80 scale deployment guest-a2 --replicas=0 >>"${OUT}/steps.log"
   kc -n ns80 wait --for=delete pod -l app=vpc-a2 --timeout=120s >>"${OUT}/steps.log"
-  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${REMOTE_UID}" ' (ForwardRouteMissing|RouteWithdrawn|NeighborUnresolved)$' \
+  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${REMOTE_UID}" \
+    ' (ForwardRouteMissing|RouteWithdrawn|NeighborUnresolved|LocatorUnknown|DestinationNotFound)$' \
     "attachment fault identified"
   save_diagnostics fault-attachment
   kc -n ns80 scale deployment guest-a2 --replicas=1 >>"${OUT}/steps.log"
@@ -423,17 +437,19 @@ if [ "${PROFILE}" = dedicated ]; then
 else
   kc -n ns80-tap scale deployment tap-guest-a --replicas=0 >>"${OUT}/steps.log"
   kc -n ns80-tap wait --for=delete pod -l app=vpc-a-tap --timeout=120s >>"${OUT}/steps.log"
-  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${ATT_UID}" ' HandoffInterfaceMissing$' "attachment fault identified"
+  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${LOCAL_UID}" ' HandoffInterfaceMissing$' "attachment fault identified"
   save_diagnostics fault-attachment
   kc -n ns80-tap scale deployment tap-guest-a --replicas=1 >>"${OUT}/steps.log"
   kc -n ns80-tap wait --for=condition=Ready pod -l app=vpc-a-tap --timeout=240s >>"${OUT}/steps.log"
   "${SCRIPT_DIR}/publish-attachments.sh" ns80-tap dfw >>"${OUT}/steps.log"
-  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${ATT_UID}" '^local true true true AsExpected$' "attachment fault recovered"
+  wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${LOCAL_UID}" '^local true true true AsExpected$' "attachment fault recovered"
 
   log "fault: hook"
   before=$(metric "${CLAIM_NODE}" 'galactic_worker_drift_repairs_total\{module="local"\}' | awk '{print $2}')
-  rx=$(docker exec "${CLAIM_NODE}" sh -c 'for d in $(ls /sys/class/net); do
-    tc filter show dev "$d" ingress 2>/dev/null | grep -q galactic_local_rx && echo "$d"; done' | head -1)
+  # No pipe into head: under pipefail its early exit would end the script.
+  rxs=$(docker exec "${CLAIM_NODE}" sh -c 'for d in $(ls /sys/class/net); do
+    tc filter show dev "$d" ingress 2>/dev/null | grep -q galactic_local_rx && echo "$d"; done' || true)
+  rx=${rxs%%$'\n'*}
   if [ -z "${rx}" ]; then
     fail "hook fault: no device carries galactic_local_rx on ${CLAIM_NODE}"
   else
@@ -478,7 +494,17 @@ kc drain "${DRAIN_NODE}" --ignore-daemonsets --delete-emptydir-data --timeout=18
   fail "drain of ${DRAIN_NODE} failed"
 kc uncordon "${DRAIN_NODE}" >>"${OUT}/steps.log"
 wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${REMOTE_UID}" '^fabric true true true AsExpected$' "ready after drain"
-snap_all drained
+# The drain evicts the node's tenant pods, which come back once it is
+# uncordoned; compare once the state settles, within 3 minutes.
+for _ in $(seq 36); do
+  snap_all drained
+  same=1
+  for node in "${NODES[@]}"; do
+    cmp -s "${OUT}/baseline/${node}.txt" "${OUT}/drained/${node}.txt" || same=0
+  done
+  [ "${same}" = 1 ] && break
+  sleep 5
+done
 compare drained
 
 log "release and uninstall"

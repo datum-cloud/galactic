@@ -30,3 +30,17 @@ spec:
     mode: Hypervisor
     addresses:
       - fd20:80:ff03::1:0:0/96
+---
+# The claim's own handoff attachment on the combined node, as a gateway's
+# would be. It has no pod; scripts/verify-worker.sh writes its status.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: vpc-a-svc
+  namespace: ns80-tap
+spec:
+  vpc:
+    name: "80"
+  interface:
+    name: eth0
+    mode: Netns
