@@ -214,6 +214,12 @@ fixture_gone() {
     done
     echo "--- EdgeAttachments"
     kc get edgeattachments -A -o wide </dev/null 2>&1
+    # GC counts a VPC active on every node while any tenant EndpointSlice in
+    # the cluster names it.
+    echo "--- tenant EndpointSlices"
+    kc get endpointslices -A -l galactic.datum.net/tenant-id \
+      -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,TENANT:.metadata.labels.galactic\.datum\.net/tenant-id' \
+      </dev/null 2>&1
     echo "--- galactic-router GC log on ${node}"
     pod=$(kc -n "${NS}" get pod -l app.kubernetes.io/name=galactic-router --field-selector "spec.nodeName=${node}" \
       -o jsonpath='{.items[0].metadata.name}' </dev/null)
