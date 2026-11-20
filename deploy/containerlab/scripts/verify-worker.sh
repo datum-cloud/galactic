@@ -169,6 +169,41 @@ snapshot() {
   } | sort
 }
 
+# fixture_gone waits up to one GC interval and a minute for dfw-worker2 to
+# hold no VRF of the combined fixture's VPCs and no route in the tables
+# those VRFs used, so nothing the fixture created reaches the next run. It
+# fails with what is left: the VRFs, their tables' routes, and any
+# BGPAdvertisement still naming the VPCs, which keeps GC from reclaiming
+# them.
+fixture_gone() {
+  local node=dfw-worker2 left vpc name t
+  for _ in $(seq 36); do
+    left=""
+    for vpc in 80 81; do
+      name="G$(printf '%09s' "${vpc}" | tr ' ' 0)V"
+      docker exec "${node}" ip link show dev "${name}" >/dev/null 2>&1 && left="${left} VRF ${name};"
+    done
+    for t in ${FIXTURE_TABLES:-}; do
+      routes=$(docker exec "${node}" ip -6 route show table "${t}" 2>/dev/null || true)
+      [ -n "${routes}" ] && left="${left} routes in table ${t};"
+    done
+    [ -z "${left}" ] && return 0
+    sleep 10
+  done
+  {
+    echo "left on ${node}:${left}"
+    for t in ${FIXTURE_TABLES:-}; do
+      echo "--- table ${t}"
+      docker exec "${node}" ip -6 route show table "${t}" 2>&1
+    done
+    echo "--- BGPAdvertisements naming VPC 80 or 81"
+    kc -n "${NS}" get bgpadvertisements -o json </dev/null |
+      jq -r '.items[] | select((.metadata.name + " " + (.spec | tostring)) | test("(^|[^0-9])8[01]([^0-9]|$)"))
+        | "\(.metadata.name) router=\(.spec.routerRef.name // "-")"'
+  } >"${OUT}/fixture-leftovers.txt" 2>&1
+  fail "cleanup: the combined fixture left${left} after 6 minutes (fixture-leftovers.txt)"
+}
+
 # no_stale_rows waits up to one GC interval and a minute for every node to
 # have no egress_route_table row of a table no VRF holds, and fails naming
 # the nodes that still do: rows a run's VPCs left behind would be a leak.
@@ -298,6 +333,8 @@ cleanup() {
   fi
   if [ "${PROFILE}" = combined ]; then
     "${SCRIPT_DIR}/handoff-fixture.sh" down >>"${OUT}/steps.log" 2>&1 || fail "cleanup: ns80-tap removal failed"
+    log "fixture check: no VRF or route of VPC 80 or 81 left on dfw-worker2"
+    fixture_gone
   fi
   if [ "${status}" -eq 0 ] && [ "${#NODES[@]}" -gt 0 ]; then
     log "leak check: rows of tables no VRF holds"
@@ -325,6 +362,9 @@ if [ "${PROFILE}" = combined ]; then
   kc -n ns80-tap patch vpcattachment vpc-a-svc --subresource=status --type=merge \
     -p '{"status":{"vpc":"80","node":"dfw-worker2"}}' >>"${OUT}/steps.log"
   kc -n ns80-tap wait --for=condition=Ready pod -l 'app in (vpc-a-tap,vpc-b-tap)' --timeout=240s >>"${OUT}/steps.log"
+  # The tables the fixture's VRFs on dfw-worker2 use, which clean-up checks
+  # are empty after the fixture goes.
+  FIXTURE_TABLES="$(table_of dfw-worker2 80) $(table_of dfw-worker2 81)"
 fi
 
 # The remote node's locator: its /48 uSID block and 16-bit node ID, from the
