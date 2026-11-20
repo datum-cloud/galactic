@@ -454,6 +454,47 @@ func TestConnectorWorkerDown(t *testing.T) {
 	}
 }
 
+// TestConnectorNewerPassFencesOlderProcess fences an older process on the
+// edge gate scope with the newer process's first scope pass, before the newer
+// one commits any gate, in both modes.
+func TestConnectorNewerPassFencesOlderProcess(t *testing.T) {
+	for _, withWorker := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pinned", true: "worker"}[withWorker], func(t *testing.T) {
+			f := newFixture(t)
+			var wf *workerFixture
+			agent := f.agent
+			if withWorker {
+				wf = f.startWorker()
+				agent = func() *Agent { return f.connectorAgent(wf) }
+			}
+			f.pod("pod-1")
+			att := f.attach("a1", uid1, "pod-1", vpcA, "2001:db8:100::10", false)
+			if withWorker {
+				wf.admit(att, true)
+			}
+			older := agent()
+			f.reconcile(older)
+			f.programmed("a1")
+			newer := agent()
+			f.reconcile(newer)
+			f.programmed("a1")
+			if err := older.gateCommit(vpcA, true, func() error {
+				t.Error("the older process's gate write ran")
+				return nil
+			}); !errors.Is(err, ownership.ErrNotOwner) {
+				t.Fatalf("older process's gate commit = %v, want ErrNotOwner", err)
+			}
+			if err := older.Reconcile(context.Background()); err == nil {
+				t.Fatal("the fenced process reconciled the VPC")
+			}
+			f.programmed("a1")
+			if older.Healthy(nil) == nil {
+				t.Fatal("the fenced process is healthy")
+			}
+		})
+	}
+}
+
 // gatedAs reports whether ifindex's gate link row names addr.
 func (f *fixture) gatedAs(ifindex uint32, addr string) bool {
 	got, ok, _ := f.gates.Link(ifindex)
