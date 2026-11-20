@@ -397,6 +397,25 @@ int local_rx(struct __sk_buff *skb)
 	return bpf_redirect_neigh(tap, &p, sizeof(p), 0);
 }
 
+// lt_link_scoped reports whether addr is link-local unicast or multicast:
+// an address that never leaves the link the packet is on.
+static LT_INLINE int lt_link_scoped(const __u8 *addr)
+{
+	return addr[0] == 0xff || (addr[0] == 0xfe && (addr[1] & 0xc0) == 0x80);
+}
+
+// lt_nd reports whether ip6 carries a Neighbor Discovery message (RFC 4861:
+// Router Solicitation through Redirect) directly after its fixed header.
+static LT_INLINE int lt_nd(struct __sk_buff *skb, struct usid_ip6hdr *ip6)
+{
+	void *end = (void *) (long) skb->data_end;
+	__u8 *type = (void *) (ip6 + 1);
+
+	if (ip6->nexthdr != LT_IPPROTO_ICMPV6 || (void *) (type + 1) > end)
+		return 0;
+	return *type >= 133 && *type <= 137;
+}
+
 // lt_nat_route reports whether dst's entry in table steers into the VPC's
 // service-internal veth pair: a pass-through entry PassThroughLocalNAT owns.
 static LT_INLINE int lt_nat_route(__u32 table, const __u8 *dst)
@@ -482,6 +501,14 @@ int local_link_rx(struct __sk_buff *skb)
 		__u8 dst[16];
 
 		__builtin_memcpy(dst, ip6->daddr, 16);
+		// Traffic for the link stays on it, whatever a class route says.
+		// A guest resolving its gateway is answered by this host, so an
+		// ordered-mode PassThroughLocalNAT ::/0 must not take its Neighbor
+		// Solicitation, or anything else to a link-local or multicast
+		// address, into the pair. usid_egress makes the same carve-out
+		// before its own route lookup.
+		if (lt_link_scoped(dst) || lt_nd(skb, ip6))
+			return TC_ACT_UNSPEC;
 		if (!pair || !lt_nat_route(table, dst))
 			return TC_ACT_UNSPEC;
 	}
@@ -570,12 +597,6 @@ int local_pair_rx(struct __sk_buff *skb)
 	return bpf_redirect_neigh(link, &p, sizeof(p), 0);
 }
 
-// lt_link_scoped reports whether addr is link-local unicast or multicast:
-// an address that never leaves the link the packet is on.
-static LT_INLINE int lt_link_scoped(const __u8 *addr)
-{
-	return addr[0] == 0xff || (addr[0] == 0xfe && (addr[1] & 0xc0) == 0x80);
-}
 
 // local_link_guard runs on the host end of a pod-to-host routed link. The link
 // joins the pod to the tenant VRF, so a source it was not given would let the

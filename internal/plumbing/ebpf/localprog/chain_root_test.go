@@ -356,3 +356,92 @@ func mustStats(t *testing.T, m *ebpf.Map) map[string]uint64 {
 	}
 	return s
 }
+
+// sendL4 writes a frame from the guest toward dst whose IPv6 next header is
+// nexthdr and whose payload is l4, to dst's multicast MAC for a multicast
+// destination and to the tenant interface otherwise.
+func (c *chain) sendL4(dst netip.Addr, nexthdr byte, l4 []byte) {
+	c.t.Helper()
+	d := dst.As16()
+	dmac := []byte(c.tenant.Attrs().HardwareAddr)
+	if d[0] == 0xff {
+		dmac = []byte{0x33, 0x33, d[12], d[13], d[14], d[15]}
+	}
+	frame := make([]byte, 0, 14+40+len(l4))
+	frame = append(frame, dmac...)
+	frame = append(frame, c.guest.Attrs().HardwareAddr...)
+	frame = append(frame, 0x86, 0xDD, 0x60, 0, 0, 0)
+	frame = binary.BigEndian.AppendUint16(frame, uint16(len(l4))) //nolint:gosec // small
+	frame = append(frame, nexthdr, 255)
+	s := chainGuest.As16()
+	frame = append(frame, s[:]...)
+	frame = append(frame, d[:]...)
+	frame = append(frame, l4...)
+	if err := unix.Sendto(c.tx, frame, 0, &unix.SockaddrLinklayer{Ifindex: c.guest.Attrs().Index,
+		Halen: 6, Addr: [8]byte(append(append([]byte{}, dmac...), 0, 0))}); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+// neighborSolicitation returns an ICMPv6 Neighbor Solicitation for target,
+// followed by marker.
+func neighborSolicitation(target netip.Addr, marker string) []byte {
+	b := []byte{135, 0, 0, 0, 0, 0, 0, 0}
+	tgt := target.As16()
+	b = append(b, tgt[:]...)
+	return append(b, marker...)
+}
+
+// udpTo returns a UDP header and marker as a payload.
+func udpTo(marker string) []byte {
+	b := binary.BigEndian.AppendUint16(nil, 40000)
+	b = binary.BigEndian.AppendUint16(b, 53)
+	b = binary.BigEndian.AppendUint16(b, uint16(8+len(marker))) //nolint:gosec // small
+	b = append(b, 0, 0)
+	return append(b, marker...)
+}
+
+// TestChainRoot_OrderedLocalRouteLeavesLinkTraffic gives the VPC the class
+// route ordered mode writes for a Local shard, a PassThroughLocalNAT ::/0,
+// and checks it takes only traffic bound off the link into the pair. A
+// guest's Neighbor Solicitation for its gateway, multicast or unicast, and
+// anything to a link-local address stay with this host: steering them into
+// the pair would leave the guest unable to resolve its gateway, so no
+// packet of its would ever leave it.
+func TestChainRoot_OrderedLocalRouteLeavesLinkTraffic(t *testing.T) {
+	c := newChain(t)
+	routes := egressroutemap.NewEgressRouteTable(usidmap.KernelTable{Map: c.usid.EgressRouteTable})
+	_, all, _ := net.ParseCIDR("::/0")
+	if err := routes.RegisterPassThroughAs(chainTable, all, egressroutemap.PassThroughLocalNAT); err != nil {
+		t.Fatal(err)
+	}
+
+	c.send("internet")
+	if _, ok := c.arrived("internet", time.Second); !ok {
+		t.Fatalf("a packet to the internet never entered the pair; Local stats %v", mustStats(t, c.local.Maps.Stats))
+	}
+	if got := c.localStat("link_nat"); got != 1 {
+		t.Fatalf("lt_stats[link_nat] = %d, want 1", got)
+	}
+
+	gateway := netip.MustParseAddr("2001:db8:77::1")
+	solicited := netip.MustParseAddr("ff02::1:ff00:1")
+	for _, tc := range []struct {
+		name, marker string
+		dst          netip.Addr
+		nexthdr      byte
+		l4           []byte
+	}{
+		{"multicast solicitation", "ns-multicast", solicited, 58, neighborSolicitation(gateway, "ns-multicast")},
+		{"unicast solicitation", "ns-unicast", gateway, 58, neighborSolicitation(gateway, "ns-unicast")},
+		{"link-local destination", "to-link-local", netip.MustParseAddr("fe80::1"), 17, udpTo("to-link-local")},
+	} {
+		c.sendL4(tc.dst, tc.nexthdr, tc.l4)
+		if _, ok := c.arrived(tc.marker, 300*time.Millisecond); ok {
+			t.Errorf("%s: the class route took it into the pair", tc.name)
+		}
+	}
+	if got := c.localStat("link_nat"); got != 1 {
+		t.Errorf("lt_stats[link_nat] = %d after link traffic, want still 1", got)
+	}
+}
