@@ -299,26 +299,40 @@ fi
 REMOTE_LOCATOR="${block%::/48}:$(printf '%x' "${nodeid}")::/64"
 log "remote node ${REMOTE_NODE}, locator ${REMOTE_LOCATOR}"
 
+# all_rows NODE counts every egress_route_table row on NODE, in every table.
+all_rows() {
+  local pid
+  pid=$(docker inspect -f '{{.State.Pid}}' "$1")
+  sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic/egress_route_table" 2>/dev/null |
+    jq 'length' 2>/dev/null || echo 0
+}
+
 # A galactic-router restart, such as the previous run's uninstall, leaves a
-# node without tenant routes until its BGP sessions come back. Wait for them.
+# node without tenant routes until its BGP sessions come back. Wait until
+# every node has rows, counted in every table: a node may hold only the
+# claimed VPCs' guests, which the snapshot leaves out.
 log "waiting for every node's egress_route_table rows"
 for _ in $(seq 30); do
   empty=""
   for node in "${NODES[@]}"; do
-    rows=$(snapshot "${node}" | grep -c '^egress_route_table ' || true)
-    [ "${rows}" -gt 0 ] || empty="${empty} ${node}"
+    [ "$(all_rows "${node}")" -gt 0 ] || empty="${empty} ${node}"
   done
   [ -z "${empty}" ] && break
   sleep 10
 done
+[ -z "${empty}" ] || fail "baseline: no egress_route_table rows on${empty} after 5 minutes"
 log "baseline snapshot"
 snap_all baseline
 for node in "${NODES[@]}"; do
-  if ! grep -q '^route-6 ' "${OUT}/baseline/${node}.txt" || ! grep -q '^egress_route_table ' "${OUT}/baseline/${node}.txt"; then
-    fail "baseline: ${node}'s snapshot lacks routes or egress_route_table rows; the comparison would prove nothing"
+  if ! grep -q '^route-6 ' "${OUT}/baseline/${node}.txt"; then
+    fail "baseline: ${node}'s snapshot has no routes; the comparison would prove nothing"
     exit 1
   fi
 done
+if ! cat "${OUT}"/baseline/*.txt | grep -q '^egress_route_table '; then
+  fail "baseline: no node has egress_route_table rows outside the claimed VPCs; the comparison would prove nothing"
+  exit 1
+fi
 
 log "install ${PROFILE}"
 "${LAB}" install "${SITE}" "${PROFILE}" 2>&1 | tee -a "${OUT}/steps.log"
