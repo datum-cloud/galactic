@@ -11,7 +11,7 @@ interface are implemented by
 [#1433](https://github.com/datum-cloud/galactic/issues/1433). The Fabric module
 ([#1436](https://github.com/datum-cloud/galactic/issues/1436)) serves
 `fabric.srv6` and `fabric.routes`, and is the only writer of the tenant routes
-of every VPC Worker owns. Local
+of every VPC Worker owns. The Local module
 ([#1435](https://github.com/datum-cloud/galactic/issues/1435)) serves the
 `local.*` capabilities, and
 [#1437](https://github.com/datum-cloud/galactic/issues/1437) resolves shard
@@ -21,6 +21,9 @@ shard ([Local NAT shards](contract.md#local-nat-shards)).
 [#1434](https://github.com/datum-cloud/galactic/issues/1434) makes Worker the
 owner of each node and VPC scope, with CNI writing that state under the fence
 ([ownership](ownership.md#node-and-vpc-scope)).
+[#1441](https://github.com/datum-cloud/galactic/issues/1441) packages Worker
+for dedicated and combined placement, adds its operator diagnostics and the
+handback that returns its scopes ([operations](operations.md)).
 
 | Page                                   | Contents                                                                                  |
 | -------------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -29,6 +32,7 @@ owner of each node and VPC scope, with CNI writing that state under the fence
 | [Connector decision](connector.md)     | Which component is the provider connector, and its entry point                            |
 | [Branch workflow](branch-workflow.md)  | Base and start SHAs, PR target, CI, artifact tags and how Tasks close                     |
 | [Qualification plan](qualification.md) | Platform, handoffs, workload, comparison method and limits                                |
+| [Operations](operations.md)            | Install, diagnostics, flow tracing, drain, handback, uninstall and rollback               |
 
 ## Decision log
 
@@ -71,3 +75,6 @@ PR. "Confirmed" means the product owner approved the decision on the date given.
 | D31 | `ShardRef.name` names the EgressShard; a request that sets `group` or `index` is `MalformedSpec`                                                  | Accepted             | [Contract](contract.md#claims)                              |
 | D32 | A shard resolves by its node, toward its own SID's locator; its EgressShard is the trusted source                                                 | Accepted             | [Contract](contract.md#resolution)                          |
 | D33 | Amends D28: `usid_egress` selects a Local shard only for a VPC with an `egress_local_shard` row; others keep today's path                         | Accepted             | [Contract](contract.md#local-nat-shards)                    |
+| D34 | `galactic-worker handback` relinquishes a stopped Worker's scopes to a `galactic-handback:` label; only it makes them reclaimable                 | Accepted             | [Ownership](ownership.md#handing-scopes-back)               |
+| D35 | Combined placement is a `node=edge` node with the service opt-ins and pinned guests; no new label                                                 | Accepted             | [Labels](../operations/node-labels.md#combined-placement)   |
+| D36 | Operators read Worker's state with `galactic-worker inspect` through `kubectl exec`, and its gauges; no network endpoint serves it                | Accepted             | [Operations](operations.md#read-the-diagnostics)            |

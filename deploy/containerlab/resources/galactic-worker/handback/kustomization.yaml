@@ -1,0 +1,15 @@
+# config/galactic-worker/handback with the lab's local image.
+# scripts/worker-lab.sh sets the node name.
+resources:
+  - ../config/handback
+images:
+  - name: ghcr.io/datum-cloud/galactic-worker
+    newName: galactic-worker
+    newTag: latest
+patches:
+  - target:
+      kind: Pod
+    patch: |-
+      - op: add
+        path: /spec/containers/0/imagePullPolicy
+        value: Never
