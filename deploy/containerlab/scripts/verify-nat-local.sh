@@ -238,6 +238,57 @@ diagnostics() {
     grep -E '^galactic_nat_(worker|local)_' || true
   echo "-- egress_local_shard on dfw-worker2"
   local_rows_dump 2>&1 || true
+  local pid c
+  pid=$(docker inspect -f '{{.State.Pid}}' "${EDGE}")
+  echo "-- VPC 80's egress_route_table on dfw-worker2"
+  "${SCRIPT_DIR}/worker-fabric.sh" dump "${EDGE}" 80 2>&1 || true
+  echo "-- galactic-cni's egress sweep on dfw-worker2"
+  c=$(kc -n galactic-system get pods -l app.kubernetes.io/name=galactic-cni \
+    --field-selector "spec.nodeName=${EDGE}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  [ -n "${c}" ] && kc -n galactic-system logs "${c}" -c credential-refresh --tail=400 2>&1 |
+    grep -E 'egressroutemap|egress_local_shard|egress shard|sweep' | tail -40 || true
+  echo "-- Local's lt_link and lt_stats, and egress_shard_stats"
+  sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic-local/lt_link" 2>&1 | head -c 4000 || true
+  echo
+  sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic-local/lt_stats" 2>&1 | head -c 4000 || true
+  echo
+  sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic/egress_shard_stats" 2>&1 | head -c 4000 || true
+  echo
+  echo "-- tc and XDP on the edge guest's interface and VPC 80's pair"
+  local host=G000000080086H tenant nat
+  docker exec "${EDGE}" tc filter show dev "${host}" ingress 2>&1 || true
+  tenant=$(docker exec "${EDGE}" ip -o link show type veth |
+    awk '/alias galactic-local:80\// && / master / {sub(/@.*/, "", $2); print $2; exit}')
+  nat=$(docker exec "${EDGE}" ip -o link show type veth |
+    awk '/alias galactic-local:80\// && !/ master / {sub(/@.*/, "", $2); print $2; exit}')
+  for l in "${tenant}" "${nat}"; do
+    [ -n "${l}" ] && docker exec "${EDGE}" ip -d link show "${l}" 2>&1 | head -6
+  done
+  path_trace "${host}" "${tenant}" "${nat}"
+}
+
+# path_trace HOST TENANT NAT captures, for 8 seconds while guest-a-edge sends
+# two UDP datagrams to remote-host, on the guest's host interface, both ends
+# of VPC 80's pair and every bond, and prints what each saw. It shows where
+# the flow stops.
+path_trace() {
+  local ifs=("$@") b
+  mapfile -t b < <(docker exec "${EDGE}" ip -o link show type bond | awk -F': ' '{print $2}')
+  ifs+=("${b[@]}")
+  local i
+  for i in "${ifs[@]}"; do
+    [ -n "${i}" ] || continue
+    docker exec -d "${EDGE}" sh -c "timeout 8 tcpdump -i ${i} -nn -U -w /tmp/nat-local-trace-${i}.pcap \
+      'host ${HOST6} or (ip6 and (ip6[6] == 41 or ip6[6] == 43))' >/dev/null 2>&1"
+  done
+  sleep 2
+  pod_exec guest-a-edge sh -c "for i in 1 2; do echo trace | nc -u -w1 -p 40001 ${HOST6} ${ECHO_PORT}; done" 2>&1 || true
+  sleep 7
+  for i in "${ifs[@]}"; do
+    [ -n "${i}" ] || continue
+    echo "   [${i}]"
+    docker exec "${EDGE}" sh -c "tcpdump -nn -r /tmp/nat-local-trace-${i}.pcap 2>/dev/null | head -8; rm -f /tmp/nat-local-trace-${i}.pcap" || true
+  done
 }
 
 # hairpin_start / hairpin_check capture packets toward dfw-worker2's own
