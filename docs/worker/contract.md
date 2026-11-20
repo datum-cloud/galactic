@@ -444,6 +444,11 @@ the shard's program natively on the NAT end; the destination reports
   about a second. CNI ADD still points a new VRF's class route at the first
   shard that resolves, and the sweep then moves it.
 
+In either mode `local_link_rx` leaves Neighbor Discovery, and anything to a
+link-local or multicast address, to the host, as `usid_egress` does: a class
+route such as ordered mode's `::/0` must not take a guest's solicitation for
+its gateway into the pair.
+
 Drain, pins and NAT64 standby keep their rules: a draining local shard keeps
 its pins and takes no new tenants, and a local NAT64 standby is held while a
 primary is alive. A pin to the local shard holds only while the VPC keeps its
