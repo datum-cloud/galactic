@@ -20,8 +20,9 @@ type fakeEdgeHost struct {
 	gates map[uint32]netip.Addr
 	rows  map[uint32]netip.Addr
 	// pass is each pass-through entry, true when PassThroughEdge owns it.
-	pass   map[netip.Prefix]bool
-	writes int
+	pass         map[netip.Prefix]bool
+	writes       int
+	unregistered []uint32
 }
 
 func newFakeEdgeHost(links ...edgeLinkObs) *fakeEdgeHost {
@@ -54,6 +55,7 @@ func (h *fakeEdgeHost) Register(_, i uint32, _ string, addr netip.Addr) error {
 
 func (h *fakeEdgeHost) Unregister(i uint32) error {
 	h.writes++
+	h.unregistered = append(h.unregistered, i)
 	delete(h.rows, i)
 	return nil
 }
@@ -155,6 +157,31 @@ func TestEdgeLinkRegisters(t *testing.T) {
 	}
 	if got := st[claims[0].Key]["attachment/a"]; !got.Ready {
 		t.Fatalf("state of an up link = %+v, want Ready", got)
+	}
+}
+
+// TestEdgeLinkReusedIfindexStartsClean clears the rows a deleted link left on
+// an ifindex a new link reuses before registering the new link, so it never
+// keeps another attachment's policy token.
+func TestEdgeLinkReusedIfindexStartsClean(t *testing.T) {
+	withVRF(t, true)
+	h := newFakeEdgeHost(edgeLinkObs{Name: "ge1", Index: 10, UID: "a", Up: true})
+	h.gates[10] = addrA
+	// A deleted link of another attachment left its rows on ifindex 10.
+	h.rows[10] = addrB
+	claims := []module.Claim{edgeClaim("a", "ge1", 1, addrA)}
+	p, err := planEdge(h, testVPC, testTable, true, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyEdge(h, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.unregistered) != 1 || h.unregistered[0] != 10 {
+		t.Fatalf("unregistered %v, want the reused ifindex 10 cleared first", h.unregistered)
+	}
+	if h.rows[10] != addrA {
+		t.Fatalf("rows of ifindex 10 = %v, want the new link's", h.rows[10])
 	}
 }
 

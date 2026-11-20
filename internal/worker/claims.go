@@ -122,8 +122,14 @@ func validateEdgeLink(spec *workerv1alpha1.ClaimSpec, el *workerv1alpha1.EdgeLin
 		return malformed(fmt.Sprintf("edge_link carries at most %d prefixes", maxEdgeLinkPrefixes))
 	}
 	for _, p := range el.GetPrefixes() {
-		if _, err := netip.ParsePrefix(p); err != nil {
+		pfx, err := netip.ParsePrefix(p)
+		if err != nil {
 			return malformed("edge_link prefix " + strconv.Quote(p) + " is not a CIDR prefix")
+		}
+		// A default route never belongs to one edge link: its pass-through
+		// entry would take every destination of the VPC.
+		if pfx.Bits() == 0 {
+			return malformed("edge_link prefix " + strconv.Quote(p) + " is a default route")
 		}
 	}
 	return nil
