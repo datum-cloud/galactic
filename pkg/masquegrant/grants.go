@@ -25,7 +25,6 @@ func (ref VPCRef) Selector() string { return ref.Namespace + "/" + ref.Name }
 type CreateRequest struct {
 	EndpointRef   *EndpointRef
 	VPC           VPCRef
-	Cell          string
 	Connector     string
 	Lifetime      time.Duration
 	Routes        []netip.Prefix
@@ -38,8 +37,8 @@ type Grants struct{ grants authority.Grants }
 
 type Ledgers struct{ ledgers authority.Ledgers }
 
-func New(cellClient client.Client, namespace string) Grants {
-	return Grants{grants: authority.Grants{Client: cellClient, Namespace: namespace, Now: time.Now}}
+func New(cellClient client.Client, namespace, cell string) Grants {
+	return Grants{grants: authority.Grants{Client: cellClient, Namespace: namespace, Cell: cell, Now: time.Now}}
 }
 
 func NewLedgers(cellClient client.Client, namespace string) Ledgers {
@@ -48,7 +47,7 @@ func NewLedgers(cellClient client.Client, namespace string) Ledgers {
 
 func (grants Grants) Create(ctx context.Context, request CreateRequest) (Issued, error) {
 	return grants.grants.Create(ctx, authority.CreateRequest{EndpointRef: request.EndpointRef,
-		VPC: authority.VPCRef{Namespace: request.VPC.Namespace, Name: request.VPC.Name}, Cell: request.Cell,
+		VPC:       authority.VPCRef{Namespace: request.VPC.Namespace, Name: request.VPC.Name},
 		Connector: request.Connector, Lifetime: request.Lifetime,
 		Routes: request.Routes, TrafficPolicy: request.TrafficPolicy})
 }

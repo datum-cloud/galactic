@@ -27,7 +27,7 @@ func scopedEndpoint() *galacticv1alpha1.MASQUEEndpoint {
 
 func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 	ledger, ref := fakeLedgers(t)
-	grants := Grants(ledger)
+	grants := Grants{Client: ledger.Client, Namespace: ledger.Namespace, Cell: testCell, Now: ledger.Now}
 	endpoint := scopedEndpoint()
 	ctx := context.Background()
 	if err := grants.Client.Create(ctx, endpoint); err != nil {
@@ -53,7 +53,7 @@ func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 		}
 	}
 	writeFence(0)
-	issued, err := grants.Create(ctx, CreateRequest{VPC: ref, Cell: testCell,
+	issued, err := grants.Create(ctx, CreateRequest{VPC: ref,
 
 		Lifetime:    time.Hour,
 		EndpointRef: &galacticv1alpha1.MASQUEEndpointReference{Namespace: endpoint.Namespace, Name: endpoint.Name}})

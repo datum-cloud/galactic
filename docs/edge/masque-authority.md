@@ -30,7 +30,9 @@ pool IPv6 /80); all are required. `grant create` takes required `--vpc` and
 (default and maximum `24h`), repeatable `--route` (allowed destination prefix),
 `--ingress-policy` and `--egress-policy`. `grant rotate CONNECTOR` accepts
 `--lifetime` with the same default and maximum. `grant disable CONNECTOR` and
-`grant retire CONNECTOR` have no command-specific flags. See
+`grant retire CONNECTOR` have no command-specific flags. All grant operations
+require inherited `--cell`; records and unrecorded allocations from other cells
+are never mutated. See
 [operator tasks](#operator-tasks) for examples and lifecycle constraints.
 
 ## State
@@ -95,9 +97,9 @@ masque-authority ledger init --vpc tenant/vpc --cell cell-1 \
 masque-authority grant create --vpc tenant/vpc --cell cell-1 --lifetime 12h \
   --route fd20:a1b:2c3d::/48 --ingress-policy allow-in --egress-policy allow-out
 
-masque-authority grant rotate  <connector>   # new credential, next revision
-masque-authority grant disable <connector>   # revoke; the allocation is kept
-masque-authority grant retire  <connector>   # revoke and tombstone the allocation
+masque-authority grant rotate  <connector> --cell cell-1   # new credential, next revision
+masque-authority grant disable <connector> --cell cell-1   # revoke; the allocation is kept
+masque-authority grant retire  <connector> --cell cell-1   # revoke and tombstone the allocation
 ```
 
 `ledger init` refuses ranges that aren't masked IPv6 /80s inside one of the VPC's networks, or that overlap each other. It also refuses ranges that overlap those of another cell's ledger for the same VPC, so two cells are never handed overlapping /80s. And it refuses while any EdgeService the authority issued for the VPC in that cell still exists, so a recreated ledger can't hand out a /96 or pool that one still holds. Issued services of other cells don't block it. Choose ranges that overlap no workload subnet; core refuses a delegated route that does.

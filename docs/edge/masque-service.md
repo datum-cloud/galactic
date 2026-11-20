@@ -159,8 +159,11 @@ fences are written without those fields.
 
 ### Endpoint-bound grants
 
-`pkg/masquegrant.New(uncachedCellClient, namespace)` exposes `Create`, `Rotate`,
-`Disable` and `Retire` using the existing authority/ledger implementation.
+`pkg/masquegrant.New(uncachedCellClient, namespace, cell)` exposes `Create`, `Rotate`,
+`Disable` and `Retire` using the existing authority/ledger implementation. Cell is service configuration,
+not a CreateRequest field. An empty configured cell rejects operations, and
+rotation, disable and retirement cannot mutate another cell's grants or
+unrecorded allocations. Administrative NewLedgers.Init retains its explicit cell.
 `CreateRequest.EndpointRef` is `{Namespace, Name}` and `CreateRequest.VPC`
 is the public name-only `VPCRef {Namespace, Name}`. No caller supplies object
 UIDs. Connect authenticates the customer project and caller, resolves authorized

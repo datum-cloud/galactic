@@ -27,6 +27,7 @@ import (
 type Grants struct {
 	Client    client.Client
 	Namespace string
+	Cell      string
 	Now       func() time.Time
 }
 
@@ -45,8 +46,7 @@ type Issued struct {
 type CreateRequest struct {
 	EndpointRef *galacticv1alpha1.MASQUEEndpointReference
 	// VPC is the VPC's namespace and name; its UID is read from the API.
-	VPC  VPCRef
-	Cell string
+	VPC VPCRef
 	// Connector is the connector's UUID; empty means a new random one.
 	Connector string
 	// Lifetime is how long the credential is valid, at most MaxLifetime.
@@ -56,7 +56,7 @@ type CreateRequest struct {
 }
 
 func (g Grants) ledgers() Ledgers {
-	return Ledgers(g)
+	return Ledgers{Client: g.Client, Namespace: g.Namespace, Now: g.Now}
 }
 
 // expiry returns now plus lifetime, refusing a lifetime outside
@@ -77,6 +77,9 @@ func (g Grants) expiry(lifetime time.Duration) (time.Time, error) {
 // Connector reuses its allocation rather than taking another /96, and
 // Retire tombstones it.
 func (g Grants) Create(ctx context.Context, req CreateRequest) (Issued, error) {
+	if g.Cell == "" {
+		return Issued{}, errors.New("configured cell is required")
+	}
 	expires, err := g.expiry(req.Lifetime)
 	if err != nil {
 		return Issued{}, err
@@ -113,7 +116,7 @@ func (g Grants) Create(ctx context.Context, req CreateRequest) (Issued, error) {
 		EndpointHostname: endpointHostname,
 		EndpointRevision: endpointRevision,
 		EndpointRef:      req.EndpointRef,
-		Connector:        req.Connector, Cell: req.Cell, VPC: req.VPC, Revision: 1, Digest: Digest(cred),
+		Connector:        req.Connector, Cell: g.Cell, VPC: req.VPC, Revision: 1, Digest: Digest(cred),
 		Expires: expires, Enabled: true, Routes: req.Routes, TrafficPolicy: req.TrafficPolicy,
 	}
 	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: g.Namespace}}
@@ -223,6 +226,9 @@ func (g Grants) Retire(ctx context.Context, connector string) error {
 	if err != nil {
 		return err
 	}
+	if r.Cell != g.Cell {
+		return errors.New("grant belongs to another cell")
+	}
 	return g.ledgers().Retire(ctx, r.VPC.UID, r.Cell, connector)
 }
 
@@ -237,10 +243,18 @@ func (g Grants) retireUnrecorded(ctx context.Context, connector string, notFound
 	if len(held) == 0 {
 		return notFound
 	}
+	found := false
 	for _, l := range held {
+		if l.Cell != g.Cell {
+			continue
+		}
+		found = true
 		if err := g.ledgers().Retire(ctx, l.VPC.UID, l.Cell, connector); err != nil {
 			return err
 		}
+	}
+	if !found {
+		return notFound
 	}
 	// A Create that wrote the record since Disable found none leaves it
 	// enabled; disable it as Retire does a recorded connector.
@@ -253,9 +267,15 @@ func (g Grants) retireUnrecorded(ctx context.Context, connector string, notFound
 // update applies change to a fresh read of the connector's record and
 // writes it back conditioned on the read's UID and resourceVersion.
 func (g Grants) update(ctx context.Context, connector string, change func(*Record) error) error {
+	if g.Cell == "" {
+		return errors.New("configured cell is required")
+	}
 	r, s, err := readRecord(ctx, g.Client, g.Namespace, connector)
 	if err != nil {
 		return fmt.Errorf("read grant record of %s: %w", connector, err)
+	}
+	if r.Cell != g.Cell {
+		return errors.New("grant belongs to another cell")
 	}
 	if err := change(r); err != nil {
 		return fmt.Errorf("connector %s: %w", connector, err)

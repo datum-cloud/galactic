@@ -307,7 +307,7 @@ func TestManagedEndpointMultiplexedAuthority(t *testing.T) {
 				issued, err := fixture.grants.Create(t.Context(), CreateRequest{
 					EndpointRef: &galacticv1alpha1.MASQUEEndpointReference{Namespace: endpoint.Namespace, Name: endpoint.Name},
 					VPC:         VPCRef{Namespace: vpc.Namespace, Name: vpc.Name, UID: string(vpc.UID)},
-					Cell:        testCell, Lifetime: time.Hour, Routes: []netip.Prefix{netip.MustParsePrefix("fd20:a1b:2c3d::/48")},
+					Lifetime:    time.Hour, Routes: []netip.Prefix{netip.MustParsePrefix("fd20:a1b:2c3d::/48")},
 				})
 				if err != nil {
 					t.Fatal(err)

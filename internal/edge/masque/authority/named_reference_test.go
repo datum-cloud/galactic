@@ -15,7 +15,7 @@ import (
 
 func TestOldManagedRecordFailsClosed(t *testing.T) {
 	grants, vpc := faultyGrants(t, func() error { return nil })
-	issued, err := grants.Create(t.Context(), CreateRequest{VPC: vpc, Cell: testCell, Lifetime: time.Hour})
+	issued, err := grants.Create(t.Context(), CreateRequest{VPC: vpc, Lifetime: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -124,7 +124,7 @@ func startFixture(t *testing.T) *fixture {
 	}
 	f.vpc = f.newVPC()
 	log := slog.New(slog.NewJSONHandler(f.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	f.grants = Grants{Client: admin, Namespace: testNS, Now: f.clock}
+	f.grants = Grants{Client: admin, Namespace: testNS, Cell: testCell, Now: f.clock}
 	f.auth = &Authority{Client: admin, Namespace: testNS, Provider: testProvider, ProviderServiceAccount: providerSA,
 		Cell: testCell, Now: f.clock, Log: log}
 	ref := VPCRef{Namespace: tenantNS, Name: vpcName, UID: string(f.vpc.UID)}
@@ -158,7 +158,7 @@ func (f *fixture) create(obj client.Object) {
 func (f *fixture) connector() Issued {
 	f.t.Helper()
 	is, err := f.grants.Create(context.Background(), CreateRequest{
-		VPC: VPCRef{Namespace: tenantNS, Name: vpcName}, Cell: testCell, Lifetime: MaxLifetime,
+		VPC: VPCRef{Namespace: tenantNS, Name: vpcName}, Lifetime: MaxLifetime,
 		Routes: []netip.Prefix{netip.MustParsePrefix("fd20:a1b:2c3d::/48")},
 	})
 	if err != nil {
