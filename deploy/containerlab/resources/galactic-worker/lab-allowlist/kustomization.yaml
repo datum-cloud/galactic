@@ -1,0 +1,10 @@
+# Replaces Worker's allowlist with ./allowlist.yaml, which also admits the
+# lab's claim client.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+configMapGenerator:
+  - name: galactic-worker-allowlist
+    namespace: galactic-system
+    behavior: replace
+    files:
+      - allowlist.yaml

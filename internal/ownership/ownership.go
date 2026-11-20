@@ -370,6 +370,42 @@ func (a *Authority) Takeover(scope, owner string, from func(Record) bool) (Ticke
 	return t, err
 }
 
+// Relinquish gives scope up in one step under the scope's lock, for an owner
+// that hands its scope to a writer it cannot name, such as galactic-edge
+// handing a VPC scope to whichever Worker incarnation runs, or a Worker
+// handback after its process is gone. from decides, from the record as it
+// stands, whether the current owner may be replaced; when it refuses,
+// Relinquish returns ErrNotOwner and changes nothing.
+//
+// It advances the generation, so no ticket issued before it can commit, and
+// names to as the owner. An empty to leaves the scope unowned, so the next
+// writer takes it with Claim. A non-empty to is a label that no writer uses
+// as its owner ID, such as one under HandbackOwnerPrefix; a writer then
+// takes the scope with Takeover, accepting that label. Either way the scope
+// requires a snapshot commit from its next owner, because the state the
+// previous owner left is only what it last committed. It returns the new
+// generation.
+func (a *Authority) Relinquish(scope string, from func(Record) bool, to string) (uint64, error) {
+	var gen uint64
+	err := a.locked(scope, func(r *Record) (bool, error) {
+		if !from(*r) {
+			return false, fmt.Errorf("%w: %q owns %q", ErrNotOwner, r.Owner, scope)
+		}
+		r.Owner, r.Generation, r.Transitioning, r.Pending = to, r.Generation+1, false, true
+		gen = r.Generation
+		return true, nil
+	})
+	return gen, err
+}
+
+// HandbackOwnerPrefix starts the label a Worker handback leaves as the owner
+// of each scope it gives up: a neutral owner no writer uses as its ID, which
+// a legacy writer takes over with Takeover.
+const HandbackOwnerPrefix = "galactic-handback:"
+
+// HandedBack reports whether owner is a handback label.
+func HandedBack(owner string) bool { return strings.HasPrefix(owner, HandbackOwnerPrefix) }
+
 // WorkerOwnerPrefix starts the owner ID of every galactic-worker
 // incarnation.
 const WorkerOwnerPrefix = "galactic-worker:"
@@ -413,6 +449,28 @@ func (a *Authority) Read(scope string) (Record, error) {
 		return false, nil
 	})
 	return out, err
+}
+
+// Peek returns scope's record as last written, without taking the scope's
+// lock, for diagnostics that must never delay a writer. Records are replaced
+// atomically, so Peek sees a whole record, which may be stale by the time it
+// returns. A writer decides only with Read or under the lock.
+func (a *Authority) Peek(scope string) (Record, error) {
+	var r Record
+	if !scopeName.MatchString(scope) {
+		return r, fmt.Errorf("ownership: invalid scope name %q", scope)
+	}
+	b, err := os.ReadFile(filepath.Join(a.dir, scope+".json"))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return r, nil
+	case err != nil:
+		return r, fmt.Errorf("ownership: read %s: %w", scope, err)
+	}
+	if err := json.Unmarshal(b, &r); err != nil {
+		return r, fmt.Errorf("ownership: decode %s: %w", scope, err)
+	}
+	return r, nil
 }
 
 func ticket(scope string, r Record) Ticket {

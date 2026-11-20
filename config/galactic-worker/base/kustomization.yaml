@@ -1,0 +1,10 @@
+# The galactic-worker DaemonSet and its allowlist. See ../kustomization.yaml:
+# apply it through a placement profile (tests/manifests/worker-profiles/),
+# composed with the services that call it.
+resources:
+  - daemonset.yaml
+configMapGenerator:
+  - name: galactic-worker-allowlist
+    namespace: galactic-system
+    files:
+      - allowlist.yaml

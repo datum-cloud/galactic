@@ -1,0 +1,77 @@
+# Runs `galactic-worker handback` on the node REPLACE_WITH_NODE_NAME names.
+# It mounts the paths Worker's Local module wrote and the fence it hands the
+# scopes back through, with Worker's own privileges, and exits.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: galactic-worker-handback-REPLACE_WITH_NODE_NAME
+  namespace: galactic-system
+  labels:
+    app.kubernetes.io/name: galactic-worker-handback
+spec:
+  nodeName: REPLACE_WITH_NODE_NAME
+  restartPolicy: Never
+  # The handback reads and writes host state only; it needs no API access.
+  automountServiceAccountToken: false
+  hostNetwork: true
+  # A routed link's pod end is found through the host's /proc.
+  hostPID: true
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: handback
+      image: ghcr.io/datum-cloud/galactic-worker:latest
+      command:
+        - /galactic-worker
+        - handback
+      env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          drop: ["ALL"]
+          add:
+            - NET_ADMIN
+            - BPF
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - name: socket
+          mountPath: /run/galactic-worker
+        - name: state
+          mountPath: /var/lib/galactic-worker
+        - name: ownership
+          mountPath: /var/lib/galactic-edge/ownership
+        - name: bpf-fs
+          mountPath: /sys/fs/bpf
+        - name: tc-locks
+          mountPath: /run/galactic
+  volumes:
+    - name: socket
+      hostPath:
+        path: /run/galactic-worker
+        type: DirectoryOrCreate
+    - name: state
+      hostPath:
+        path: /var/lib/galactic-worker
+        type: DirectoryOrCreate
+    # Directory: a node without the fence has nothing to hand back, and the
+    # pod then fails to start rather than creating an empty fence.
+    - name: ownership
+      hostPath:
+        path: /var/lib/galactic-edge/ownership
+        type: Directory
+    - name: bpf-fs
+      hostPath:
+        path: /sys/fs/bpf
+        type: Directory
+    - name: tc-locks
+      hostPath:
+        path: /run/galactic
+        type: DirectoryOrCreate
