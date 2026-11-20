@@ -23,7 +23,7 @@ It shows that:
 cd deploy/containerlab
 task deploy:ns80                 # if ns80 is not deployed
 task envoy:socket                # or: task envoy:socket -- DIR
-./scripts/envoy-socket-restore.sh
+task verify:ns80 && task verify  # on the same deploy
 ```
 
 `task envoy:socket` builds `galactic-vrf:lab` from this checkout and loads it
@@ -37,17 +37,32 @@ interface names), `pcap/<window>/` and `logs/`. It exits non-zero when any
 check fails.
 
 Before it changes anything it checks that the lab runs, that `ns80` passes
-`verify-ns80.sh`, and that no `ns80-envoy`, Worker, Worker advertisement,
-Local link or rig is left from an earlier run. When a check fails it writes
-the reason to `precondition` and exits 0.
+`verify-ns80.sh`, that this checkout has `galactic-worker handback`, and that
+no `ns80-envoy`, Worker, Worker-owned scope, Worker advertisement, Local link
+or rig is left from an earlier run. When a check fails it writes the reason to
+`precondition` and exits 0. It then records the deployed state it will
+compare with: `ns80`'s Deployments and VPCAttachments, the `galactic-system`
+DaemonSets and the images already on `dfw-worker`.
 
-Worker takes over every VPC scope on `dfw-worker` and never hands one back, so
-the lab needs a fresh deploy afterwards. `scripts/envoy-socket-restore.sh` runs
-`task destroy`, `task deploy`, `task verify:ns80` and `task verify`, and stops
-at the first failure.
+Its cleanup, which always runs, restores that state on the same deploy:
+
+1. It removes the fixture, the backends, any patch to `ns80` and the rig, and
+   scales `ns80`'s guest back.
+2. It stops Worker, hands its VPC scopes back with `galactic-worker handback`,
+   which also removes Local's links, pins and claims, restarts galactic-router
+   on `dfw-worker` so it writes the tenant routes again, and removes Worker's
+   files and the images the run imported from the node.
+3. It checks, in the `restore` rows of `results.json`, that no fixture object,
+   sidecar, backend, Worker process, socket, claim, Local pin, Worker-owned
+   scope, Local link, gateway route or Worker advertisement is left, that the
+   recorded Deployments, VPCAttachments and DaemonSets match their deployed
+   spec, and that every one of them is ready.
+
+`task verify:ns80` and `task verify` then run on that deploy. A fresh deploy
+is not part of the run.
 
 `task deploy:ns80-envoy` runs only the setup and leaves the fixture up;
-`task delete:ns80-envoy` removes it and stops Worker. Neither is part of
+`task delete:ns80-envoy` removes it, stops Worker and hands its scopes back. Neither is part of
 `task deploy` or `task verify`.
 
 ## Remote backends

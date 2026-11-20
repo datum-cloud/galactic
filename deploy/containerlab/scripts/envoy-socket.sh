@@ -37,9 +37,11 @@
 #
 # When a precondition does not hold it changes nothing, writes the reason to
 # OUTDIR/precondition and exits 0. Otherwise it always tries to clean up and
-# exits non-zero when any check failed. Worker never hands a VPC scope back
-# to galactic-router, so after a run restore the lab with
-# envoy-socket-restore.sh.
+# exits non-zero when any check failed. The cleanup hands Worker's scopes
+# back (galactic-worker handback), restarts galactic-router on dfw-worker,
+# removes everything the run created or patched, and checks the lab is back
+# to its deployed state; task verify:ns80 and task verify then run on the same
+# deploy.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -126,13 +128,20 @@ if kd get namespace "${NS}" >/dev/null 2>&1; then
   precondition "${NS} is already deployed; an earlier run did not remove it (task delete:ns80-envoy)"
 fi
 out=$(docker exec "${NODE}" pgrep -f "^${WORKER_BIN}" || true)
-[ -z "${out}" ] || precondition "Worker already runs on ${NODE} (scripts/worker-fabric.sh stop, then envoy-socket-restore.sh)"
+[ -z "${out}" ] || precondition "Worker already runs on ${NODE} (task delete:ns80-envoy stops it and hands its scopes back)"
 out=$(kd -n galactic-system get "${ADV}" -l galactic.datumapis.com/worker-vpc -o name 2>/dev/null || true)
 [ -z "${out}" ] || precondition "Worker BGPAdvertisements are left over: $(tr '\n' ' ' <<<"${out}")"
 out=$(docker exec "${NODE}" ip -j link show | jq -r '.[] | select((.ifalias // "") | startswith("galactic-local:")) | .ifname')
 [ -z "${out}" ] || precondition "Local links are left on ${NODE}: $(tr '\n' ' ' <<<"${out}")"
 if docker inspect "${RIG}" >/dev/null 2>&1; then
   precondition "a rig container ${RIG} already exists; an earlier run did not clean up"
+fi
+# The cleanup returns Worker's scopes with galactic-worker handback (#1462).
+[ -d "${REPO}/internal/worker/handback" ] ||
+  precondition "this checkout has no galactic-worker handback (#1462); merge integration/galactic-worker first"
+out=$("${SCRIPT_DIR}/worker-fabric.sh" scopes "${NODE}" 2>/dev/null || true)
+if grep -q 'galactic-worker:' <<<"${out}"; then
+  precondition "Worker owns VPC scopes on ${NODE} already; hand them back first"
 fi
 fi
 
@@ -256,9 +265,95 @@ cleanup() {
     NODES=${NODE} "${SCRIPT_DIR}/worker-fabric.sh" stop >>"${OUT}/logs/worker.log" 2>&1
     record cleanup "Worker stopped on ${NODE}" yes \
       "$([ -z "$(docker exec "${NODE}" pgrep -f "^${WORKER_BIN}")" ] && echo yes || echo no)"
+    restore_worker_scopes
   fi
   rig_stop
+  restore_checks
   finish
+}
+
+# restore_worker_scopes hands the stopped Worker's scopes back on NODE, which
+# also removes Local's links, filters, pins and claims, restarts
+# galactic-router there so it writes the tenant routes again, and removes
+# the files worker-fabric.sh put on the node.
+restore_worker_scopes() {
+  local pod ds
+  record restore "galactic-worker handback succeeds on ${NODE}" yes \
+    "$(docker exec "${NODE}" "${WORKER_BIN}" handback --node-name "${NODE}" \
+      >"${OUT}/logs/handback.log" 2>&1 && echo yes || echo no)"
+  pod=$(kd -n galactic-system get pods -l app.kubernetes.io/name=galactic-router -o json </dev/null |
+    jq -r --arg n "${NODE}" '.items[] | select(.spec.nodeName == $n) | .metadata.name' | head -1)
+  ds=$(kd -n galactic-system get pod "${pod}" -o json </dev/null |
+    jq -r '.metadata.ownerReferences[]? | select(.kind == "DaemonSet") | .name')
+  if [ -n "${pod}" ] && [ -n "${ds}" ]; then
+    kd -n galactic-system delete pod "${pod}" --wait=true --timeout=120s >/dev/null 2>&1
+    record restore "galactic-router on ${NODE} restarted and Ready" yes \
+      "$(kd -n galactic-system rollout status "daemonset/${ds}" --timeout=300s \
+        >>"${OUT}/logs/router-restart.log" 2>&1 && echo yes || echo no)"
+  else
+    record restore "galactic-router on ${NODE} restarted and Ready" yes "no (pod ${pod:-none}, DaemonSet ${ds:-none})"
+  fi
+  docker exec "${NODE}" rm -rf "$(dirname "${WORKER_BIN}")" /var/log/galactic-worker.log
+}
+
+# oneline joins a value's lines, so a list fits one results.tsv cell.
+oneline() { tr '\n' ' ' <<<"$1" | sed 's/ *$//'; }
+
+# restore_checks asserts the lab is back to its deployed state.
+restore_checks() {
+  local img out p pod d
+  d=${OUT}/after
+  # Images the run imported go again.
+  for img in "${VRF_IMAGE}" "${ENVOY_TAG}"; do
+    if [ -f "${BASE_DIR}/images-present" ] && ! grep -qxF "${img}" "${BASE_DIR}/images-present"; then
+      docker exec "${NODE}" crictl rmi "${img}" >/dev/null 2>&1
+      record restore "image ${img} removed from ${NODE}" yes "$(has_image "${img}" && echo no || echo yes)"
+    fi
+  done
+  # The fixture and the sidecar.
+  record restore "namespace ${NS} is gone" yes "$(kd get namespace "${NS}" >/dev/null 2>&1 && echo no || echo yes)"
+  out=$(kd get clusterrole,clusterrolebinding galactic-vrf -o name 2>/dev/null || true)
+  record restore "the sidecar's ClusterRole and binding are gone" 0 "$(grep -c . <<<"${out}" || true)"
+  out=$(kd get pods -A -o json </dev/null | jq '[.items[].spec.containers[].name | select(. == "galactic-vrf")] | length')
+  record restore "no galactic-vrf sidecar runs in dfw" 0 "${out}"
+  record restore "the fixture's copy on ${DFW} is gone" yes \
+    "$(docker exec "${DFW}" test -e "${FIXTURE_DIR}" && echo no || echo yes)"
+  for p in "${PATHS[@]}"; do
+    pod=$(ready_pod "${BCP[${p}]}" "${BNS[${p}]}" "app=${BAPP[${p}]}" || true)
+    [ -n "${pod}" ] || continue
+    out=$(kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- sh -c "pgrep -f '[e]nvoy-backend.py' || true" </dev/null)
+    record restore "no backend server left in ${p}'s guest" "" "$(oneline "${out}")"
+  done
+  record restore "the rig container is gone" yes "$(docker inspect "${RIG}" >/dev/null 2>&1 && echo no || echo yes)"
+  # Worker and Local on the node.
+  record restore "no Worker process on ${NODE}" "" "$(oneline "$(docker exec "${NODE}" pgrep -f galactic-worker || true)")"
+  out=$("${SCRIPT_DIR}/worker-fabric.sh" scopes "${NODE}" 2>/dev/null || true)
+  printf '%s\n' "${out}" >"${OUT}/logs/scopes-after.txt"
+  record restore "no Worker-owned fence record on ${NODE}" 0 "$(grep -c 'galactic-worker:' <<<"${out}" || true)"
+  record restore "no Worker socket on ${NODE}" yes \
+    "$(docker exec "${NODE}" test -e /run/galactic-worker/worker.sock && echo no || echo yes)"
+  record restore "no Worker claims on ${NODE}" 0 \
+    "$(docker exec "${NODE}" sh -c 'ls -A /var/lib/galactic-worker/claims 2>/dev/null | wc -l')"
+  record restore "no Local pins on ${NODE}" yes \
+    "$(docker exec "${NODE}" test -e /sys/fs/bpf/galactic-local && echo no || echo yes)"
+  out=$(leftovers)
+  record restore "no Local link, gateway route or Worker advertisement" 0 "$(grep -c . <<<"${out}" || true)"
+  # Everything patched or restarted is back to its deployed spec and ready.
+  if [ -d "${BASE_DIR}" ]; then
+    deployed_state "${d}"
+    for f in ns80-deployments ns80-vpcattachments galactic-system-daemonsets; do
+      record restore "${f} match the deployed spec" yes \
+        "$(diff -u "${BASE_DIR}/${f}.json" "${d}/${f}.json" >"${OUT}/logs/diff-${f}.txt" && echo yes || echo no)"
+    done
+  else
+    record restore "deployed spec comparison (a down run has no baseline)" - skipped
+  fi
+  out=$(kd -n ns80 get deployments -o json </dev/null |
+    jq -r '.items[] | select((.status.availableReplicas // 0) != .spec.replicas) | .metadata.name')
+  record restore "every ns80 Deployment is available" "" "$(oneline "${out}")"
+  out=$(kd -n galactic-system get daemonsets -o json </dev/null |
+    jq -r '.items[] | select(.status.numberReady != .status.desiredNumberScheduled) | .metadata.name')
+  record restore "every galactic-system DaemonSet in dfw is ready" "" "$(oneline "${out}")"
 }
 
 finish() {
@@ -269,9 +364,33 @@ finish() {
     "${OUT}/results.json") failed (REMOTE=${REMOTE}); results in ${OUT}/results.json ==="
   jq -r '.[] | select(.result == "fail") | "FAIL \(.scenario): \(.check): want \(.expected), got \(.observed)"' \
     "${OUT}/results.json"
-  echo "Worker has taken VPC scopes on ${NODE}; restore the lab with scripts/envoy-socket-restore.sh"
+  echo "Next, on this deploy: lab-bgp-rebind (#1464), task verify:ns80 and task verify"
   exit "${FAILED}"
 }
+# Baseline ----------------------------------------------------------------------
+
+# What the cleanup compares the lab with: the specs of everything the case
+# patches or restarts, and the images dfw-worker already had.
+BASE_DIR=${OUT}/baseline
+deployed_state() {
+  local d="$1"
+  mkdir -p "${d}"
+  kd -n ns80 get deployments -o json </dev/null | jq -S '[.items[] | {name: .metadata.name, spec: .spec}]' \
+    >"${d}/ns80-deployments.json"
+  kd -n ns80 get vpcattachments -o json </dev/null | jq -S '[.items[] | {name: .metadata.name, spec: .spec,
+    annotations: (.metadata.annotations // {} | del(.["kubectl.kubernetes.io/last-applied-configuration"]))}]' \
+    >"${d}/ns80-vpcattachments.json"
+  kd -n galactic-system get daemonsets -o json </dev/null |
+    jq -S '[.items[] | {name: .metadata.name, template: .spec.template}]' >"${d}/galactic-system-daemonsets.json"
+}
+has_image() { docker exec "${NODE}" crictl inspecti "$1" >/dev/null 2>&1; }
+if [ "${MODE}" != down ]; then
+  deployed_state "${BASE_DIR}"
+  : >"${BASE_DIR}/images-present"
+  for img in "${VRF_IMAGE}" "${ENVOY_TAG}"; do
+    has_image "${img}" && echo "${img}" >>"${BASE_DIR}/images-present"
+  done
+fi
 if [ "${MODE}" = down ]; then
   BACKENDS_STARTED=1
   if [ -n "$(docker exec "${NODE}" pgrep -f "^${WORKER_BIN}" || true)" ]; then
