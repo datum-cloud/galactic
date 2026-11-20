@@ -216,7 +216,7 @@ func managedTransport(t *testing.T, protocol string, server *connectip.Server, h
 }
 
 func managedRequest(t *testing.T, transport http.RoundTripper, protocol, hostname string,
-	credential, selector string, expectedStatus int) {
+	credential, selector string, expectedStatus int, authorities ...string) {
 	t.Helper()
 	reader, writer := io.Pipe()
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
@@ -226,6 +226,9 @@ func managedRequest(t *testing.T, transport http.RoundTripper, protocol, hostnam
 		"https://"+hostname+connectip.TemplatePath, reader)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(authorities) != 0 {
+		request.Host = authorities[0]
 	}
 	if protocol == "h3" {
 		request.Proto = "connect-ip"
@@ -277,6 +280,131 @@ func requireManagedLive(t *testing.T, session *managedPacketSession) {
 	case <-session.closed:
 		t.Fatal("sibling VPC stream was interrupted")
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func sharedHostnameTransport(t *testing.T, base http.RoundTripper, hostname string,
+	roots *x509.CertPool) http.RoundTripper {
+	t.Helper()
+	config := &tls.Config{RootCAs: roots, ServerName: hostname, MinVersion: tls.VersionTLS13}
+	if transport, ok := base.(*http3.Transport); ok {
+		shared := &http3.Transport{TLSClientConfig: config, EnableDatagrams: true,
+			QUICConfig: &quic.Config{EnableDatagrams: true}, Dial: transport.Dial}
+		t.Cleanup(func() { _ = shared.Close() })
+		return shared
+	}
+	transport := base.(*http2.Transport)                                                          //nolint:staticcheck
+	shared := &http2.Transport{TLSClientConfig: config, DialTLSContext: transport.DialTLSContext} //nolint:staticcheck
+	return shared
+}
+
+func TestLegacyManagedCoexistenceAuthority(t *testing.T) {
+	for _, protocol := range []string{"h3", "h2"} {
+		t.Run(protocol, func(t *testing.T) {
+			if protocol == "h2" && !connectip.ExtendedConnectEnabled() {
+				t.Skip("start tests with GODEBUG=http2xconnect=1")
+			}
+			fixture := startFixture(t)
+			endpoint := scopedEndpoint()
+			secret := managedCertificate(t, endpoint)
+			legacyEndpoint := scopedEndpoint()
+			legacyEndpoint.Spec.Hostname = "legacy.connect.example"
+			legacySecret := managedCertificate(t, legacyEndpoint)
+			legacyCertificate, err := tls.X509KeyPair(legacySecret.Data[corev1.TLSCertKey],
+				legacySecret.Data[corev1.TLSPrivateKeyKey])
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry, err := endpoints.NewRegistryWithLegacy(legacyEndpoint.Spec.Hostname,
+				func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &legacyCertificate, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			applyManagedEndpoint(t, fixture, registry, endpoint, secret)
+			ref := &galacticv1alpha1.MASQUEEndpointReference{Namespace: endpoint.Namespace, Name: endpoint.Name}
+			mint := func(endpointRef *galacticv1alpha1.MASQUEEndpointReference) Issued {
+				issued, err := fixture.grants.Create(t.Context(), CreateRequest{EndpointRef: endpointRef,
+					VPC: VPCRef{Namespace: fixture.vpc.Namespace, Name: fixture.vpc.Name}, Lifetime: time.Hour,
+					Routes: []netip.Prefix{netip.MustParsePrefix("fd20:a1b:2c3d::/48")}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return issued
+			}
+			legacyGrant, managedGrant := mint(nil), mint(ref)
+			backend := &managedBackend{opened: make(chan *managedPacketSession, 10)}
+			server, err := connectip.NewServer(connectip.Config{ResolveEndpoint: registry.Resolve,
+				TLSConfig: &tls.Config{GetCertificate: registry.GetCertificate, MinVersion: tls.VersionTLS13,
+					SessionTicketsDisabled: true}, Admission: &managedAdmission{fixture: fixture}, Backend: backend})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.Close() })
+			roots := x509.NewCertPool()
+			roots.AppendCertsFromPEM(secret.Data[corev1.TLSCertKey])
+			roots.AppendCertsFromPEM(legacySecret.Data[corev1.TLSCertKey])
+			var connections atomic.Int64
+			managed := managedTransport(t, protocol, server, endpoint.Spec.Hostname, roots, &connections)
+			legacy := sharedHostnameTransport(t, managed, legacyEndpoint.Spec.Hostname, roots)
+			open := func(transport http.RoundTripper, hostname string, grant Issued) *managedPacketSession {
+				managedRequest(t, transport, protocol, hostname, grant.Credential, grant.VPC, http.StatusOK)
+				return nextManagedSession(t, backend)
+			}
+			legacySession := open(legacy, legacyEndpoint.Spec.Hostname, legacyGrant)
+			managedSession := open(managed, endpoint.Spec.Hostname, managedGrant)
+			managedRequest(t, legacy, protocol, legacyEndpoint.Spec.Hostname,
+				managedGrant.Credential, managedGrant.VPC, http.StatusForbidden)
+			managedRequest(t, managed, protocol, endpoint.Spec.Hostname,
+				legacyGrant.Credential, legacyGrant.VPC, http.StatusForbidden)
+			managedRequest(t, legacy, protocol, legacyEndpoint.Spec.Hostname,
+				managedGrant.Credential, managedGrant.VPC, http.StatusMisdirectedRequest, endpoint.Spec.Hostname)
+			managedRequest(t, managed, protocol, endpoint.Spec.Hostname,
+				legacyGrant.Credential, legacyGrant.VPC, http.StatusMisdirectedRequest, legacyEndpoint.Spec.Hostname)
+			managedRequest(t, legacy, protocol, legacyEndpoint.Spec.Hostname,
+				legacyGrant.Credential, legacyGrant.VPC, http.StatusMisdirectedRequest, "unknown.connect.example")
+			if connections.Load() != 2 {
+				t.Fatalf("want one connection per SNI, got %d", connections.Load())
+			}
+			unknown := sharedHostnameTransport(t, managed, "unknown.connect.example", roots)
+			switch transport := unknown.(type) {
+			case *http3.Transport:
+				transport.TLSClientConfig.InsecureSkipVerify = true
+			case *http2.Transport: //nolint:staticcheck
+				transport.TLSClientConfig.InsecureSkipVerify = true //nolint:staticcheck
+			}
+			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://unknown.connect.example/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response, err := unknown.RoundTrip(request); err == nil {
+				_ = response.Body.Close()
+				t.Fatal("unknown SNI completed TLS")
+			}
+			endpoint.Spec.Revision++
+			secret = managedCertificate(t, endpoint)
+			applyManagedEndpoint(t, fixture, registry, endpoint, secret)
+			requireManagedClosed(t, managedSession)
+			requireManagedLive(t, legacySession)
+			managedSession = open(managed, endpoint.Spec.Hostname, mint(ref))
+			if err := fixture.grants.Disable(t.Context(), legacyGrant.Connector); err != nil {
+				t.Fatal(err)
+			}
+			requireManagedClosed(t, legacySession)
+			requireManagedLive(t, managedSession)
+			legacyGrant = mint(nil)
+			legacySession = open(legacy, legacyEndpoint.Spec.Hostname, legacyGrant)
+			endpoint.Spec.Revision++
+			endpoint.Spec.Enabled = false
+			applyManagedEndpoint(t, fixture, registry, endpoint, secret)
+			requireManagedClosed(t, managedSession)
+			requireManagedLive(t, legacySession)
+			managedRequest(t, managed, protocol, endpoint.Spec.Hostname,
+				legacyGrant.Credential, legacyGrant.VPC, http.StatusMisdirectedRequest)
+			if err := fixture.grants.Disable(t.Context(), legacyGrant.Connector); err != nil {
+				t.Fatal(err)
+			}
+			requireManagedClosed(t, legacySession)
+		})
 	}
 }
 

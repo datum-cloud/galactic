@@ -8,7 +8,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,14 +37,44 @@ type entry struct {
 }
 
 type Registry struct {
-	mutation sync.Mutex
-	mu       sync.Mutex
-	entries  map[string]*entry
-	now      func() time.Time
+	mutation          sync.Mutex
+	mu                sync.Mutex
+	entries           map[string]*entry
+	now               func() time.Time
+	legacyAuthority   string
+	legacyHostname    string
+	legacyCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 }
 
 func NewRegistry() *Registry {
 	return &Registry{entries: map[string]*entry{}, now: time.Now}
+}
+
+func NewRegistryWithLegacy(authority string,
+	certificateSource func(*tls.ClientHelloInfo) (*tls.Certificate, error)) (*Registry, error) {
+	hostname := authority
+	if strings.Contains(authority, ":") {
+		var port string
+		var err error
+		hostname, port, err = net.SplitHostPort(authority)
+		if err != nil {
+			return nil, errors.New("legacy authority must be a DNS hostname with optional port")
+		}
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 1 || portNumber > 65535 {
+			return nil, errors.New("invalid legacy authority port")
+		}
+	}
+	if hostname != strings.ToLower(hostname) || len(validation.IsDNS1123Subdomain(hostname)) != 0 ||
+		!strings.Contains(hostname, ".") || certificateSource == nil {
+		return nil, errors.New("legacy authority requires a canonical DNS hostname and certificate source")
+	}
+	registry := NewRegistry()
+	registry.legacyAuthority, registry.legacyHostname, registry.legacyCertificate = authority, hostname, certificateSource
+	if _, err := registry.GetCertificate(&tls.ClientHelloInfo{ServerName: hostname}); err != nil {
+		return nil, err
+	}
+	return registry, nil
 }
 
 func ValidateSpec(spec galacticv1alpha1.MASQUEEndpointSpec) error {
@@ -86,6 +118,9 @@ func certificate(spec galacticv1alpha1.MASQUEEndpointSpec, secret *corev1.Secret
 
 func (registry *Registry) Apply(endpoint *galacticv1alpha1.MASQUEEndpoint, secret *corev1.Secret) error {
 	spec := endpoint.Spec
+	if spec.Hostname == registry.legacyHostname {
+		return errors.New("hostname is reserved for the configured legacy authority")
+	}
 	ref := galacticv1alpha1.MASQUEEndpointReference{Namespace: endpoint.Namespace, Name: endpoint.Name}
 	if ref.Namespace == "" || ref.Name == "" {
 		return errors.New("named endpoint is required")
@@ -177,6 +212,21 @@ func (registry *Registry) valid(current *entry) bool {
 func (registry *Registry) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.legacyCertificate != nil && hello.ServerName == registry.legacyHostname {
+		pair, err := registry.legacyCertificate(hello)
+		if err != nil {
+			return nil, err
+		}
+		if pair == nil || len(pair.Certificate) == 0 {
+			return nil, errors.New("legacy certificate unavailable")
+		}
+		leaf, err := x509.ParseCertificate(pair.Certificate[0])
+		if err != nil || leaf.VerifyHostname(registry.legacyHostname) != nil ||
+			registry.now().Before(leaf.NotBefore) || !registry.now().Before(leaf.NotAfter) {
+			return nil, errors.New("legacy certificate name or validity mismatch")
+		}
+		return pair, nil
+	}
 	current := registry.entries[hello.ServerName]
 	if !registry.valid(current) {
 		return nil, errors.New("unknown or unavailable SNI")
@@ -187,6 +237,10 @@ func (registry *Registry) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certi
 func (registry *Registry) Resolve(request *http.Request) (context.Context, func(), error) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	if registry.legacyCertificate != nil && request.Host == registry.legacyAuthority && request.TLS != nil &&
+		request.TLS.ServerName == registry.legacyHostname {
+		return request.Context(), func() {}, nil
+	}
 	hostname := strings.TrimSuffix(request.Host, ":443")
 	current := registry.entries[hostname]
 	if !registry.valid(current) || request.TLS == nil || request.TLS.ServerName != hostname {

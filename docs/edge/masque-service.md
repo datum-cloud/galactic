@@ -61,7 +61,7 @@ Each cell/metro has a separate control plane. Connect retains placement in its
 service-provider Project, targets exactly one selected cell through Karmada,
 and uses that control plane's reader and grant credentials. Registration and
 its retained fence contain no copied cell/metro fields. The provider has no
-`--cell` flag. The grant authority retains `--cell`, and grant requests and
+`--cell` flag. The grant authority retains `--cell`, and configured grant issuers and
 per-VPC/cell ledgers retain their existing cell scope; a grant from another
 cell remains unauthorized.
 
@@ -87,6 +87,43 @@ receive them. Delivery validates issuance ownership upstream; the runtime
 checks the named registration certificate reference, exact fingerprint, matching private
 key, SAN hostname and validity. Runtime trusts the authorized delivery writer;
 external probes must verify public WebPKI trust and packet reachability.
+
+### Bounded legacy coexistence
+
+`--managed-endpoints` alone is exclusive: it replaces the file certificate and
+legacy authority with the registration registry. Do not enable it alone while
+legacy clients still need the existing authority and nil-endpoint grants.
+Explicit `--legacy-coexistence` requires `--managed-endpoints` and the existing
+`--authority`. Keep that authority, file certificate/key and volume mount intact.
+The same provider and shared listeners then serve both paths without additional
+capacity or per-gateway deployments.
+
+Only the exact configured legacy HTTP authority (including any explicit port)
+with its matching lowercase DNS SNI can use the legacy path. Its file certificate
+must be available, valid and cover that hostname; it is reloaded on change.
+Only grants with no endpoint reference authorize there. Managed grants cannot
+be replayed there, and legacy grants cannot authorize a managed hostname.
+The legacy hostname is reserved against managed registration. Unknown, stale,
+disabled or mismatched managed names never fall back to the legacy certificate
+or authorization path; unknown SNI fails TLS even if a client skips verification.
+Every stream is checked independently, including reused H3/H2 connections.
+
+Managed certificate replacement and endpoint disable drain only that endpoint's
+streams; legacy streams remain independent and retain ordinary grant revocation.
+The legacy authority is an explicit operator configuration, not a MASQUEEndpoint,
+and has no managed applied-status acknowledgment. Removing the opt-in requires
+first migrating or retiring its clients, not editing grants to bypass scope.
+
+Stage schema/RBAC and compatible authority/provider binaries together. A binary
+upgrade without managed mode keeps the legacy listener behavior but does not
+prove continuity: rolling a single replica interrupts its current connections.
+Before enabling coexistence, verify existing clients reconnect and forward with
+their retained grants and /96 allocations, then exercise both transport paths,
+cross-name denials, managed rotation/disable and legacy grant revocation on the
+same provider. Never reset ledgers/fences or rewrite legacy grants as managed.
+`TestLegacyManagedCoexistenceAuthority` covers shared-listener H3/H2 behavior with
+real envtest authorization and a fake packet backend. It does not establish
+live route/VRF correctness or certify a particular staging client's continuity.
 
 ### Activation, readiness and revocation
 
@@ -227,7 +264,7 @@ With `setup-envtest` installed, run:
 CI=true GODEBUG=http2xconnect=1 \
   KUBEBUILDER_ASSETS="$(setup-envtest use 1.37.0 -p path)" \
   go test -race ./internal/edge/masque/authority \
-  -run '^TestManagedEndpointMultiplexedAuthority$' -count=1 -v
+  -run '^(TestManagedEndpointMultiplexedAuthority|TestLegacyManagedCoexistenceAuthority)$' -count=1 -v
 ```
 
 Alternatively set `KUBEBUILDER_ASSETS` to an installed Kubernetes envtest

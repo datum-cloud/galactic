@@ -49,7 +49,8 @@ const DefaultShutdownTimeout = 20 * time.Second
 
 // Config configures Run.
 type Config struct {
-	ManagedEndpoints bool
+	ManagedEndpoints  bool
+	LegacyCoexistence bool
 	// Client reaches the cell's API server as the pod's ServiceAccount.
 	Client client.Client
 	// Provider is the EdgeProvider this pod runs as.
@@ -79,6 +80,20 @@ type Config struct {
 	Log *slog.Logger
 }
 
+func validateConfig(cfg Config) error {
+	switch {
+	case cfg.LegacyCoexistence && (!cfg.ManagedEndpoints || cfg.Authority == "" || cfg.GetCertificate == nil):
+		return errors.New("legacy coexistence requires managed endpoints, authority and file certificate")
+	case cfg.Client == nil || cfg.Authorizer == nil || !cfg.ManagedEndpoints && cfg.GetCertificate == nil:
+		return errors.New("client, authorizer and certificate source are required")
+	case cfg.Listen == "":
+		return errors.New("listen address is required")
+	case cfg.ListenTCP != "" && !connectip.ExtendedConnectEnabled():
+		return connectip.ErrExtendedConnectDisabled
+	}
+	return nil
+}
+
 // Run serves until ctx is done or a component fails. It holds the pod's
 // EdgeInstance lease through the adapter, serves CONNECT-IP over HTTP/3 on
 // Listen and over HTTP/2 on ListenTCP, and reports ready on /readyz while
@@ -86,13 +101,8 @@ type Config struct {
 // On return the server has ended every session, then the adapter released
 // the routes, deleted the attachments and released the lease.
 func Run(ctx context.Context, cfg Config) error {
-	switch {
-	case cfg.Client == nil || cfg.Authorizer == nil || !cfg.ManagedEndpoints && cfg.GetCertificate == nil:
-		return errors.New("client, authorizer and certificate source are required")
-	case cfg.Listen == "":
-		return errors.New("listen address is required")
-	case cfg.ListenTCP != "" && !connectip.ExtendedConnectEnabled():
-		return connectip.ErrExtendedConnectDisabled
+	if err := validateConfig(cfg); err != nil {
+		return err
 	}
 	log := cfg.Log
 	if log == nil {
@@ -119,6 +129,12 @@ func Run(ctx context.Context, cfg Config) error {
 	var endpointController *endpoints.Controller
 	if cfg.ManagedEndpoints {
 		registry := endpoints.NewRegistry()
+		if cfg.LegacyCoexistence {
+			registry, err = endpoints.NewRegistryWithLegacy(cfg.Authority, cfg.GetCertificate)
+			if err != nil {
+				return err
+			}
+		}
 		serverConfig.TLSConfig.SessionTicketsDisabled = true
 		serverConfig.TLSConfig.GetCertificate = registry.GetCertificate
 		serverConfig.ResolveEndpoint = registry.Resolve

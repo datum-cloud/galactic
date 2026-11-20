@@ -32,6 +32,7 @@ import (
 
 const testNamespace = "masque-system"
 const testProvider = "masque"
+const unknownHostname = "unknown.connect.example"
 const testInstanceName = "ei-pod"
 
 func testEndpoint(t *testing.T, identity string, expires time.Time) (*galacticv1alpha1.MASQUEEndpoint, *corev1.Secret) {
@@ -149,7 +150,7 @@ func TestRegistryRejectsAuthorityAndBadCertificates(t *testing.T) {
 		release()
 	}
 	for _, mutate := range []func(*http.Request){
-		func(req *http.Request) { req.Host = "unknown.connect.example" },
+		func(req *http.Request) { req.Host = unknownHostname },
 		func(req *http.Request) { req.TLS.ServerName = "other.connect.example" },
 		func(req *http.Request) { req.Host += ":8443" },
 		func(req *http.Request) { req.TLS = nil },
@@ -407,6 +408,74 @@ func TestControllerDuplicateRegistrationsFailClosed(t *testing.T) {
 		if _, ok := controller.Registry.Current(endpoint.Spec.Hostname); ok {
 			t.Fatal("ambiguous registration remained active")
 		}
+	}
+}
+
+func TestLegacyRegistryIsNotAFallback(t *testing.T) {
+	legacy, secret := testEndpoint(t, "legacy", time.Now().Add(time.Hour))
+	pair, err := tls.X509KeyPair(secret.Data[corev1.TLSCertKey], secret.Data[corev1.TLSPrivateKeyKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &pair, nil }
+	for _, invalid := range []string{"", "Legacy.connect.example", "legacy.connect.example.",
+		"legacy.connect.example:0", "legacy.connect.example:wrong", "https://legacy.connect.example"} {
+		if _, err := NewRegistryWithLegacy(invalid, source); err == nil {
+			t.Fatalf("accepted %q", invalid)
+		}
+	}
+	registry, err := NewRegistryWithLegacy(legacy.Spec.Hostname+":8443", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Apply(legacy, secret); err == nil {
+		t.Fatal("managed registration claimed legacy hostname")
+	}
+	for _, hostname := range []string{"", unknownHostname, "Legacy.connect.example"} {
+		if _, err := registry.GetCertificate(&tls.ClientHelloInfo{ServerName: hostname}); err == nil {
+			t.Fatalf("legacy certificate used for %q", hostname)
+		}
+	}
+	authorities := []string{legacy.Spec.Hostname + ":8443", legacy.Spec.Hostname, legacy.Spec.Hostname + ":443"}
+	for _, authority := range authorities {
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodConnect,
+			"https://"+authority+connectip.TemplatePath, nil)
+		request.Host = authority
+		request.TLS = &tls.ConnectionState{ServerName: legacy.Spec.Hostname}
+		ctx, release, err := registry.Resolve(request)
+		if authority != registry.legacyAuthority {
+			if err == nil {
+				release()
+				t.Fatal("nonconfigured legacy authority allowed")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if connectip.EndpointFromContext(ctx) != nil {
+			t.Fatal("legacy request acquired managed identity")
+		}
+		release()
+		request.TLS.ServerName = unknownHostname
+		if _, _, err := registry.Resolve(request); err == nil {
+			t.Fatal("legacy SNI mismatch accepted")
+		}
+	}
+	managed, managedSecret := testEndpoint(t, "managed", time.Now().Add(time.Hour))
+	if err := registry.Apply(managed, managedSecret); err != nil {
+		t.Fatal(err)
+	}
+	registry.now = func() time.Time { return time.Now().Add(MaxStaleness + time.Second) }
+	if _, err := registry.GetCertificate(&tls.ClientHelloInfo{ServerName: managed.Spec.Hostname}); err == nil {
+		t.Fatal("stale managed certificate fell back to legacy")
+	}
+	if _, err := registry.GetCertificate(&tls.ClientHelloInfo{ServerName: legacy.Spec.Hostname}); err != nil {
+		t.Fatal("managed expiry interrupted legacy certificate", err)
+	}
+	registry.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	if _, err := registry.GetCertificate(&tls.ClientHelloInfo{ServerName: legacy.Spec.Hostname}); err == nil {
+		t.Fatal("expired legacy certificate accepted")
 	}
 }
 

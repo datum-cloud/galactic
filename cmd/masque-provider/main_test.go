@@ -24,9 +24,11 @@ func TestMetricsScrape(t *testing.T) {
 	instrumenttest.Lint(t)
 }
 
+const testProviderName = "masque"
+
 func TestFlagsRequireGrantAuthority(t *testing.T) {
 	// No spare capacity, so each case's append copies base.
-	base := []string{"--provider", "masque", "--authority", "masque.example.test"}
+	base := []string{"--provider", testProviderName, "--authority", "masque.example.test"}
 	tests := []struct {
 		name string
 		args []string
@@ -53,7 +55,7 @@ func TestFlagsRequireGrantAuthority(t *testing.T) {
 }
 
 func TestManagedFlagsDoNotRequirePlacement(t *testing.T) {
-	options := &options{managedEndpoints: true, provider: "masque",
+	options := &options{managedEndpoints: true, provider: testProviderName,
 		authorityURL: "https://authority.example.test", authorityCA: "ca", tokenFile: "token",
 		certFile: "unused", keyFile: "unused"}
 	if err := options.validate(); err != nil {
@@ -61,5 +63,22 @@ func TestManagedFlagsDoNotRequirePlacement(t *testing.T) {
 	}
 	if newRootCommand().Flags().Lookup("cell") != nil {
 		t.Fatal("provider exposes redundant placement flag")
+	}
+}
+
+func TestLegacyCoexistenceRequiresExplicitAuthority(t *testing.T) {
+	options := &options{legacyCoexistence: true, provider: testProviderName,
+		authorityURL: "https://authority.example.test", authorityCA: "ca", tokenFile: "token",
+		certFile: "cert", keyFile: "key"}
+	if err := options.validate(); err == nil {
+		t.Fatal("coexistence without managed mode allowed")
+	}
+	options.managedEndpoints = true
+	if err := options.validate(); err == nil {
+		t.Fatal("coexistence without legacy authority allowed")
+	}
+	options.authority = "legacy.example.test"
+	if err := options.validate(); err != nil {
+		t.Fatal(err)
 	}
 }
