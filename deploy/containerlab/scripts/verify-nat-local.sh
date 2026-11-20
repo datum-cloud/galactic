@@ -114,11 +114,50 @@ json.dump(d, sys.stdout)' "${STATE}/nat-ds.json" | kci replace -f - >/dev/null
   for f in guests nad bindings vpcattachments; do
     kci delete --ignore-not-found -f - <"${FIXTURE}/${f}.yaml" >/dev/null
   done
-  NODES="${EDGE}" "${SCRIPT_DIR}/worker-fabric.sh" stop || true
-  kc -n galactic-system rollout status daemonset/galactic-cni --timeout=900s >/dev/null
   kc -n galactic-system rollout status daemonset/galactic-nat --timeout=600s >/dev/null
+  teardown_local || rc=1
+  kc -n galactic-system rollout status daemonset/galactic-cni --timeout=900s >/dev/null
   rm -rf "${STATE}"
   exit "${rc}"
+}
+
+# teardown_local removes what Worker and galactic-nat's Local integration
+# left on dfw-worker2, in the order that lets each owner remove its own:
+# with galactic-nat no longer renewing its Worker session, Worker withdraws
+# its claims once the session lease expires (120 s), and the Local module
+# removes the pairs, its tc filters and the egress_local_shard rows. Only
+# then is Worker stopped. galactic-nat leaves its pinned NAT-end links and
+# pair rows behind when its Worker integration is switched off, and Worker
+# leaves Local's pinned maps, so those are removed here. Worker keeps the
+# node's VPC scopes it took over; that is reported, not undone.
+teardown_local() {
+  local deadline=$((SECONDS + 300)) pid
+  echo "   waiting for Worker to withdraw galactic-nat's claims (session lease 120 s)"
+  until [ -z "$(docker exec "${EDGE}" ip -o link show type veth | grep 'alias galactic-local:' || true)" ]; do
+    if [ ${SECONDS} -ge ${deadline} ]; then
+      echo "FAIL: Local's pairs are still on ${EDGE} after 300s" >&2
+      return 1
+    fi
+    sleep 5
+  done
+  echo "   Local's pairs are gone"
+  NODES="${EDGE}" "${SCRIPT_DIR}/worker-fabric.sh" stop || return 1
+  pid=$(docker inspect -f '{{.State.Pid}}' "${EDGE}")
+  docker exec "${EDGE}" sh -c 'rm -f /sys/fs/bpf/galactic-nat/links/local-*' || return 1
+  local m keys
+  for m in nat_local_pair nat_local_return nat_vlan_egress; do
+    keys=$(sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic-nat/${m}" 2>/dev/null |
+      python3 -c 'import json,sys
+for e in json.load(sys.stdin):
+    print(" ".join(b[2:] for b in e["key"]))') || return 1
+    while read -r k; do
+      [ -n "${k}" ] || continue
+      # shellcheck disable=SC2086 # the key is space-separated hex bytes
+      sudo -n bpftool map delete pinned "/proc/${pid}/root/sys/fs/bpf/galactic-nat/${m}" key hex ${k} || return 1
+    done <<<"${keys}"
+  done
+  docker exec "${EDGE}" rm -rf /sys/fs/bpf/galactic-local || return 1
+  echo "   removed galactic-nat's pinned local links and pair rows, and Local's pin directory"
 }
 trap cleanup EXIT
 
