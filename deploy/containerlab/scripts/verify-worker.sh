@@ -249,6 +249,8 @@ cleanup() {
   status=$?
   set +e
   log "cleanup"
+  kc -n "${NS}" logs -l app.kubernetes.io/name=galactic-worker --all-containers --prefix --tail=-1 \
+    >"${OUT}/worker-logs.txt" 2>&1
   "${LAB}" client-down "${SITE}" >>"${OUT}/steps.log" 2>&1
   kc uncordon "${DRAIN_NODE}" >/dev/null 2>&1
   kc -n ns80 scale deployment guest-a2 --replicas=1 >/dev/null 2>&1
@@ -297,6 +299,18 @@ fi
 REMOTE_LOCATOR="${block%::/48}:$(printf '%x' "${nodeid}")::/64"
 log "remote node ${REMOTE_NODE}, locator ${REMOTE_LOCATOR}"
 
+# A galactic-router restart, such as the previous run's uninstall, leaves a
+# node without tenant routes until its BGP sessions come back. Wait for them.
+log "waiting for every node's egress_route_table rows"
+for _ in $(seq 30); do
+  empty=""
+  for node in "${NODES[@]}"; do
+    rows=$(snapshot "${node}" | grep -c '^egress_route_table ' || true)
+    [ "${rows}" -gt 0 ] || empty="${empty} ${node}"
+  done
+  [ -z "${empty}" ] && break
+  sleep 10
+done
 log "baseline snapshot"
 snap_all baseline
 for node in "${NODES[@]}"; do
@@ -329,7 +343,8 @@ if [ "${caps}" != "0000008000001000" ]; then
 fi
 SA=system:serviceaccount:${NS}:galactic-worker
 while read -r want verb resource ns; do
-  got=$(kc auth can-i --as="${SA}" "${verb}" "${resource}" ${ns:+-n "${ns}"} 2>/dev/null || true)
+  # </dev/null: kc runs docker exec -i, which would read the rest of this list.
+  got=$(kc auth can-i --as="${SA}" "${verb}" "${resource}" ${ns:+-n "${ns}"} </dev/null 2>/dev/null || true)
   echo "${verb} ${resource} ${ns:-cluster}: ${got}" >>"${OUT}/rbac.txt"
   [ "${got}" = "${want}" ] || fail "privileges: ${SA} can-i ${verb} ${resource} ${ns}: ${got}, want ${want}"
 done <<'EOF'
@@ -345,7 +360,12 @@ no create bgpadvertisements.galactic.datumapis.com galactic-system
 EOF
 
 log "claims"
-"${LAB}" client-up "${SITE}" "${CLAIM_NODE}" >>"${OUT}/steps.log"
+if ! "${LAB}" client-up "${SITE}" "${CLAIM_NODE}" >>"${OUT}/steps.log" 2>&1; then
+  kc -n "${NS}" describe pod "worker-lab-client-${CLAIM_NODE}" >"${OUT}/client-describe.txt" 2>&1
+  kc -n "${NS}" logs "worker-lab-client-${CLAIM_NODE}" --all-containers >"${OUT}/client-logs.txt" 2>&1
+  fail "claims: the claim client on ${CLAIM_NODE} did not become ready (client-describe.txt, client-logs.txt)"
+  exit 1
+fi
 ATT_UID=$(uid_of "${CLAIM_NS}" "${CLAIM_ATT}")
 REMOTE_UID=$(uid_of ns80 vpc-a2)
 if [ "${PROFILE}" = dedicated ]; then
@@ -453,6 +473,8 @@ if [ "${PROFILE}" = combined ]; then
   VPC=81 release "${CLAIM_NODE}" "${ROUTED_UID}" routed_link "${ROUTED_UID}" >/dev/null || fail "routed release failed"
 fi
 "${LAB}" client-down "${SITE}" >>"${OUT}/steps.log"
+kc -n "${NS}" logs -l app.kubernetes.io/name=galactic-worker --all-containers --prefix --tail=-1 \
+  >"${OUT}/worker-logs.txt" 2>&1
 "${LAB}" uninstall "${SITE}" 2>&1 | tee "${OUT}/uninstall.log"
 for node in "${NODES[@]}"; do
   docker exec "${node}" sh -c 'cat /var/lib/galactic-edge/ownership/*.json 2>/dev/null || true' >"${OUT}/fence-${node}.json"
@@ -467,7 +489,23 @@ for node in "${NODES[@]}"; do
     fail "uninstall: Local pins remain on ${node}"
   fi
 done
-sleep 20
-snap_all uninstalled
+# galactic-router restarted on every node in the uninstall and writes its
+# tenant routes again as its BGP sessions come back, so the uninstalled
+# state is compared once it settles, within 5 minutes.
+settled=""
+start=$(date +%s)
+for _ in $(seq 30); do
+  snap_all uninstalled
+  same=1
+  for node in "${NODES[@]}"; do
+    cmp -s "${OUT}/baseline/${node}.txt" "${OUT}/uninstalled/${node}.txt" || same=0
+  done
+  if [ "${same}" = 1 ]; then
+    settled=$(($(date +%s) - start))
+    break
+  fi
+  sleep 10
+done
+log "uninstalled state ${settled:+settled after ${settled}s}${settled:-did not settle in 300s}"
 compare uninstalled
 log "done"
