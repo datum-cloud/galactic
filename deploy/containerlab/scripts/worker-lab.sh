@@ -97,6 +97,9 @@ uninstall() {
   for node in $(nodes "${site}"); do
     echo "--- handback on ${node} ---"
     handback "${site}" "${node}"
+    # When ROUTER_RESTARTS names a file, record when this node's router
+    # restarts, so a check can measure how long its tenant routes are gone.
+    [ -n "${ROUTER_RESTARTS:-}" ] && echo "${node} $(date +%s)" >>"${ROUTER_RESTARTS}"
     kc "${cp}" -n "${NS}" delete pod -l "${ROUTER_LABEL}" --field-selector "spec.nodeName=${node}" --wait=true
   done
   kc "${cp}" -n "${NS}" rollout status ds/galactic-router --timeout=300s
