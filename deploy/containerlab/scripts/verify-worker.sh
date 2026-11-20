@@ -363,9 +363,16 @@ for node in "${NODES[@]}"; do
   docker exec "${node}" grep -E '^Cap(Prm|Eff|Bnd)' "/proc/${pid}/status" | sed "s/^/${node} /" >>"${OUT}/capabilities.txt"
 done
 caps=$(awk '/CapEff/ {print $3}' "${OUT}/capabilities.txt" | sort -u)
-# NET_ADMIN is bit 12, SYS_PTRACE 19, SYS_ADMIN 21 and BPF 39.
-if [ "${caps}" != "0000008000281000" ]; then
-  fail "privileges: Worker's effective capabilities are ${caps}, want NET_ADMIN, SYS_PTRACE, SYS_ADMIN and BPF only (0000008000281000)"
+# Each profile's set, as its manifest grants it: NET_ADMIN is bit 12, BPF 39,
+# and the routed-link Component the combined run composes adds SYS_PTRACE 19
+# and SYS_ADMIN 21.
+if [ "${PROFILE}" = combined ]; then
+  want_caps=0000008000281000 want_names="NET_ADMIN, BPF, SYS_PTRACE and SYS_ADMIN"
+else
+  want_caps=0000008000001000 want_names="NET_ADMIN and BPF"
+fi
+if [ "${caps}" != "${want_caps}" ]; then
+  fail "privileges: Worker's effective capabilities are ${caps}, want ${want_names} only (${want_caps})"
 fi
 SA=system:serviceaccount:${NS}:galactic-worker
 while read -r want verb resource ns; do
@@ -402,6 +409,15 @@ else
 fi
 claim "${CLAIM_NODE}" "${ATT_UID}" tap "${DESTS}" >/dev/null
 wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${REMOTE_UID}" '^fabric true true true AsExpected$' "Fabric destination ready"
+if [ "${PROFILE}" = dedicated ]; then
+  # Without the routed-link Component, Worker reports a routed link
+  # unavailable instead of failing on the pod's namespace.
+  REFUSED_UID=$(uid_of ns80 vpc-b)
+  VPC=81 claim "${CLAIM_NODE}" "${REFUSED_UID}" routed_link "${REFUSED_UID}" >"${OUT}/routed-link-refused.json" || true
+  VPC=81 wait_dest "${CLAIM_NODE}" "${REFUSED_UID}" "${REFUSED_UID}" ' RoutedLinkUnavailable$' \
+    "routed link reported unavailable without the routed-link Component"
+  VPC=81 release "${CLAIM_NODE}" "${REFUSED_UID}" routed_link "${REFUSED_UID}" >/dev/null || fail "routed release failed"
+fi
 if [ "${PROFILE}" = combined ]; then
   wait_dest "${CLAIM_NODE}" "${ATT_UID}" "${LOCAL_UID}" '^local true true true AsExpected$' "Local destination ready"
   # A routed link's pod end goes into the client pod's network namespace.
