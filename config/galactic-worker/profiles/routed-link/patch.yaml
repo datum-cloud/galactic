@@ -1,0 +1,8 @@
+- op: add
+  path: /spec/template/spec/containers/0/securityContext/capabilities/add/-
+  value: SYS_PTRACE
+- op: add
+  path: /spec/template/spec/containers/0/securityContext/capabilities/add/-
+  value: SYS_ADMIN
+- op: remove
+  path: /spec/template/spec/containers/0/securityContext/allowPrivilegeEscalation

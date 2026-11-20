@@ -51,6 +51,11 @@ type Config struct {
 	// Node is this node, the node of every claim key.
 	Node string
 	Log  *slog.Logger
+	// PodAccess is nil when Worker can open and enter a pod's network
+	// namespace, which a routed link's pod end needs (PodAccess), and the
+	// reason otherwise. local.routed_link and local.socket are then
+	// unavailable with ReasonRoutedLinkUnavailable.
+	PodAccess error
 }
 
 // Module is the Local delivery module.
@@ -110,6 +115,17 @@ func (m *Module) Capabilities() []module.Capability {
 			caps[i].Reason = workerv1alpha1.ReasonDatapathNotLoaded
 			caps[i].Message = err.Error()
 		}
+		return caps
+	}
+	if err := m.cfg.PodAccess; err != nil {
+		for i := range caps {
+			if caps[i].Name == workerv1alpha1.CapabilityLocalRoutedLink ||
+				caps[i].Name == workerv1alpha1.CapabilityLocalSocket {
+				caps[i].Available = false
+				caps[i].Reason = workerv1alpha1.ReasonRoutedLinkUnavailable
+				caps[i].Message = err.Error()
+			}
+		}
 	}
 	return caps
 }
@@ -121,10 +137,29 @@ type change struct {
 	m     *model
 	edge  []module.Claim
 	dirty bool
+	// detail names the first difference Plan found, when it knows it.
+	detail string
+	// retry is set when the scope's last Apply left a link it could not
+	// create, which this change tries again.
+	retry bool
+	// planned is set when the difference follows from desired state, such
+	// as another scope's TAP claim changing the receiving devices.
+	planned bool
 }
 
 // Empty implements module.Change.
 func (c *change) Empty() bool { return !c.dirty }
+
+// Drift implements module.DriftDescriber.
+func (c *change) Drift() (string, bool) {
+	if c.retry || c.planned {
+		return "", false
+	}
+	if c.detail == "" {
+		return "the host differs from desired", true
+	}
+	return c.detail, true
+}
 
 // Plan implements module.Module. It computes the scope's desired Local state
 // and checks the host against it without writing.
@@ -143,9 +178,10 @@ func (m *Module) Plan(_ context.Context, scope module.Scope, desired []module.Cl
 		delete(m.tapScopes, vpc)
 	}
 	anyTap := len(m.tapScopes) > 0
+	retry := len(m.errs[vpc]) > 0
 	m.mu.Unlock()
 
-	ch := &change{vpc: vpc, m: want, edge: edgeClaims(desired)}
+	ch := &change{vpc: vpc, m: want, edge: edgeClaims(desired), retry: retry}
 	if err := m.cfg.Kernel.Loaded(); err != nil {
 		// Worker programs no destination whose capability is unavailable,
 		// and leaves whatever an earlier Worker wrote until it can read it.
@@ -155,7 +191,9 @@ func (m *Module) Plan(_ context.Context, scope module.Scope, desired []module.Cl
 	if err != nil {
 		return nil, fmt.Errorf("local: plan edge links of %s: %w", vpc, err)
 	}
-	ch.dirty = ep.dirty()
+	if ep.dirty() {
+		ch.dirty, ch.detail = true, "an edge link's registration or pass-through entries differ from its claim"
+	}
 	_, err = m.cfg.Kernel.ensure(want, true)
 	if err == nil {
 		err = m.cfg.Kernel.ensureReceivers(anyTap, true)
@@ -163,6 +201,7 @@ func (m *Module) Plan(_ context.Context, scope module.Scope, desired []module.Cl
 	switch {
 	case errors.Is(err, errDirty):
 		ch.dirty = true
+		ch.detail, ch.planned = dirtyDetail(err)
 	case err != nil:
 		return nil, fmt.Errorf("local: plan %s: %w", vpc, err)
 	}
@@ -229,6 +268,37 @@ func (m *Module) Read(_ context.Context, scope module.Scope) (module.State, erro
 	}
 	m.mu.Unlock()
 	return res.state, nil
+}
+
+// Release removes everything Local programmed for scope: its handoff links,
+// its filters and the pass-through entries it owns, as applying a scope with
+// no claims does. galactic-worker handback calls it for each scope it hands
+// back, after Worker has stopped. Unlike Plan, it fails when the Local
+// programs cannot be loaded, since it then could not tell what is left.
+func (m *Module) Release(ctx context.Context, scope module.Scope) error {
+	if err := m.cfg.Kernel.Loaded(); err != nil {
+		return fmt.Errorf("local: release %s: %w", scope.VPC, err)
+	}
+	// One scope can be named with or without the zero padding of a VRF
+	// name, and Local names its links after the form its claims used.
+	forms, err := m.cfg.Kernel.vpcForms(scope.VPC)
+	if err != nil {
+		return err
+	}
+	for _, vpc := range forms {
+		s := module.Scope{VPC: vpc}
+		ch, err := m.Plan(ctx, s, nil)
+		if err != nil {
+			return err
+		}
+		if ch.Empty() {
+			continue
+		}
+		if err := m.Apply(ctx, s, ch); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // HandoffInterfaces implements module.HandoffReporter.

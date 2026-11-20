@@ -128,3 +128,38 @@ func TestRelinquishCompletesOpenTransfer(t *testing.T) {
 		t.Fatalf("exclusive write after relinquish = %v", err)
 	}
 }
+
+// TestPeekReadsWithoutLock checks that Peek returns the record a commit
+// wrote, and an empty one for a scope with none, while another holder keeps
+// the scope locked.
+func TestPeekReadsWithoutLock(t *testing.T) {
+	a, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk, err := a.Claim("vpc-1", "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan Record, 1)
+	if _, err := a.CommitSnapshot(tk, func() error {
+		// The scope's lock is held here; Peek must not wait for it.
+		r, err := a.Peek("vpc-1")
+		if err != nil {
+			return err
+		}
+		done <- r
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if r := <-done; r.Owner != "w" {
+		t.Fatalf("Peek under the lock = %+v", r)
+	}
+	if r, err := a.Peek("vpc-2"); err != nil || r.Owner != "" {
+		t.Fatalf("Peek of an unrecorded scope = %+v, %v", r, err)
+	}
+	if _, err := a.Peek("../x"); err == nil {
+		t.Fatal("Peek accepted an invalid scope name")
+	}
+}

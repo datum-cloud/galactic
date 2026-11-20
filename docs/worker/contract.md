@@ -79,7 +79,10 @@ learns the outcome from `Observe`.
 `local.veth_pair`, `local.routed_link`, `local.socket`, `fabric.srv6` and
 `fabric.routes`. Each row is `Available` or `Unavailable` with a machine reason, for example
 `DatapathNotLoaded`, `HookUnsupported` (an XDP mode or device the
-[qualified platform](qualification.md) excludes) or `ModuleNotRunning`. A claim
+[qualified platform](qualification.md) excludes), `RoutedLinkUnavailable`
+(`local.routed_link` and `local.socket` on a Worker deployed without the
+capabilities a pod end needs, see [operations](operations.md#install)) or
+`ModuleNotRunning`. A claim
 that needs an unavailable capability is accepted and reports `Programmed=False`
 with the same reason, so a client can tell a temporary module outage from a
 refused request.
@@ -187,8 +190,9 @@ created for the claim's handoff, by role, name and ifindex
 ([the Local module](#the-local-module)).
 
 The withdrawal scope names what stops: one destination, one claim, every claim
-of a caller, or a whole VPC on the node. Operators read it to judge the reach
-of a withdrawal ([#1441](https://github.com/datum-cloud/galactic/issues/1441)).
+of a caller, or a whole VPC on the node. Operators read it, with every claim's
+conditions and destinations, through `galactic-worker inspect`
+([operations](operations.md#read-the-diagnostics)).
 
 ### Resolution
 
@@ -440,6 +444,7 @@ Status carries these reasons besides the ones above:
 | `DispatcherSlotUnclaimed`                          | `Ready`               | No receiving device's XDP dispatcher runs a live public slot for a `local.tap` destination                |
 | `HandoffMTUTooSmall`                               | `Ready`               | A Local destination's MTU is below its receiving path's                                                   |
 | `HookUnsupported`                                  | `Ready`               | A hook runs in a mode the handoff cannot use, such as the NAT end's program in generic mode               |
+| `RoutedLinkUnavailable`                            | `Programmed`          | Worker lacks the capabilities a routed link or socket pod end needs; see operations                       |
 | `ReturnPathNotProgrammed`                          | `Ready`               | This node does not yet decapsulate the VPC's SID into the VPC's table                                     |
 | `HandoffInterfaceNotOwned`                         | `Programmed`          | A connector claim's link carries another attachment's stamp, or its gate names another address            |
 
@@ -487,7 +492,10 @@ qualified for detecting a dead service agent (D5).
 D8 and D9 were confirmed on 2026-11-18.
 
 - **Transport (D8).** gRPC over a unix socket at
-  `/run/galactic-worker/worker.sock`, mode `0660`, owned by a dedicated group.
+  `/run/galactic-worker/worker.sock`, mode `0660`, owned by a dedicated group
+  (GID 65441 in `config/galactic-worker`, Worker's own group there; with
+  `--socket-group` Worker changes the socket's group instead, which needs
+  `CAP_CHOWN`).
   No TCP listener serves the mutating API.
 - **Client identity (D8).** Each call carries a projected ServiceAccount token
   with audience `galactic-worker`, bound to the calling pod, as
@@ -498,8 +506,8 @@ D8 and D9 were confirmed on 2026-11-18.
   pod through the pod UID in `/proc/<pid>/cgroup`, so Worker runs in the host
   PID namespace and reads the host's `/proc`; in any other PID namespace the
   kernel reports PID 0 for a peer in another pod (D21).
-  [#1441](https://github.com/datum-cloud/galactic/issues/1441) packages
-  `hostPID` and the `/proc` mount.
+  `config/galactic-worker` runs Worker with `hostPID`, so its `/proc` is the
+  host's.
 - **Allowlist (D8, D22).** A static YAML file, passed with `--allowlist`, maps
   each ServiceAccount to the capabilities it may use. A ServiceAccount it does
   not list may use none.

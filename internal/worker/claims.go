@@ -546,7 +546,7 @@ func (w *Worker) fenceIfRepairing(vpc string) {
 	if !repairing {
 		return
 	}
-	if _, err := w.d.Fence.Takeover(module.Scope{VPC: vpc}.Name(), w.owner, workerOrUnowned); err != nil {
+	if _, err := w.d.Fence.Takeover(module.Scope{VPC: vpc}.Name(), w.owner, takeable); err != nil {
 		w.log.Error("fence scope for release", "vpc", vpc, "error", err)
 	}
 }

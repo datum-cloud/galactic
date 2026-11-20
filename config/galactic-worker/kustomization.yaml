@@ -1,0 +1,10 @@
+# galactic-worker, the node-local delivery API (docs/worker/README.md).
+# Like config/galactic-gateway/, this applies only the ServiceAccount and
+# RBAC, which are safe cluster-wide. base/ is opt-in: it takes over every
+# VPC scope on the nodes it runs on, and must be composed with the services
+# that call it. tests/manifests/worker-profiles/ holds the dedicated and
+# combined placements that do that. This directory is not part of the root
+# config/kustomization.yaml.
+resources:
+  - serviceaccount.yaml
+  - rbac.yaml

@@ -11,9 +11,9 @@ interface are implemented by
 [#1433](https://github.com/datum-cloud/galactic/issues/1433). The Fabric module
 ([#1436](https://github.com/datum-cloud/galactic/issues/1436)) serves
 `fabric.srv6` and `fabric.routes`, and is the only writer of the tenant routes
-of every VPC Worker owns. Local
-([#1435](https://github.com/datum-cloud/galactic/issues/1435)) is not built in
-yet, so the `local.*` capabilities report `ModuleNotRunning`.
+of every VPC Worker owns. The Local module
+([#1435](https://github.com/datum-cloud/galactic/issues/1435)) serves the
+`local.*` capabilities.
 `examples/worker-client` is an independent client of the published API.
 [#1434](https://github.com/datum-cloud/galactic/issues/1434) makes Worker the
 owner of each node and VPC scope, with CNI writing that state under the fence
@@ -21,6 +21,9 @@ owner of each node and VPC scope, with CNI writing that state under the fence
 [#1440](https://github.com/datum-cloud/galactic/issues/1440) makes
 galactic-edge, run with `--worker-socket`, claim its edge links from Worker
 ([connector](connector.md)).
+[#1441](https://github.com/datum-cloud/galactic/issues/1441) packages Worker
+for dedicated and combined placement, adds its operator diagnostics and the
+handback that returns its scopes ([operations](operations.md)).
 
 | Page                                   | Contents                                                                                  |
 | -------------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -29,6 +32,7 @@ galactic-edge, run with `--worker-socket`, claim its edge links from Worker
 | [Connector](connector.md)              | Which component is the provider connector, its claims, transfer step and rollback         |
 | [Branch workflow](branch-workflow.md)  | Base and start SHAs, PR target, CI, artifact tags and how Tasks close                     |
 | [Qualification plan](qualification.md) | Platform, handoffs, workload, comparison method and limits                                |
+| [Operations](operations.md)            | Install, diagnostics, flow tracing, drain, handback, uninstall and rollback               |
 
 ## Decision log
 
@@ -67,6 +71,9 @@ PR. "Confirmed" means the product owner approved the decision on the date given.
 | D27 | Local handoffs as #1444 proved them: native XDP on the veth peer, VLAN and checksum limits, per-path policy, Local pass-through                   | Proposed             | [Contract](contract.md#local-handoffs)                      |
 | D28 | Local owns its handoff links and tc filters, after CNI's; status lists them; fragments to a TAP are refused                                       | Accepted             | [Contract](contract.md#the-local-module)                    |
 | D29 | A routed link's pod end uses its attachment's addresses as `/128` routes; resolvers write steering entries                                        | Proposed             | [Contract](contract.md#the-local-module)                    |
+| D34 | `galactic-worker handback` relinquishes a stopped Worker's scopes to a `galactic-handback:` label; only it makes them reclaimable                 | Accepted             | [Ownership](ownership.md#handing-scopes-back)               |
+| D35 | Combined placement is a `node=edge` node with the service opt-ins and pinned guests; no new label                                                 | Accepted             | [Labels](../operations/node-labels.md#combined-placement)   |
+| D36 | Operators read Worker's state with `galactic-worker inspect` through `kubectl exec`, and its gauges; no network endpoint serves it                | Accepted             | [Operations](operations.md#read-the-diagnostics)            |
 | D37 | A connector claim names galactic-edge's host link (`edge_link`); Worker registers it and never creates or deletes the link                        | Proposed             | [Connector](connector.md#connector-claims)                  |
 | D38 | Forwarding gates stay with galactic-edge, committed under an edge gate scope only galactic-edge processes own                                     | Proposed             | [Connector](connector.md#ownership-transfer)                |
 | D39 | galactic-edge claims its live links, then gives its VPC scope to Worker with `Relinquish`; it takes a handed-back scope with `Takeover`           | Proposed             | [Connector](connector.md#rollback)                          |
