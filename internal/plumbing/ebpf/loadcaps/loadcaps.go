@@ -35,6 +35,7 @@ var capabilityBits = map[string]int{
 	"NET_RAW":          unix.CAP_NET_RAW,
 	"PERFMON":          unix.CAP_PERFMON,
 	"SYS_ADMIN":        unix.CAP_SYS_ADMIN,
+	"SYS_PTRACE":       unix.CAP_SYS_PTRACE,
 	"SYS_RESOURCE":     unix.CAP_SYS_RESOURCE,
 }
 

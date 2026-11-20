@@ -355,9 +355,12 @@ workloads:
   DaemonSet/galactic-system/galactic-worker:
     containers:
       galactic-worker:
+        allowPrivilegeEscalation: true
         capabilities:
           - BPF
           - NET_ADMIN
+          - SYS_ADMIN
+          - SYS_PTRACE
         dropsAll: true
         hostPaths:
           - /run/galactic-worker:rw

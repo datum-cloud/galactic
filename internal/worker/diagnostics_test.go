@@ -159,6 +159,11 @@ func TestDriftRepairIsReported(t *testing.T) {
 	e.eventually("dropped row repaired", func() bool {
 		return slices.Contains(rowIDs(e.host.Rows(vpcA)), "svc-a→attachment/guest-a3")
 	})
+	// The repair is counted once its commit returns, after the row is back.
+	e.eventually("drift repair counted", func() bool {
+		return testutil.ToFloat64(driftRepairsTotal.WithLabelValues(localityLocal)) >= before+1
+	})
+	e.idle()
 	if got := testutil.ToFloat64(driftRepairsTotal.WithLabelValues(localityLocal)); got != before+1 {
 		t.Fatalf("drift repairs %v, want %v", got, before+1)
 	}
