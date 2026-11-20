@@ -281,9 +281,19 @@ if [ "${PROFILE}" = combined ]; then
   kc -n ns80-tap wait --for=condition=Ready pod -l 'app in (vpc-a-tap,vpc-b-tap)' --timeout=240s >>"${OUT}/steps.log"
 fi
 
-# The remote node's locator: its /48 uSID block and 16-bit node ID.
-read -r block nodeid < <(kc -n "${NS}" get bgprouters -o json | jq -r --arg n "${REMOTE_NODE}" \
-  '.items[] | select(.spec.targetRef.name == $n) | "\(.spec.srv6Locator) \(.spec.nodeID)"')
+# The remote node's locator: its /48 uSID block and 16-bit node ID, from the
+# BGPRouter that carries them, as internal/nodelocator reads it. Other
+# BGPRouters may target the node without a locator.
+routers=$(kc -n "${NS}" get bgprouters -o json)
+read -r block nodeid < <(jq -r --arg n "${REMOTE_NODE}" '[.items[]
+  | select(.spec.targetRef.name == $n and (.spec.srv6Locator // "") != "" and (.spec.nodeID // 0) > 0)]
+  | if length == 1 then "\(.[0].spec.srv6Locator) \(.[0].spec.nodeID)" else "" end' <<<"${routers}")
+if [ -z "${nodeid:-}" ]; then
+  jq -r '.items[] | "\(.metadata.name) target=\(.spec.targetRef.name) locator=\(.spec.srv6Locator) nodeID=\(.spec.nodeID)"' \
+    <<<"${routers}" >"${OUT}/bgprouters.txt"
+  fail "no single BGPRouter carries ${REMOTE_NODE}'s locator (bgprouters.txt)"
+  exit 1
+fi
 REMOTE_LOCATOR="${block%::/48}:$(printf '%x' "${nodeid}")::/64"
 log "remote node ${REMOTE_NODE}, locator ${REMOTE_LOCATOR}"
 
