@@ -495,6 +495,77 @@ func TestConnectorNewerPassFencesOlderProcess(t *testing.T) {
 	}
 }
 
+// TestConnectorTransferSkipsRefusedClaim hands a scope to Worker although
+// Worker refuses one live link's claim: the authorized link keeps its claim
+// and its status, and Worker does not program the refused one.
+func TestConnectorTransferSkipsRefusedClaim(t *testing.T) {
+	f := newFixture(t)
+	pinned := f.agent()
+	f.pod("pod-1")
+	f.pod("pod-2")
+	a1 := f.attach("a1", uid1, "pod-1", vpcA, "2001:db8:100::10", false)
+	a2 := f.attach("a2", "uid-2", "pod-2", vpcA, "2001:db8:100::11", false)
+	f.reconcile(pinned)
+	f.programmed("a1")
+	f.programmed("a2")
+
+	wf := f.startWorker()
+	wf.admit(a1, true)
+	wf.admit(a2, false)
+	a := f.connectorAgent(wf)
+	_ = a.Reconcile(context.Background())
+	rec, err := a.Ownership.Read(ownership.VPCScope(vpcA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ownership.WorkerOwned(rec.Owner) {
+		t.Fatalf("VPC scope owner = %q, want Worker: a refused claim stopped the transfer", rec.Owner)
+	}
+	f.programmed("a1")
+	if got := wf.rows(); !slices.Equal(got, []string{uid1}) {
+		t.Fatalf("Worker rows = %v, want only the authorized link's", got)
+	}
+	f.wantCondition("a2", galacticv1alpha1.EdgeAttachmentProgrammed, metav1.ConditionFalse, ReasonWorkerRefused)
+}
+
+// TestConnectorTransferWorkerDown leaves a scope galactic-edge holds, and the
+// status of its Programmed attachments, as they are while Worker cannot be
+// reached at the transfer; a new attachment waits as WorkerUnavailable.
+func TestConnectorTransferWorkerDown(t *testing.T) {
+	f := newFixture(t)
+	pinned := f.agent()
+	f.pod("pod-1")
+	f.pod("pod-2")
+	f.attach("a1", uid1, "pod-1", vpcA, "2001:db8:100::10", false)
+	f.reconcile(pinned)
+	f.programmed("a1")
+	before, err := pinned.Ownership.Read(ownership.VPCScope(vpcA))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wf := f.startWorker()
+	wf.stop()
+	wf.stop = nil
+	a := f.connectorAgent(wf)
+	f.attach("a2", "uid-2", "pod-2", vpcA, "2001:db8:100::11", false)
+	if err := a.Reconcile(context.Background()); err == nil {
+		t.Fatal("the pass reported no error with Worker down at the transfer")
+	}
+	after, err := a.Ownership.Read(ownership.VPCScope(vpcA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Owner != before.Owner || after.Generation != before.Generation {
+		t.Fatalf("VPC scope moved from %+v to %+v with Worker down", before, after)
+	}
+	f.programmed("a1")
+	f.wantCondition("a2", galacticv1alpha1.EdgeAttachmentProgrammed, metav1.ConditionFalse, ReasonWorkerUnavailable)
+	if a.Healthy(nil) != nil {
+		t.Fatal("Worker's outage made galactic-edge unhealthy")
+	}
+}
+
 // gatedAs reports whether ifindex's gate link row names addr.
 func (f *fixture) gatedAs(ifindex uint32, addr string) bool {
 	got, ok, _ := f.gates.Link(ifindex)
