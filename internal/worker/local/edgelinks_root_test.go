@@ -5,6 +5,7 @@
 package local
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"testing"
@@ -201,4 +202,40 @@ func TestEdgeLinkRevocationRoot(t *testing.T) {
 	})
 	send("after-revocation")
 	v.guest.absent(t, "after-revocation")
+}
+
+// TestEdgeLinkSurvivesReleaseRoot keeps an edge link registered, and its
+// pass-through entry, when a handback releases the scope's Local state:
+// galactic-edge takes the link back and registers it again with the same
+// rows, so its traffic never stops during a rollback.
+func TestEdgeLinkSurvivesReleaseRoot(t *testing.T) {
+	r := newRig(t, "edge-release", xdpmode.Native)
+	v := r.vpcs[0]
+	_, idx := r.edgeRig(v)
+	claims := []module.Claim{edgeClaimOf(v, 1)}
+	st := r.reconcile(v.vpc, claims)
+	if got := st[claims[0].Key]["attachment/"+edgeUID]; !got.Programmed {
+		t.Fatalf("edge link not programmed: %+v", got)
+	}
+	h := pinnedEdgeHost{pinDir: r.pin + "/usid"}
+	r.in(r.node, func() error {
+		if err := r.mod.Release(context.Background(), module.Scope{VPC: v.vpc}); err != nil {
+			return err
+		}
+		reg, err := h.Registered(v.table, idx, edgeHostEnd, edgeLinkAddr)
+		if err != nil {
+			return err
+		}
+		if !reg {
+			t.Error("the release unregistered galactic-edge's link")
+		}
+		pass, err := h.PassThrough(v.table)
+		if err != nil {
+			return err
+		}
+		if !pass[netip.PrefixFrom(edgeLinkAddr, 128)] {
+			t.Errorf("the release removed the link's pass-through entry: %v", pass)
+		}
+		return nil
+	})
 }
