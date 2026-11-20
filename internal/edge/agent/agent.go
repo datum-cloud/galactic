@@ -379,10 +379,18 @@ func (a *Agent) reconcileWorkerScope(c Connector, vpc string, active, releasing 
 	pods map[string]podNS) ([]outcome, error) {
 	if err := a.handOver(c, vpc, active); err != nil {
 		// While Worker cannot be reached the scope stays as it is, and so
-		// does every attachment's status: its links keep forwarding.
+		// does the status of every attachment Programmed: its link keeps
+		// forwarding. Any other attachment waits for Worker.
 		var we *WorkerError
 		if errors.As(err, &we) && we.Unreachable {
-			return nil, err
+			var out []outcome
+			for _, att := range active {
+				if !meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentProgrammed) {
+					out = append(out, outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
+						status: metav1.ConditionFalse, reason: ReasonWorkerUnavailable, message: err.Error()})
+				}
+			}
+			return out, err
 		}
 		out := make([]outcome, 0, len(active))
 		for _, att := range active {
