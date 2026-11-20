@@ -243,9 +243,10 @@ The pod runs `galactic-worker handback`:
    snapshot.
 
 It leaves the tenant routes Worker's Fabric module wrote, so traffic keeps
-flowing until galactic-router restarts. Then restart galactic-router on the
-node, which writes those routes again as their owner. As with any restart of
-it, the node's tenant routes are missing until its BGP sessions come back:
+flowing. Then restart galactic-router on the node, which writes those routes
+again as their owner. The lab check measures how long each node's state takes
+to match its state before Worker after that restart
+([lab guide](../../deploy/containerlab/docs/worker.md)):
 
 ```sh
 kubectl -n galactic-system delete pod -l app.kubernetes.io/name=galactic-router \
