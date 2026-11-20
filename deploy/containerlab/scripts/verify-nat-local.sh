@@ -128,8 +128,9 @@ json.dump(d, sys.stdout)' "${STATE}/nat-ds.json" | kci replace -f - >/dev/null
 # removes the pairs, its tc filters and the egress_local_shard rows. Only
 # then is Worker stopped. galactic-nat leaves its pinned NAT-end links and
 # pair rows behind when its Worker integration is switched off, and Worker
-# leaves Local's pinned maps, so those are removed here. Worker keeps the
-# node's VPC scopes it took over; that is reported, not undone.
+# leaves Local's pinned maps, so those are removed here. Last, the handback
+# returns the VPC scopes Worker took over (docs/worker/operations.md), and
+# galactic-router on the node restarts to write their tenant routes again.
 teardown_local() {
   local deadline=$((SECONDS + 300)) pid
   echo "   waiting for Worker to withdraw galactic-nat's claims (session lease 120 s)"
@@ -158,6 +159,20 @@ for e in json.load(sys.stdin):
   done
   docker exec "${EDGE}" rm -rf /sys/fs/bpf/galactic-local || return 1
   echo "   removed galactic-nat's pinned local links and pair rows, and Local's pin directory"
+  echo "   handing ${EDGE}'s VPC scopes back"
+  docker exec "${EDGE}" /opt/galactic-worker/galactic-worker handback --node-name "${EDGE}" || return 1
+  kc -n galactic-system delete pod -l app.kubernetes.io/name=galactic-router \
+    --field-selector "spec.nodeName=${EDGE}" --wait >/dev/null || return 1
+  local deadline=$((SECONDS + 300))
+  until kc -n galactic-system wait --for=condition=Ready pod -l app.kubernetes.io/name=galactic-router \
+    --field-selector "spec.nodeName=${EDGE}" --timeout=10s >/dev/null 2>&1; do
+    if [ ${SECONDS} -ge ${deadline} ]; then
+      echo "FAIL: galactic-router on ${EDGE} is not Ready 300s after its restart" >&2
+      return 1
+    fi
+    sleep 5
+  done
+  echo "   scopes handed back; galactic-router on ${EDGE} restarted and Ready"
 }
 trap cleanup EXIT
 

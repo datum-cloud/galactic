@@ -16,11 +16,10 @@
 #   - dfw-worker2 holds no Local link, Local tc filter, Local pin directory,
 #     egress_local_shard row, PassThroughLocalNAT route, galactic-nat local
 #     link pin or galactic-nat pair row.
-# It also prints, without failing, the VPC scopes a Worker incarnation still
-# owns on dfw-worker2: Worker never hands one back, so only a redeploy does.
+#   - no VPC scope on dfw-worker2 is owned by a galactic-worker incarnation:
+#     the case's clean-up hands them back.
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CP=dfw-control-plane
 EDGE=dfw-worker2
 REMOTE=clab-gvpc-remote-host
@@ -147,6 +146,13 @@ until [ "$(local_routes)" = 0 ]; do
 done
 echo "ok   no PassThroughLocalNAT route on ${EDGE}"
 
-echo "note VPC scopes a Worker incarnation still owns on ${EDGE} (kept until a redeploy):"
-"${SCRIPT_DIR}/worker-fabric.sh" scopes "${EDGE}" 2>&1 | sed 's/^/     /' || true
+owned=$(docker exec "${EDGE}" sh -c 'for f in /var/lib/galactic-edge/ownership/vpc-*.json; do
+    [ -e "$f" ] || continue; printf "%s " "$(basename "$f" .json)"; cat "$f"; echo; done' |
+  python3 -c 'import json,sys
+for line in sys.stdin:
+    name, _, rec = line.strip().partition(" ")
+    if rec and json.loads(rec).get("owner", "").startswith("galactic-worker:"):
+        print(name)') || die "cannot read ${EDGE}'s ownership fence"
+[ -z "${owned}" ] || die "a galactic-worker incarnation still owns these scopes on ${EDGE}: $(tr '\n' ' ' <<<"${owned}")"
+echo "ok   no VPC scope on ${EDGE} is owned by a galactic-worker incarnation"
 echo "PASS: ${EDGE} is clean of verify:nat-local-shard"
