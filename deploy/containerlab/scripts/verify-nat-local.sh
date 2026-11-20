@@ -94,6 +94,7 @@ set_drain() { # SHARD true|false|""
 cleanup() {
   local rc=$?
   set +e
+  [ "${rc}" -ne 0 ] && diagnostics
   log "restoring"
   docker exec "${REMOTE}" sh -c 'pkill -f "socat UDP" || true'
   set_drain "${LOCAL_SHARD}" "${SAVED_DRAIN}"
@@ -122,7 +123,7 @@ trap cleanup EXIT
 
 # --- helpers -----------------------------------------------------------------------
 
-pod_of() { kc -n ns80 get pods -l "app=${1#guest-}" -o jsonpath='{.items[0].metadata.name}'; }
+pod_of() { kc -n ns80 get pods -l "app=vpc-${1#guest-}" -o jsonpath='{.items[0].metadata.name}'; }
 pod_exec() {
   local p
   p=$(pod_of "$1")
@@ -145,6 +146,18 @@ wait_true() {
   done
 }
 
+# wait_mode MODE waits until dfw-worker2's galactic-cni reports MODE, after a
+# rollout.
+mode_is() {
+  [ "$(docker exec "${EDGE}" curl -s --max-time 4 "${CNI_METRICS}" |
+    awk -v m="galactic_cni_egress_mode{mode=\"$1\"}" '$1 == m {print $2}')" = 1 ]
+}
+wait_mode() {
+  kc -n galactic-system rollout status daemonset/galactic-cni --timeout=900s >/dev/null
+  wait_true "galactic-cni on ${EDGE} does not report egress mode $1 after 120s" 120 mode_is "$1"
+  sleep 5
+}
+
 handoffs_ready() {
   local m
   m=$(docker exec "${EDGE}" curl -s --max-time 4 "${NAT_METRICS}" |
@@ -152,13 +165,40 @@ handoffs_ready() {
   [ "${m}" -ge 2 ]
 }
 
+# local_rows_dump prints dfw-worker2's egress_local_shard rows. The node
+# image has no bpftool, so it runs on the host through the node's /proc root,
+# as worker-fabric.sh does.
+local_rows_dump() {
+  local pid
+  pid=$(docker inspect -f '{{.State.Pid}}' "${EDGE}")
+  sudo bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic/egress_local_shard"
+}
+
 local_rows() {
   local n
-  n=$(docker exec "${EDGE}" bpftool -j map dump pinned /sys/fs/bpf/galactic/egress_local_shard 2>/dev/null |
-    python3 -c 'import json,sys
+  n=$(local_rows_dump 2>/dev/null | python3 -c 'import json,sys
 try: print(len(json.load(sys.stdin)))
 except Exception: print(0)')
   [ "${n}" -ge 2 ]
+}
+
+# diagnostics prints what a failed run needs to be understood, before the
+# cleanup removes it: Worker's log, galactic-nat's log and Local metrics on
+# dfw-worker2, and the egress_local_shard rows.
+diagnostics() {
+  echo "== diagnostics"
+  echo "-- galactic-worker log (dfw-worker2)"
+  docker exec "${EDGE}" tail -n 120 /var/log/galactic-worker.log 2>&1 || true
+  echo "-- galactic-nat log (dfw-worker2)"
+  local p
+  p=$(kc -n galactic-system get pods -l app.kubernetes.io/name=galactic-nat \
+    --field-selector "spec.nodeName=${EDGE}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  [ -n "${p}" ] && kc -n galactic-system logs "${p}" -c galactic-nat --tail=120 2>&1 || true
+  echo "-- galactic-nat Local metrics"
+  docker exec "${EDGE}" curl -s --max-time 4 "${NAT_METRICS}" 2>/dev/null |
+    grep -E '^galactic_nat_(worker|local)_' || true
+  echo "-- egress_local_shard on dfw-worker2"
+  local_rows_dump 2>&1 || true
 }
 
 # hairpin_start / hairpin_check capture packets toward dfw-worker2's own
@@ -304,8 +344,7 @@ echo "    Local forwards ${fwd0}->${fwd1}, returns ${ret0}->${ret1}"
 log "3. hashed mode, flow hash: flows leave from ${EDGE} (Local) and dfw-worker3 (Fabric)"
 kc -n galactic-system set env daemonset/galactic-cni -c credential-refresh \
   GALACTIC_CNI_EGRESS_MODE=hashed GALACTIC_CNI_EGRESS_HASH=flow GALACTIC_CNI_EGRESS_PIN_IDLE=0s >/dev/null
-kc -n galactic-system rollout status daemonset/galactic-cni --timeout=900s >/dev/null
-sleep 10
+wait_mode hashed
 for g in "${GUESTS[@]}"; do
   expect tcp6 "${g}" 24 "${L6}" "${R6}"
   [ "$(wc -l <"${STATE}/seen")" -eq 2 ] || die "${g}'s NAT66 flows used one shard: $(cat "${STATE}/seen")"
@@ -318,8 +357,7 @@ done
 log "4. recovery: the same UDP flow keeps its masquerade port"
 kc -n galactic-system set env daemonset/galactic-cni -c credential-refresh GALACTIC_CNI_EGRESS_MODE- \
   GALACTIC_CNI_EGRESS_HASH- GALACTIC_CNI_EGRESS_PIN_IDLE- >/dev/null
-kc -n galactic-system rollout status daemonset/galactic-cni --timeout=900s >/dev/null
-sleep 10
+wait_mode ordered
 before=$(udp_tuple guest-a-edge 6)
 [ "${before%.*}" = "${L6}" ] || die "ordered mode sent guest-a-edge to ${before}, not ${EDGE}"
 
@@ -350,8 +388,7 @@ echo "    pair recreated (${nat_end}): ${before} -> ${after}"
 log "5. drain: a pinned flow keeps its shard and masquerade port"
 kc -n galactic-system set env daemonset/galactic-cni -c credential-refresh \
   GALACTIC_CNI_EGRESS_MODE=hashed GALACTIC_CNI_EGRESS_HASH=source GALACTIC_CNI_EGRESS_PIN_IDLE=1h >/dev/null
-kc -n galactic-system rollout status daemonset/galactic-cni --timeout=900s >/dev/null
-sleep 10
+wait_mode hashed
 for g in "${GUESTS[@]}"; do
   pinned=$(udp_tuple "${g}" 6)
   case "${pinned%.*}" in
