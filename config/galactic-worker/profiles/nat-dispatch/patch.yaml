@@ -1,0 +1,8 @@
+# galactic-nat shares the edge node's uplinks with galactic-gateway, and an
+# interface takes one XDP program, so the shard runs from the node's shared
+# dispatcher (docs/operations/xdp-attach-mode.md).
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: GALACTIC_NAT_XDP_ATTACH
+    value: dispatch

@@ -30,7 +30,7 @@ func (p *pass) ensureRouted(r routedWant, entries map[netip.Prefix]egressroutema
 	got, ok := p.h.readRouted(r, podNS)
 	if !ok {
 		if p.dry {
-			return errDirty
+			return dirty("routed link %s is missing", r.host)
 		}
 		if got, err = p.k.createRouted(p.h, r, podNS); err != nil {
 			return err

@@ -98,6 +98,47 @@ Each step uses the fence operations that exist today (D13).
 5. **Loss of the state directory.** Stop every writer, reconcile host state, and
    create a new authority, as `internal/ownership` requires. Never restore
    the directory while writers run.
+6. **Handback.** The reverse of transfer, when Worker leaves a node: see
+   [handing scopes back](#handing-scopes-back).
+
+## Handing scopes back
+
+Every other writer leaves a scope a galactic-worker incarnation owns to
+Worker, even an incarnation that no longer runs: router GC
+(`maintenance.Guard.Reclaim`), galactic-router's tenant route writes, the
+installer's `vrf_table` repair and its sweep. `galactic-worker handback`
+(`internal/worker/handback`) is the only way such a scope returns to them
+(D34). It runs on the node after the Worker pod is gone:
+
+1. It refuses while a process accepts connections on the Worker socket.
+2. For each scope a Worker incarnation owned when it started, `Relinquish`
+   names the owner `galactic-handback:<time>`, advances the generation and
+   sets the scope resync-required, under the scope's lock. No ticket an
+   earlier incarnation held can commit afterwards. A scope moving to another
+   writer is left to that transfer, and a scope another Worker incarnation
+   takes during the run means a Worker came back: the handback reports both
+   and fails.
+3. Under the fence, with `ExclusiveIf` and only while the handback label
+   still owns the scope, the Local module removes its handoff links, tc
+   filters and `PassThroughLocal` entries. Then, only if no Worker answers
+   and none owns a scope, the handback removes Local's pins, Worker's stored
+   claims and its status snapshot.
+4. The tenant routes the Fabric module wrote stay, so forwarding continues.
+   galactic-router writes them again as their owner once it restarts.
+
+A handed-back scope is not Worker-owned, so GC, the router, CNI and the
+installer, which write with `Exclusive`, work in it as in any scope no Worker
+owns. When GC reclaims a handed-back scope whose VPC the node no longer
+serves, it also releases the handback label, under the scope's lock and only
+while that label still owns the scope, leaving the scope unowned; nothing
+else would adopt it. A handed-back scope still in use keeps its label until
+a writer takes it. A writer that needs to own the scope takes it with `Takeover`, accepting
+the label: Worker does, and galactic-edge's pinned mode does once
+[#1440](https://github.com/datum-cloud/galactic/issues/1440) lands. Until then
+galactic-edge refuses a handed-back scope with `ErrNotOwner`. A Worker started later takes every handed-back
+scope that no other writer has taken. Repeating a handback removes Local
+state again from scopes it left labelled, and leaves one another writer took.
+[Operations](operations.md#hand-scopes-back) has the procedure.
 
 ## Node and VPC scope
 
@@ -125,7 +166,8 @@ CNI and garbage collection.
 - **GC transfer.** galactic-router's GC (`maintenance.Guard.Reclaim`) and the
   installer's `vrf_table` repair refuse a scope a Worker incarnation owns
   (`ownership.ErrWorkerOwned`) and keep doing their work everywhere else. A
-  Worker-owned scope is reclaimed only by a running Worker.
+  Worker-owned scope is reclaimed only by a running Worker, or by GC after a
+  [handback](#handing-scopes-back).
 - **Observation.** Worker subscribes to link events. A link joining, leaving or
   changing in a VPC's VRF requeues that VPC, and `hostscope.AttachmentsOf`
   reads each attachment's current ifindex and neighbors when a module asks.

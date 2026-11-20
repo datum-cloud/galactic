@@ -205,3 +205,40 @@ func TestHostEnsuredForClaims(t *testing.T) {
 		t.Fatalf("ensured again (%d → %d) with the state in place", ens, again)
 	}
 }
+
+// TestHostTakesHandedBackScope checks that a Worker installed again after a
+// handback (internal/worker/handback) takes back the scopes no legacy writer
+// took in between, with a snapshot, and leaves one a legacy writer took.
+func TestHostTakesHandedBackScope(t *testing.T) {
+	e, h := hostEnv(t)
+	h.set(vpcA, 1)
+	h.set(vpcB, 1)
+	e.start()
+	e.eventually("both scopes adopted", func() bool {
+		return e.fenceOwner(vpcA).Owner == e.w.Owner() && e.fenceOwner(vpcB).Owner == e.w.Owner()
+	})
+	e.idle()
+	e.crash()
+	label := ownership.HandbackOwnerPrefix + "20261119T120000Z"
+	for _, v := range []string{vpcA, vpcB} {
+		if _, err := e.fence.Relinquish(module.Scope{VPC: v}.Name(), func(r ownership.Record) bool {
+			return ownership.WorkerOwned(r.Owner)
+		}, label); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.fence.Takeover(module.Scope{VPC: vpcB}.Name(), "galactic-edge:node-a:2",
+		func(r ownership.Record) bool { return ownership.HandedBack(r.Owner) }); err != nil {
+		t.Fatal(err)
+	}
+
+	e.start()
+	e.eventually("vpcA taken back", func() bool {
+		r := e.fenceOwner(vpcA)
+		return r.Owner == e.w.Owner() && !r.Pending
+	})
+	e.idle()
+	if r := e.fenceOwner(vpcB); r.Owner != "galactic-edge:node-a:2" {
+		t.Fatalf("a scope galactic-edge took after the handback = %+v", r)
+	}
+}
