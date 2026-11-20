@@ -1455,7 +1455,9 @@ tasks:
     cmds:
       - mkdir -p bin/worker-claim-image
       - CGO_ENABLED=0 go build -o bin/worker-claim-image/worker-claim ./tests/handoffs/cmd/worker-claim
-      - printf 'FROM scratch\nCOPY worker-claim /worker-claim\nENTRYPOINT ["/worker-claim"]\n' > bin/worker-claim-image/Dockerfile
+      # The client runs as an unprivileged user, so the binary must be
+      # executable by anyone whatever mode the build left it with.
+      - printf 'FROM scratch\nCOPY --chmod=0755 worker-claim /worker-claim\nENTRYPOINT ["/worker-claim"]\n' > bin/worker-claim-image/Dockerfile
       - docker build -t worker-claim:latest bin/worker-claim-image
 
   "worker:images":
