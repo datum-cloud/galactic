@@ -2,6 +2,13 @@ apiVersion: kind.x-k8s.io/v1alpha4
 kind: Cluster
 nodes:
   - role: control-plane
+    # etcd on the node's tmpfs /tmp -- see node_files/dfw/config.yaml.
+    kubeadmConfigPatches:
+      - |
+        kind: ClusterConfiguration
+        etcd:
+          local:
+            dataDir: /tmp/etcd
   # Sequential Kind names (sjc-worker, sjc-worker2) used as-is -- see
   # node_files/dfw/config.yaml's comment.
   - role: worker
