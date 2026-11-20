@@ -28,9 +28,9 @@ instead of a single `--authority` and mounted public certificate.
 
 ## Managed endpoints
 
-`masque-provider --managed-endpoints --cell=<cell>` serves all
+`masque-provider --managed-endpoints` serves all
 `galactic.datumapis.com/v1alpha1` `MASQUEEndpoint` resources in `POD_NAMESPACE`
-whose `spec.provider` and `spec.cell` match the process. This reuses the existing
+whose `spec.provider` matches the process's `--provider`. This reuses the existing
 provider Deployment, EdgeInstance/Lease, and both listeners. It creates no
 per-gateway capacity. Defaults remain TCP and UDP `:8443`; expose both through
 the existing Service's port 443. Remove the legacy public TLS volume and its
@@ -47,15 +47,30 @@ the root Galactic Kustomization still does not enable MASQUE.
 ### Registration and delivery contract
 
 The [API reference](../api/galactic.md#masqueendpoint) defines the complete
-schema. The spec contains only `hostname`, `metro`, `cell`, `provider`,
-`revision`, `certificateRef` and `enabled`. Registration name, hostname, metro,
-cell and provider are immutable. No customer project, gateway, endpoint,
+schema. The spec contains only `hostname`, `provider`, `revision`,
+`certificateRef` and `enabled`. Registration name, hostname and provider are
+immutable. No customer project, gateway, endpoint,
 network or binding identifiers are copied into the spec or ownership annotations.
 One gateway endpoint serves separately authorized network bindings. The hostname
 is a lowercase DNS name without a port. Every mutable change increments the
 positive `spec.revision`, including certificate replacement, disable and
 reactivation. Exactly one registration may claim a hostname within the namespace,
-even across different providers or cells.
+even across different providers in that namespace.
+
+Each cell/metro has a separate control plane. Connect retains placement in its
+service-provider Project, targets exactly one selected cell through Karmada,
+and uses that control plane's reader and grant credentials. Registration and
+its retained fence contain no copied cell/metro fields. The provider has no
+`--cell` flag. The grant authority retains `--cell`, and grant requests and
+per-VPC/cell ledgers retain their existing cell scope; a grant from another
+cell remains unauthorized.
+
+`provider` selects a local named `EdgeProvider`, not placement. The runtime
+supports independently selectable providers in one API/namespace: `--provider`
+selects registrations and EdgeInstance membership, and the authority rejects
+other providers' registrations. Each EdgeProvider has its own approval and
+ServiceAccount identities. The default bundle instantiates `masque`, but does
+not impose a singleton provider API.
 
 `certificateRef.name` identifies a same-namespace `kubernetes.io/tls` Secret.
 `certificateRef.revision` is lowercase SHA-256 of the leaf certificate DER,

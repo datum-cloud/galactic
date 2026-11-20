@@ -46,7 +46,7 @@ func NewRegistry() *Registry {
 }
 
 func ValidateSpec(spec galacticv1alpha1.MASQUEEndpointSpec) error {
-	if spec.Cell == "" || spec.Provider == "" || spec.Metro == "" || spec.Revision <= 0 || spec.CertificateRef.Name == "" {
+	if spec.Provider == "" || spec.Revision <= 0 || spec.CertificateRef.Name == "" {
 		return errors.New("endpoint identity, certificate and positive revision are required")
 	}
 	if spec.Hostname != strings.ToLower(spec.Hostname) || len(validation.IsDNS1123Subdomain(spec.Hostname)) != 0 ||

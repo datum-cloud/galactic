@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net/http"
@@ -56,8 +57,8 @@ func testEndpoint(t *testing.T, identity string, expires time.Time) (*galacticv1
 	endpoint := &galacticv1alpha1.MASQUEEndpoint{ObjectMeta: metav1.ObjectMeta{
 		Name: identity, Namespace: testNamespace, UID: types.UID("registration-" + identity)},
 		Spec: galacticv1alpha1.MASQUEEndpointSpec{
-			Cell: "cell-a", Hostname: hostname,
-			Metro: "metro-a", Provider: testProvider, Revision: 1, Enabled: true,
+			Hostname: hostname,
+			Provider: testProvider, Revision: 1, Enabled: true,
 			CertificateRef: galacticv1alpha1.MASQUEEndpointCertificateReference{Name: identity + "-tls", Revision: revision},
 		}}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
@@ -241,7 +242,7 @@ func testController(t *testing.T, objects ...client.Object) *Controller {
 	cellClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&galacticv1alpha1.MASQUEEndpoint{}).WithObjects(objects...).Build()
 	return &Controller{Client: cellClient, Registry: NewRegistry(),
-		Namespace: testNamespace, Provider: testProvider, Cell: "cell-a", PodUID: "pod"}
+		Namespace: testNamespace, Provider: testProvider, PodUID: "pod"}
 }
 
 func TestControllerFencesRemovalAndRecreation(t *testing.T) {
@@ -392,7 +393,6 @@ func TestControllerDuplicateRegistrationsFailClosed(t *testing.T) {
 		duplicate.Spec.Hostname = endpoint.Spec.Hostname
 		if foreignProvider {
 			duplicate.Spec.Provider = "other"
-			duplicate.Spec.Cell = "other"
 		}
 		controller := testController(t, endpoint, secret)
 		if err := controller.Sync(t.Context()); err != nil {
@@ -476,5 +476,98 @@ func TestAcknowledgmentRequiresAcquisition(t *testing.T) {
 				t.Fatal("acknowledged without a strictly earlier membership acquisition")
 			}
 		})
+	}
+}
+
+func TestEndpointSpecHasNoPlacement(t *testing.T) {
+	endpoint, _ := testEndpoint(t, "schema", time.Now().Add(time.Hour))
+	encoded, err := json.Marshal(endpoint.Spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{"hostname", "provider", "revision", "certificateRef", "enabled"}
+	if len(fields) != len(expected) {
+		t.Fatalf("unexpected registration fields: %s", encoded)
+	}
+	for _, field := range expected {
+		if _, ok := fields[field]; !ok {
+			t.Fatalf("missing %s in %s", field, encoded)
+		}
+	}
+}
+
+func TestIndependentProvidersInOneControlPlane(t *testing.T) {
+	first, firstSecret := testEndpoint(t, "first", time.Now().Add(time.Hour))
+	second, secondSecret := testEndpoint(t, "second", time.Now().Add(time.Hour))
+	second.Spec.Provider = "second-provider"
+	controller := testController(t, first, firstSecret, second, secondSecret)
+	key := client.ObjectKey{Namespace: testNamespace, Name: testInstanceName}
+	var instance galacticv1alpha1.EdgeInstance
+	var lease coordinationv1.Lease
+	if err := controller.Client.Get(t.Context(), key, &instance); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Client.Get(t.Context(), key, &lease); err != nil {
+		t.Fatal(err)
+	}
+	instance.Name, instance.UID, instance.ResourceVersion = "ei-second-pod", "second-instance", ""
+	instance.Spec.PodUID = "second-pod"
+	instance.Spec.ProviderRef.Name = second.Spec.Provider
+	if err := controller.Client.Create(t.Context(), &instance); err != nil {
+		t.Fatal(err)
+	}
+	lease.Name, lease.UID, lease.ResourceVersion = instance.Name, "second-lease", ""
+	lease.OwnerReferences[0].Name, lease.OwnerReferences[0].UID = instance.Name, instance.UID
+	if err := controller.Client.Create(t.Context(), &lease); err != nil {
+		t.Fatal(err)
+	}
+	other := &Controller{Client: controller.Client, Registry: NewRegistry(), Namespace: testNamespace,
+		Provider: second.Spec.Provider, PodUID: instance.Spec.PodUID}
+	for _, candidate := range []*Controller{controller, other} {
+		if err := candidate.Sync(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, pair := range []struct {
+		own               *Controller
+		endpoint, foreign *galacticv1alpha1.MASQUEEndpoint
+	}{
+		{controller, first, second}, {other, second, first},
+	} {
+		if _, ok := pair.own.Registry.Current(pair.endpoint.Spec.Hostname); !ok {
+			t.Fatal("own endpoint not applied")
+		}
+		if _, ok := pair.own.Registry.Current(pair.foreign.Spec.Hostname); ok {
+			t.Fatal("foreign endpoint applied")
+		}
+		var observed galacticv1alpha1.MASQUEEndpoint
+		if err := controller.Client.Get(t.Context(), client.ObjectKeyFromObject(pair.endpoint), &observed); err != nil {
+			t.Fatal(err)
+		}
+		if len(observed.Status.Instances) != 1 || observed.Status.Instances[0].InstanceName != "ei-"+pair.own.PodUID {
+			t.Fatalf("foreign provider acknowledged endpoint: %+v", observed.Status)
+		}
+		ref := &galacticv1alpha1.MASQUEEndpointReference{Namespace: testNamespace, Name: pair.foreign.Name}
+		if _, err := Resolve(t.Context(), controller.Client, testNamespace, pair.own.Provider, ref); err == nil {
+			t.Fatal("authority resolved another provider's endpoint")
+		}
+	}
+	if err := controller.Client.Delete(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range []*Controller{controller, other} {
+		if err := candidate.Sync(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := controller.Registry.Current(first.Spec.Hostname); ok {
+		t.Fatal("deleted endpoint active")
+	}
+	if _, ok := other.Registry.Current(second.Spec.Hostname); !ok {
+		t.Fatal("another provider's endpoint was removed")
 	}
 }

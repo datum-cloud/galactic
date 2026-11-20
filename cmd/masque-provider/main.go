@@ -43,7 +43,6 @@ func main() {
 
 type options struct {
 	managedEndpoints                       bool
-	cell                                   string
 	provider, authority, listen, listenTCP string
 	healthListen                           string
 	certFile, keyFile                      string
@@ -71,7 +70,6 @@ func newRootCommand() *cobra.Command {
 	f := cmd.Flags()
 	f.BoolVar(&o.managedEndpoints, "managed-endpoints", false,
 		"Serve cell-local MASQUEEndpoint registrations on shared listeners")
-	f.StringVar(&o.cell, "cell", "", "Serving cell identity (required with --managed-endpoints)")
 	f.StringVar(&o.provider, "provider", "", "EdgeProvider this pod runs as (required)")
 	f.StringVar(&o.authority, "authority", "", "host[:port] clients send as :authority (required)")
 	f.StringVar(&o.listen, "listen", ":8443", "UDP address the HTTP/3 server listens on")
@@ -92,8 +90,6 @@ func (o *options) validate() error {
 	switch {
 	case o.provider == "" || !o.managedEndpoints && o.authority == "":
 		return errors.New("--provider and --authority are required")
-	case o.managedEndpoints && o.cell == "":
-		return errors.New("--cell is required with --managed-endpoints")
 	case !strings.HasPrefix(o.authorityURL, "https://"):
 		return errors.New("--grant-authority-url must be an https:// URL")
 	case o.authorityCA == "" || o.tokenFile == "" || o.certFile == "" || o.keyFile == "":
@@ -125,8 +121,8 @@ func run(parent context.Context, o *options) error {
 		return err
 	}
 	return service.Run(ctx, service.Config{
-		ManagedEndpoints: o.managedEndpoints, Cell: o.cell,
-		Client: c, Provider: o.provider, Authority: o.authority, Listen: o.listen, ListenTCP: o.listenTCP,
+		ManagedEndpoints: o.managedEndpoints,
+		Client:           c, Provider: o.provider, Authority: o.authority, Listen: o.listen, ListenTCP: o.listenTCP,
 		HealthListen: o.healthListen,
 		Pod:          pod, GetCertificate: certs.GetCertificate,
 		Authorizer: &authority.Client{Reader: c, URL: o.authorityURL, CAFile: o.authorityCA, TokenFile: o.tokenFile},

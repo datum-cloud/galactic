@@ -102,9 +102,6 @@ func (g Grants) Create(ctx context.Context, req CreateRequest) (Issued, error) {
 		if err != nil {
 			return Issued{}, err
 		}
-		if endpoint.Spec.Cell != req.Cell {
-			return Issued{}, errors.New("endpoint cell mismatch")
-		}
 		endpointHostname = endpoint.Spec.Hostname
 		endpointRevision, _, err = endpoints.GrantRevision(ctx, g.Client, g.Namespace, endpointHostname)
 		if err != nil {
@@ -168,7 +165,7 @@ func (g Grants) Rotate(ctx context.Context, connector string, lifetime time.Dura
 			if err != nil {
 				return err
 			}
-			if endpoint.Spec.Cell != r.Cell || endpoint.Spec.Hostname != r.EndpointHostname {
+			if endpoint.Spec.Hostname != r.EndpointHostname {
 				return errors.New("endpoint identity changed")
 			}
 			revision, revoked, err := endpoints.GrantRevision(ctx, g.Client, g.Namespace, r.EndpointHostname)

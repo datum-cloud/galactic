@@ -40,8 +40,6 @@ spec:
             spec:
               description: MASQUEEndpointSpec defines the shared endpoint registration and certificate.
               properties:
-                cell:
-                  type: string
                 certificateRef:
                   properties:
                     name:
@@ -57,8 +55,6 @@ spec:
                   type: boolean
                 hostname:
                   type: string
-                metro:
-                  type: string
                 provider:
                   type: string
                 revision:
@@ -66,17 +62,15 @@ spec:
                   minimum: 1
                   type: integer
               required:
-                - cell
                 - certificateRef
                 - enabled
                 - hostname
-                - metro
                 - provider
                 - revision
               type: object
               x-kubernetes-validations:
                 - message: endpoint identity is immutable
-                  rule: self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider
+                  rule: self.hostname == oldSelf.hostname && self.provider == oldSelf.provider
                 - message: changes require a greater revision
                   rule: self == oldSelf || self.revision > oldSelf.revision
             status:

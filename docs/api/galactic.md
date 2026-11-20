@@ -875,8 +875,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `hostname` _string_ |  |  |  |
-| `cell` _string_ |  |  |  |
-| `metro` _string_ |  |  |  |
 | `provider` _string_ |  |  |  |
 | `revision` _integer_ |  |  | Minimum: 1 <br /> |
 | `certificateRef` _[MASQUEEndpointCertificateReference](#masqueendpointcertificatereference)_ |  |  |  |

@@ -15,12 +15,10 @@ type MASQUEEndpointCertificateReference struct {
 
 // MASQUEEndpointSpec defines the shared endpoint registration and certificate.
 //
-// +kubebuilder:validation:XValidation:rule="self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider",message="endpoint identity is immutable"
+// +kubebuilder:validation:XValidation:rule="self.hostname == oldSelf.hostname && self.provider == oldSelf.provider",message="endpoint identity is immutable"
 // +kubebuilder:validation:XValidation:rule="self == oldSelf || self.revision > oldSelf.revision",message="changes require a greater revision"
 type MASQUEEndpointSpec struct {
 	Hostname string `json:"hostname"`
-	Cell     string `json:"cell"`
-	Metro    string `json:"metro"`
 	Provider string `json:"provider"`
 	// +kubebuilder:validation:Minimum=1
 	Revision       int64                              `json:"revision"`

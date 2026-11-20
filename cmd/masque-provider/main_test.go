@@ -51,3 +51,15 @@ func TestFlagsRequireGrantAuthority(t *testing.T) {
 		})
 	}
 }
+
+func TestManagedFlagsDoNotRequirePlacement(t *testing.T) {
+	options := &options{managedEndpoints: true, provider: "masque",
+		authorityURL: "https://authority.example.test", authorityCA: "ca", tokenFile: "token",
+		certFile: "unused", keyFile: "unused"}
+	if err := options.validate(); err != nil {
+		t.Fatal(err)
+	}
+	if newRootCommand().Flags().Lookup("cell") != nil {
+		t.Fatal("provider exposes redundant placement flag")
+	}
+}

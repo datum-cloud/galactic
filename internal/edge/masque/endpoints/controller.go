@@ -31,15 +31,14 @@ type Fence struct {
 }
 
 type Controller struct {
-	Ready                             func() bool
-	Client                            client.Client
-	Registry                          *Registry
-	Namespace, Provider, Cell, PodUID string
+	Ready                       func() bool
+	Client                      client.Client
+	Registry                    *Registry
+	Namespace, Provider, PodUID string
 }
 
 func SameIdentity(first, second galacticv1alpha1.MASQUEEndpointSpec) bool {
-	return first.Hostname == second.Hostname && first.Cell == second.Cell &&
-		first.Metro == second.Metro && first.Provider == second.Provider
+	return first.Hostname == second.Hostname && first.Provider == second.Provider
 }
 
 func (controller *Controller) fence(
@@ -144,7 +143,7 @@ func (controller *Controller) Sync(ctx context.Context) error {
 	var failures []error
 	for _, endpoint := range endpoints.Items {
 		spec := endpoint.Spec
-		if spec.Provider != controller.Provider || spec.Cell != controller.Cell {
+		if spec.Provider != controller.Provider {
 			continue
 		}
 		seen[spec.Hostname] = true
@@ -170,7 +169,7 @@ func (controller *Controller) Sync(ctx context.Context) error {
 			failures = append(failures, err)
 			continue
 		}
-		if previous.Spec.Cell == controller.Cell && !seen[previous.Spec.Hostname] {
+		if !seen[previous.Spec.Hostname] {
 			controller.Registry.Remove(previous.Spec.Hostname)
 			if err := controller.fence(ctx, &galacticv1alpha1.MASQUEEndpoint{
 				ObjectMeta: metav1.ObjectMeta{Namespace: controller.Namespace, Name: previous.Name,

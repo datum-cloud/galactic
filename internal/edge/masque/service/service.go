@@ -50,7 +50,6 @@ const DefaultShutdownTimeout = 20 * time.Second
 // Config configures Run.
 type Config struct {
 	ManagedEndpoints bool
-	Cell             string
 	// Client reaches the cell's API server as the pod's ServiceAccount.
 	Client client.Client
 	// Provider is the EdgeProvider this pod runs as.
@@ -90,8 +89,6 @@ func Run(ctx context.Context, cfg Config) error {
 	switch {
 	case cfg.Client == nil || cfg.Authorizer == nil || !cfg.ManagedEndpoints && cfg.GetCertificate == nil:
 		return errors.New("client, authorizer and certificate source are required")
-	case cfg.ManagedEndpoints && cfg.Cell == "":
-		return errors.New("cell is required for managed endpoints")
 	case cfg.Listen == "":
 		return errors.New("listen address is required")
 	case cfg.ListenTCP != "" && !connectip.ExtendedConnectEnabled():
@@ -126,7 +123,7 @@ func Run(ctx context.Context, cfg Config) error {
 		serverConfig.TLSConfig.GetCertificate = registry.GetCertificate
 		serverConfig.ResolveEndpoint = registry.Resolve
 		endpointController = &endpoints.Controller{Client: cfg.Client, Registry: registry, Namespace: cfg.Pod.Namespace,
-			Provider: cfg.Provider, Cell: cfg.Cell, PodUID: cfg.Pod.UID, Ready: a.Ready}
+			Provider: cfg.Provider, PodUID: cfg.Pod.UID, Ready: a.Ready}
 	}
 	srv, err := connectip.NewServer(serverConfig)
 	if err != nil {

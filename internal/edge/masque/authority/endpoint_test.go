@@ -18,9 +18,9 @@ import (
 
 func scopedEndpoint() *galacticv1alpha1.MASQUEEndpoint {
 	return &galacticv1alpha1.MASQUEEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "endpoint", Namespace: testNS},
-		Spec: galacticv1alpha1.MASQUEEndpointSpec{Cell: testCell, Hostname: "gateway.example.com",
+		Spec: galacticv1alpha1.MASQUEEndpointSpec{Hostname: "gateway.example.com",
 			Provider: testProvider,
-			Metro:    "metro", Revision: 1, Enabled: true,
+			Revision: 1, Enabled: true,
 			CertificateRef: galacticv1alpha1.MASQUEEndpointCertificateReference{
 				Name: "tls", Revision: strings.Repeat("a", 64)}}}
 }
@@ -67,6 +67,11 @@ func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 	authority := &Authority{Client: grants.Client, Namespace: testNS, Provider: testProvider, Cell: testCell}
 	if err := authority.endpoint(ctx, record); err != nil {
 		t.Fatal(err)
+	}
+	wrongCell := *authority
+	wrongCell.Cell = cell2
+	if !errors.Is(wrongCell.current(record, time.Now()), connectip.ErrForbidden) {
+		t.Fatal("local endpoint bypassed grant cell scope")
 	}
 	const otherIdentity = "other"
 	for _, mutate := range []func(*galacticv1alpha1.MASQUEEndpointReference){

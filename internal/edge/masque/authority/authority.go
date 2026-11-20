@@ -564,7 +564,7 @@ func (a *Authority) endpoint(ctx context.Context, record *Record) error {
 	if err != nil {
 		return fmt.Errorf("%w: endpoint unavailable: %w", connectip.ErrForbidden, err)
 	}
-	if endpoint.Spec.Cell != record.Cell || endpoint.Spec.Hostname != record.EndpointHostname {
+	if endpoint.Spec.Hostname != record.EndpointHostname {
 		return fmt.Errorf("%w: endpoint identity changed", connectip.ErrForbidden)
 	}
 	current, revoked, err := endpoints.GrantRevision(ctx, a.Client, a.Namespace, record.EndpointHostname)
