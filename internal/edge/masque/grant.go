@@ -32,7 +32,9 @@ type ServiceRef struct {
 // authority issues it. Neither the client nor the provider chooses any of
 // its fields.
 type Grant struct {
-	Endpoint *galacticv1alpha1.MASQUEEndpointScope
+	NetworkUID string
+	BindingUID string
+	Endpoint   *galacticv1alpha1.MASQUEEndpointScope
 	// Connector is the connector's immutable identity.
 	Connector string
 	// Principal names the authenticated client for logs.
@@ -85,7 +87,8 @@ type Authorizer interface {
 // authorization incarnation and credential revision. Only the deadline may
 // change.
 func (g *Grant) sameAuthority(r *Grant) bool {
-	return SameEndpoint(g.Endpoint, r.Endpoint) && g.Connector == r.Connector && g.Principal == r.Principal &&
+	return SameEndpoint(g.Endpoint, r.Endpoint) && g.NetworkUID == r.NetworkUID && g.BindingUID == r.BindingUID &&
+		g.Connector == r.Connector && g.Principal == r.Principal &&
 		g.VPC == r.VPC && g.VPCUID == r.VPCUID &&
 		g.VPCID == r.VPCID && g.Service == r.Service && g.Prefix == r.Prefix && slices.Equal(g.Routes, r.Routes) &&
 		g.Authorization == r.Authorization && g.Revision == r.Revision
@@ -97,6 +100,9 @@ func SameEndpoint(first, second *galacticv1alpha1.MASQUEEndpointScope) bool {
 
 // validate reports why g cannot admit a request for vpc at now.
 func (g *Grant) validate(vpc string, now time.Time) error {
+	if g.Endpoint != nil && (g.NetworkUID == "" || g.BindingUID == "") {
+		return errors.New("managed grant requires network and binding identities")
+	}
 	p := g.Prefix
 	switch {
 	case g.Connector == "" || g.Principal == "":

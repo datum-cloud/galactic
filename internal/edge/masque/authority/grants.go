@@ -44,6 +44,10 @@ type Issued struct {
 // CreateRequest describes a new connector.
 type CreateRequest struct {
 	Endpoint *galacticv1alpha1.MASQUEEndpointScope
+	// NetworkUID and BindingUID are resolved by the trusted issuer and are
+	// required for managed grants, independent of the shared endpoint identity.
+	NetworkUID string
+	BindingUID string
 	// VPC is the VPC's namespace and name; its UID is read from the API.
 	VPC  VPCRef
 	Cell string
@@ -94,11 +98,13 @@ func (g Grants) Create(ctx context.Context, req CreateRequest) (Issued, error) {
 	req.VPC.UID = string(vpc.UID)
 	var endpointRevision int64
 	if req.Endpoint != nil {
+		if !vpc.DeletionTimestamp.IsZero() {
+			return Issued{}, errors.New("endpoint grant VPC is being deleted")
+		}
 		if req.Endpoint.Cell != req.Cell {
 			return Issued{}, errors.New("endpoint cell mismatch")
 		}
-		vpc := galacticv1alpha1.MASQUEEndpointVPCReference(req.VPC)
-		if err := endpoints.CheckScope(ctx, g.Client, g.Namespace, "", req.Endpoint, vpc); err != nil {
+		if err := endpoints.CheckScope(ctx, g.Client, g.Namespace, "", req.Endpoint); err != nil {
 			return Issued{}, err
 		}
 		endpointRevision, _, err = endpoints.GrantRevision(ctx, g.Client, g.Namespace, req.Endpoint.EndpointUID)
@@ -108,6 +114,7 @@ func (g Grants) Create(ctx context.Context, req CreateRequest) (Issued, error) {
 	}
 	cred := NewCredential()
 	r := &Record{
+		NetworkUID: req.NetworkUID, BindingUID: req.BindingUID,
 		EndpointRevision: endpointRevision,
 		Endpoint:         req.Endpoint,
 		Connector:        req.Connector, Cell: req.Cell, VPC: req.VPC, Revision: 1, Digest: Digest(cred),
@@ -150,8 +157,15 @@ func (g Grants) Rotate(ctx context.Context, connector string, lifetime time.Dura
 			return errors.New("connector is disabled")
 		}
 		if r.Endpoint != nil {
-			vpc := galacticv1alpha1.MASQUEEndpointVPCReference(r.VPC)
-			if err := endpoints.CheckScope(ctx, g.Client, g.Namespace, "", r.Endpoint, vpc); err != nil {
+			var vpc cloudv1alpha1.VPC
+			key := client.ObjectKey{Namespace: r.VPC.Namespace, Name: r.VPC.Name}
+			if err := g.Client.Get(ctx, key, &vpc); err != nil {
+				return err
+			}
+			if string(vpc.UID) != r.VPC.UID || !vpc.DeletionTimestamp.IsZero() {
+				return errors.New("endpoint grant VPC was replaced or is being deleted")
+			}
+			if err := endpoints.CheckScope(ctx, g.Client, g.Namespace, "", r.Endpoint); err != nil {
 				return err
 			}
 			revision, _, err := endpoints.GrantRevision(ctx, g.Client, g.Namespace, r.Endpoint.EndpointUID)

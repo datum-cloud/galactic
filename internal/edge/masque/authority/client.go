@@ -186,6 +186,7 @@ func (c *Client) currentTransport() (*http.Transport, error) {
 
 func toGrant(g *Grant) masque.Grant {
 	return masque.Grant{
+		NetworkUID: g.NetworkUID, BindingUID: g.BindingUID,
 		Endpoint:  g.Endpoint,
 		Connector: g.Connector, Principal: g.Connector, VPC: g.VPC, VPCUID: g.VPCUID, VPCID: g.VPCID,
 		Service: masque.ServiceRef{Namespace: g.Service.Namespace, Name: g.Service.Name, UID: g.Service.UID},

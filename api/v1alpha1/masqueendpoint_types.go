@@ -6,15 +6,8 @@ type MASQUEEndpointScope struct {
 	EndpointUID        string `json:"endpointUID"`
 	CustomerProjectUID string `json:"customerProjectUID"`
 	GatewayUID         string `json:"gatewayUID"`
-	NetworkUID         string `json:"networkUID"`
 	Cell               string `json:"cell"`
 	Hostname           string `json:"hostname"`
-}
-
-type MASQUEEndpointVPCReference struct {
-	Namespace string `json:"namespace"`
-	Name      string `json:"name"`
-	UID       string `json:"uid"`
 }
 
 type MASQUEEndpointCertificateReference struct {
@@ -23,13 +16,12 @@ type MASQUEEndpointCertificateReference struct {
 	Revision string `json:"revision"`
 }
 
-// +kubebuilder:validation:XValidation:rule="self.endpointUID == oldSelf.endpointUID && self.customerProjectUID == oldSelf.customerProjectUID && self.gatewayUID == oldSelf.gatewayUID && self.networkUID == oldSelf.networkUID && self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider && self.vpcRef == oldSelf.vpcRef",message="endpoint identity is immutable"
+// +kubebuilder:validation:XValidation:rule="self.endpointUID == oldSelf.endpointUID && self.customerProjectUID == oldSelf.customerProjectUID && self.gatewayUID == oldSelf.gatewayUID && self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider",message="endpoint identity is immutable"
 // +kubebuilder:validation:XValidation:rule="self == oldSelf || self.revision > oldSelf.revision",message="changes require a greater revision"
 type MASQUEEndpointSpec struct {
 	MASQUEEndpointScope `json:",inline"`
-	Metro               string                     `json:"metro"`
-	Provider            string                     `json:"provider"`
-	VPCRef              MASQUEEndpointVPCReference `json:"vpcRef"`
+	Metro               string `json:"metro"`
+	Provider            string `json:"provider"`
 	// +kubebuilder:validation:Minimum=1
 	Revision       int64                              `json:"revision"`
 	CertificateRef MASQUEEndpointCertificateReference `json:"certificateRef"`

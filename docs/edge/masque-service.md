@@ -47,8 +47,9 @@ the root Galactic Kustomization still does not enable MASQUE.
 
 The [API reference](../api/galactic.md#masqueendpoint) defines the complete
 schema. Immutable identity is `endpointUID`, `customerProjectUID`, `gatewayUID`,
-`networkUID`, `metro`, `cell`, `provider`, `hostname` and `vpcRef` (namespace,
-name, UID). `endpointUID` is the service-project ConnectEndpoint UID, not the
+`metro`, `cell`, `provider` and `hostname`. There is no endpoint `networkUID` or
+`vpcRef`: one gateway endpoint serves separately authorized network bindings.
+`endpointUID` is the service-project ConnectEndpoint UID, not the
 distributed object's UID. The hostname is a lowercase DNS name without a port.
 Every mutable change increments the positive `spec.revision`, including
 certificate replacement, disable and reactivation. Exactly one registration
@@ -78,9 +79,12 @@ registration together after validation. Same-expiry and shorter-lived rekeys
 are supported. Replacements cancel and drain that endpoint's active requests
 before activation, including emergency rekeys; clients reconnect. Other
 hostnames and their connections are unaffected. SNI selects the certificate;
-every HTTP/3 or HTTP/2 request checks authority, SNI and VPC again, including
-multiplexed streams. Only the registered hostname or that hostname with `:443`
-is accepted. Unknown, removed and mismatched authorities return 421.
+every HTTP/3 or HTTP/2 request checks authority and SNI before authenticating
+its own credential and VPC selector against the authority. Two authenticated
+CONNECT-IP streams may select different VPCs on **one** QUIC or TLS/TCP
+connection. Authentication of one stream never authorizes a sibling stream.
+Only the registered hostname or that hostname with `:443` is accepted. Unknown,
+removed and mismatched authorities return 421.
 
 The old valid registration may continue during a failed replacement while its
 own Secret remains readable and valid. Deletion of the active Secret stops
@@ -123,12 +127,29 @@ Lost-cell cleanup requires explicit operational recovery, not a fabricated ack.
 
 `pkg/masquegrant.New(uncachedCellClient, namespace)` exposes `Create`, `Rotate`,
 `Disable` and `Retire` using the existing authority/ledger implementation.
-`CreateRequest.Endpoint` adds the exact endpoint/project/gateway/network/cell/
-hostname scope to the existing VPC selector and UID. Creation and rotation
-verify the delivered registration and durable fence. Retain a deterministic
+`CreateRequest.Endpoint` adds the exact endpoint/project/gateway/cell/hostname
+scope to the existing UID-pinned `VPC` reference. For managed grants,
+`CreateRequest.NetworkUID` and `BindingUID` are required, internal identities
+stored on the grant record and authorization, not the endpoint. Connect's
+trusted issuer resolves customer-facing **names** to these UIDs, verifies
+network-binding authorization and resolves the network to its cell VPC. Galactic
+does not resolve customer Network objects. It independently verifies the
+request's controller-issued VPC selector against the credential, reads the
+live VPC UID on authorization and refresh, and rejects stale-UID rotation.
+Creation and rotation verify the delivered registration and durable fence.
+Retain a deterministic, binding-specific
 connector UUID across retries: a failed create reuses its allocation, while an
 already-created record requires rotation because plaintext credentials are not
 stored. `Retire` retains the `/96` allocation tombstone.
+
+Each binding has its own credential, EdgeService, route/attachment claims and
+`/96` allocation in its VPC/cell ledger. Revoking a binding or deleting its VPC
+ends only the corresponding sessions, not the shared transport or other VPCs.
+Recreating a same-name VPC cannot revive the old UID-pinned credential. Network
+binding changes do not alter endpoint registration, DNS or certificates.
+Disabling the endpoint drains **all** its streams. Overlapping VPC address
+space still requires isolated VRFs and client routing; sharing a transport
+does not combine routing domains or qualify overlapping OS routes.
 
 `pkg/masquegrant.NewLedgers(client, namespace)` exposes the existing `Ledgers`
 administrative bootstrap API, including `Init`. Provision ledgers explicitly;
@@ -150,6 +171,30 @@ revocation floor. Reactivation does not revive old credentials; rotate them or
 create a new authorized connector. Certificate renewal alone preserves the
 credential epoch. Cell migration needs a new assignment, grant and attachment;
 this feature does not implement transparent roaming or address preservation.
+
+### Shared-transport authorization test
+
+With `setup-envtest` installed, run:
+
+```sh
+CI=true GODEBUG=http2xconnect=1 \
+  KUBEBUILDER_ASSETS="$(setup-envtest use 1.37.0 -p path)" \
+  go test -race ./internal/edge/masque/authority \
+  -run '^TestManagedEndpointMultiplexedAuthority$' -count=1 -v
+```
+
+Alternatively set `KUBEBUILDER_ASSETS` to an installed Kubernetes envtest
+binary directory. `CI=true` makes missing assets fail instead of skipping.
+This test counts physical dials and requires exactly one connection per H3/H2
+case. It uses the real grant ledger, authorization and refresh implementation
+against an API server, with managed SNI/authority resolution and separate
+CONNECT-IP streams. It covers two VPCs, denied sibling/third-VPC replay,
+independent revocation, VPC deletion/recreation, unchanged endpoint identity
+during network changes, shorter-lived certificate replacement, and endpoint
+disable draining all streams. Its packet backend is a test double: this is
+not kernel VRF, route withdrawal, overlapping client OS routes, public TLS/DNS,
+or production datapath qualification. The existing containerlab and external
+cross-system acceptance gates remain required.
 
 The bases leave out `--cell` and `--authority`, so a pod started without its overlay exits at startup instead of serving a wrong name. An overlay appends them, for example:
 

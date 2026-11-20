@@ -16,13 +16,13 @@ import (
 	"go.datum.net/galactic/internal/edge/masque/endpoints"
 )
 
-func scopedEndpoint(ref VPCRef) *galacticv1alpha1.MASQUEEndpoint {
+func scopedEndpoint() *galacticv1alpha1.MASQUEEndpoint {
 	return &galacticv1alpha1.MASQUEEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "endpoint", Namespace: testNS},
 		Spec: galacticv1alpha1.MASQUEEndpointSpec{MASQUEEndpointScope: galacticv1alpha1.MASQUEEndpointScope{
 			EndpointUID: "endpoint", CustomerProjectUID: "project", GatewayUID: "gateway",
-			NetworkUID: "network", Cell: testCell, Hostname: "gateway.example.com"},
-			VPCRef: galacticv1alpha1.MASQUEEndpointVPCReference(ref), Provider: testProvider,
-			Metro: "metro", Revision: 1, Enabled: true,
+			Cell: testCell, Hostname: "gateway.example.com"},
+			Provider: testProvider,
+			Metro:    "metro", Revision: 1, Enabled: true,
 			CertificateRef: galacticv1alpha1.MASQUEEndpointCertificateReference{
 				Name: "tls", Revision: strings.Repeat("a", 64)}}}
 }
@@ -30,7 +30,7 @@ func scopedEndpoint(ref VPCRef) *galacticv1alpha1.MASQUEEndpoint {
 func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 	ledger, ref := fakeLedgers(t)
 	grants := Grants(ledger)
-	endpoint := scopedEndpoint(ref)
+	endpoint := scopedEndpoint()
 	ctx := context.Background()
 	if err := grants.Client.Create(ctx, endpoint); err != nil {
 		t.Fatal(err)
@@ -54,7 +54,10 @@ func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 		}
 	}
 	writeFence(0)
+	const bindingIdentity = "binding"
+	const networkIdentity = "network"
 	issued, err := grants.Create(ctx, CreateRequest{VPC: ref, Cell: testCell,
+		NetworkUID: networkIdentity, BindingUID: bindingIdentity,
 		Lifetime: time.Hour, Endpoint: &endpoint.Spec.MASQUEEndpointScope})
 	if err != nil {
 		t.Fatal(err)
@@ -63,16 +66,29 @@ func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if record.NetworkUID != networkIdentity || record.BindingUID != bindingIdentity {
+		t.Fatal("grant lost its binding-scoped network identity")
+	}
 	authority := &Authority{Client: grants.Client, Namespace: testNS, Provider: testProvider, Cell: testCell}
 	if err := authority.endpoint(ctx, record); err != nil {
 		t.Fatal(err)
+	}
+	for _, missing := range []string{networkIdentity, bindingIdentity} {
+		invalid := *record
+		if missing == networkIdentity {
+			invalid.NetworkUID = ""
+		} else {
+			invalid.BindingUID = ""
+		}
+		if invalid.validate() == nil {
+			t.Fatal("managed grant accepted incomplete binding identity")
+		}
 	}
 	const otherIdentity = "other"
 	for _, mutate := range []func(*galacticv1alpha1.MASQUEEndpointScope){
 		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.EndpointUID = otherIdentity },
 		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.CustomerProjectUID = otherIdentity },
 		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.GatewayUID = otherIdentity },
-		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.NetworkUID = otherIdentity },
 		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.Cell = otherIdentity },
 		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.Hostname = "other.example.com" },
 	} {

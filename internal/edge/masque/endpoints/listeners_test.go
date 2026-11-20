@@ -118,9 +118,8 @@ func TestSharedListenersCheckEveryMultiplexedAuthority(t *testing.T) {
 			client := &http.Client{Transport: transport(first.Spec.Hostname), Timeout: 3 * time.Second}
 			hostnames := []string{first.Spec.Hostname, second.Spec.Hostname, "unknown.example.com", first.Spec.Hostname}
 			for _, hostname := range hostnames {
-				req := connectRequest(t, protocol, first.Spec.Hostname, first.Spec.VPCRef.Namespace+"/"+first.Spec.VPCRef.Name)
+				req := connectRequest(t, protocol, first.Spec.Hostname, "tenant/first")
 				req.Host = hostname
-				req.Header.Set(connectip.VPCHeader, first.Spec.VPCRef.Namespace+"/"+first.Spec.VPCRef.Name)
 				response, err := client.Do(req)
 				if err != nil {
 					t.Fatal(err)
@@ -139,8 +138,7 @@ func TestSharedListenersCheckEveryMultiplexedAuthority(t *testing.T) {
 				t.Fatalf("requests not multiplexed: %d connections", connections.Load())
 			}
 			registry.Remove(first.Spec.EndpointUID)
-			req := connectRequest(t, protocol, first.Spec.Hostname, first.Spec.VPCRef.Namespace+"/"+first.Spec.VPCRef.Name)
-			req.Header.Set(connectip.VPCHeader, first.Spec.VPCRef.Namespace+"/"+first.Spec.VPCRef.Name)
+			req := connectRequest(t, protocol, first.Spec.Hostname, "tenant/first")
 			response, err := client.Do(req)
 			if err != nil {
 				t.Fatal(err)
@@ -150,8 +148,7 @@ func TestSharedListenersCheckEveryMultiplexedAuthority(t *testing.T) {
 				t.Fatal("established connection bypassed removal")
 			}
 			otherClient := &http.Client{Transport: transport(second.Spec.Hostname), Timeout: 3 * time.Second}
-			req = connectRequest(t, protocol, second.Spec.Hostname, second.Spec.VPCRef.Namespace+"/"+second.Spec.VPCRef.Name)
-			req.Header.Set(connectip.VPCHeader, second.Spec.VPCRef.Namespace+"/"+second.Spec.VPCRef.Name)
+			req = connectRequest(t, protocol, second.Spec.Hostname, "tenant/second")
 			response, err = otherClient.Do(req)
 			if err != nil {
 				t.Fatal(err)

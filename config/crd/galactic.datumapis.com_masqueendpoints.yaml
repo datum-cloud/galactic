@@ -63,27 +63,12 @@ spec:
                   type: string
                 metro:
                   type: string
-                networkUID:
-                  type: string
                 provider:
                   type: string
                 revision:
                   format: int64
                   minimum: 1
                   type: integer
-                vpcRef:
-                  properties:
-                    name:
-                      type: string
-                    namespace:
-                      type: string
-                    uid:
-                      type: string
-                  required:
-                    - name
-                    - namespace
-                    - uid
-                  type: object
               required:
                 - cell
                 - certificateRef
@@ -93,14 +78,12 @@ spec:
                 - gatewayUID
                 - hostname
                 - metro
-                - networkUID
                 - provider
                 - revision
-                - vpcRef
               type: object
               x-kubernetes-validations:
                 - message: endpoint identity is immutable
-                  rule: self.endpointUID == oldSelf.endpointUID && self.customerProjectUID == oldSelf.customerProjectUID && self.gatewayUID == oldSelf.gatewayUID && self.networkUID == oldSelf.networkUID && self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider && self.vpcRef == oldSelf.vpcRef
+                  rule: self.endpointUID == oldSelf.endpointUID && self.customerProjectUID == oldSelf.customerProjectUID && self.gatewayUID == oldSelf.gatewayUID && self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider
                 - message: changes require a greater revision
                   rule: self == oldSelf || self.revision > oldSelf.revision
             status:

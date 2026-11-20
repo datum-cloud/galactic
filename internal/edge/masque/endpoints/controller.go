@@ -35,7 +35,7 @@ type Controller struct {
 }
 
 func SameIdentity(first, second galacticv1alpha1.MASQUEEndpointSpec) bool {
-	return first.MASQUEEndpointScope == second.MASQUEEndpointScope && first.VPCRef == second.VPCRef &&
+	return first.MASQUEEndpointScope == second.MASQUEEndpointScope &&
 		first.Metro == second.Metro && first.Provider == second.Provider
 }
 
@@ -257,7 +257,7 @@ func (controller *Controller) Run(ctx context.Context) {
 
 func CheckScope(
 	ctx context.Context, reader client.Reader, namespace, provider string,
-	scope *galacticv1alpha1.MASQUEEndpointScope, vpc galacticv1alpha1.MASQUEEndpointVPCReference,
+	scope *galacticv1alpha1.MASQUEEndpointScope,
 ) error {
 	if scope == nil {
 		return nil
@@ -273,7 +273,7 @@ func CheckScope(
 		}
 		matches++
 		if !endpoint.Spec.Enabled || !endpoint.DeletionTimestamp.IsZero() || endpoint.Spec.MASQUEEndpointScope != *scope ||
-			endpoint.Spec.VPCRef != vpc || provider != "" && endpoint.Spec.Provider != provider {
+			provider != "" && endpoint.Spec.Provider != provider {
 			return errors.New("endpoint scope is disabled or mismatched")
 		}
 		var config corev1.ConfigMap

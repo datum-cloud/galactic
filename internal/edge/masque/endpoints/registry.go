@@ -46,10 +46,9 @@ func NewRegistry() *Registry {
 }
 
 func ValidateSpec(spec galacticv1alpha1.MASQUEEndpointSpec) error {
-	if spec.EndpointUID == "" || spec.CustomerProjectUID == "" || spec.GatewayUID == "" || spec.NetworkUID == "" ||
-		spec.Cell == "" || spec.Provider == "" || spec.Metro == "" || spec.VPCRef.Name == "" || spec.VPCRef.Namespace == "" ||
-		spec.VPCRef.UID == "" || spec.Revision <= 0 || spec.CertificateRef.Name == "" {
-		return errors.New("endpoint identity, VPC, certificate and positive revision are required")
+	if spec.EndpointUID == "" || spec.CustomerProjectUID == "" || spec.GatewayUID == "" ||
+		spec.Cell == "" || spec.Provider == "" || spec.Metro == "" || spec.Revision <= 0 || spec.CertificateRef.Name == "" {
+		return errors.New("endpoint identity, certificate and positive revision are required")
 	}
 	if spec.Hostname != strings.ToLower(spec.Hostname) || len(validation.IsDNS1123Subdomain(spec.Hostname)) != 0 ||
 		!strings.Contains(spec.Hostname, ".") {
@@ -187,9 +186,8 @@ func (registry *Registry) Resolve(request *http.Request) (context.Context, func(
 	defer registry.mu.Unlock()
 	hostname := strings.TrimSuffix(request.Host, ":443")
 	current := registry.entries[hostname]
-	if !registry.valid(current) || request.TLS == nil || request.TLS.ServerName != hostname ||
-		request.Header.Get(connectip.VPCHeader) != current.spec.VPCRef.Namespace+"/"+current.spec.VPCRef.Name {
-		return nil, nil, errors.New("authority, SNI or VPC mismatch")
+	if !registry.valid(current) || request.TLS == nil || request.TLS.ServerName != hostname {
+		return nil, nil, errors.New("authority or SNI mismatch")
 	}
 	ctx, cancel := context.WithCancel(connectip.WithEndpoint(request.Context(), current.spec.MASQUEEndpointScope))
 	stop := context.AfterFunc(current.ctx, cancel)

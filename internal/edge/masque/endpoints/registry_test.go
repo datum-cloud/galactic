@@ -55,10 +55,8 @@ func testEndpoint(t *testing.T, identity string, expires time.Time) (*galacticv1
 		Spec: galacticv1alpha1.MASQUEEndpointSpec{
 			MASQUEEndpointScope: galacticv1alpha1.MASQUEEndpointScope{
 				EndpointUID: identity, CustomerProjectUID: "project-" + identity,
-				GatewayUID: "gateway-" + identity, NetworkUID: "network-" + identity, Cell: "cell-a", Hostname: hostname},
+				GatewayUID: "gateway-" + identity, Cell: "cell-a", Hostname: hostname},
 			Metro: "metro-a", Provider: testProvider, Revision: 1, Enabled: true,
-			VPCRef: galacticv1alpha1.MASQUEEndpointVPCReference{
-				Namespace: "tenant", Name: identity, UID: "vpc-" + identity},
 			CertificateRef: galacticv1alpha1.MASQUEEndpointCertificateReference{Name: identity + "-tls", Revision: revision},
 		}}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
@@ -75,7 +73,7 @@ func request(spec galacticv1alpha1.MASQUEEndpointSpec) *http.Request {
 		"https://"+spec.Hostname+connectip.TemplatePath, nil)
 	request.Host = spec.Hostname
 	request.TLS = &tls.ConnectionState{ServerName: spec.Hostname}
-	request.Header.Set(connectip.VPCHeader, spec.VPCRef.Namespace+"/"+spec.VPCRef.Name)
+	request.Header.Set(connectip.VPCHeader, "tenant/network")
 	return request
 }
 
@@ -139,11 +137,19 @@ func TestRegistryRejectsAuthorityAndBadCertificates(t *testing.T) {
 	if err := registry.Apply(endpoint.Spec, secret); err != nil {
 		t.Fatal(err)
 	}
+	for _, selector := range []string{"tenant/first", "tenant/second"} {
+		req := request(endpoint.Spec)
+		req.Header.Set(connectip.VPCHeader, selector)
+		_, release, err := registry.Resolve(req)
+		if err != nil {
+			t.Fatal("endpoint incorrectly constrained the per-request VPC", err)
+		}
+		release()
+	}
 	for _, mutate := range []func(*http.Request){
 		func(req *http.Request) { req.Host = "unknown.connect.example" },
 		func(req *http.Request) { req.TLS.ServerName = "other.connect.example" },
 		func(req *http.Request) { req.Host += ":8443" },
-		func(req *http.Request) { req.Header.Set(connectip.VPCHeader, "tenant/other") },
 		func(req *http.Request) { req.TLS = nil },
 	} {
 		req := request(endpoint.Spec)

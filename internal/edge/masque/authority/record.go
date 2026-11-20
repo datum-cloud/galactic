@@ -51,6 +51,8 @@ func (v VPCRef) Selector() string { return v.Namespace + "/" + v.Name }
 
 // Record is one connector's grant, as the operator approved it.
 type Record struct {
+	NetworkUID       string                                `json:"networkUID,omitempty"`
+	BindingUID       string                                `json:"bindingUID,omitempty"`
 	EndpointRevision int64                                 `json:"endpointRevision,omitempty"`
 	Endpoint         *galacticv1alpha1.MASQUEEndpointScope `json:"endpoint,omitempty"`
 	// Connector is the connector's immutable UUID.
@@ -81,7 +83,7 @@ func RecordName(connector string) string { return "masque-grant-" + connector }
 // validate reports the first malformed field of r.
 func (r *Record) validate() error {
 	if r.Endpoint != nil && (r.EndpointRevision <= 0 || r.Endpoint.EndpointUID == "" ||
-		r.Endpoint.CustomerProjectUID == "" || r.Endpoint.GatewayUID == "" || r.Endpoint.NetworkUID == "" ||
+		r.Endpoint.CustomerProjectUID == "" || r.Endpoint.GatewayUID == "" || r.NetworkUID == "" || r.BindingUID == "" ||
 		r.Endpoint.Hostname == "" || r.Endpoint.Cell != r.Cell) {
 		return errors.New("complete matching endpoint scope is required")
 	}

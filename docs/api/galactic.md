@@ -877,7 +877,6 @@ _Appears in:_
 | `endpointUID` _string_ |  |  |  |
 | `customerProjectUID` _string_ |  |  |  |
 | `gatewayUID` _string_ |  |  |  |
-| `networkUID` _string_ |  |  |  |
 | `cell` _string_ |  |  |  |
 | `hostname` _string_ |  |  |  |
 
@@ -898,12 +897,10 @@ _Appears in:_
 | `endpointUID` _string_ |  |  |  |
 | `customerProjectUID` _string_ |  |  |  |
 | `gatewayUID` _string_ |  |  |  |
-| `networkUID` _string_ |  |  |  |
 | `cell` _string_ |  |  |  |
 | `hostname` _string_ |  |  |  |
 | `metro` _string_ |  |  |  |
 | `provider` _string_ |  |  |  |
-| `vpcRef` _[MASQUEEndpointVPCReference](#masqueendpointvpcreference)_ |  |  |  |
 | `revision` _integer_ |  |  | Minimum: 1 <br /> |
 | `certificateRef` _[MASQUEEndpointCertificateReference](#masqueendpointcertificatereference)_ |  |  |  |
 | `enabled` _boolean_ |  |  |  |
@@ -923,24 +920,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `instances` _[MASQUEEndpointInstanceStatus](#masqueendpointinstancestatus) array_ |  |  |  |
-
-
-#### MASQUEEndpointVPCReference
-
-
-
-
-
-
-
-_Appears in:_
-- [MASQUEEndpointSpec](#masqueendpointspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `namespace` _string_ |  |  |  |
-| `name` _string_ |  |  |  |
-| `uid` _string_ |  |  |  |
 
 
 #### NodeBindingStatus

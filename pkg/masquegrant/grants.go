@@ -10,7 +10,9 @@ import (
 	"go.datum.net/galactic/internal/edge/masque/authority"
 )
 
-// CreateRequest identifies a connector, VPC and optional managed endpoint.
+// CreateRequest identifies a connector, UID-pinned VPC and optional managed
+// endpoint. Managed grants require issuer-resolved NetworkUID and BindingUID;
+// the shared endpoint itself is independent of every VPC and network binding.
 type CreateRequest = authority.CreateRequest
 
 // Issued contains the credential and retained connector allocation.
