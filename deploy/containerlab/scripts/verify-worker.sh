@@ -169,15 +169,17 @@ snapshot() {
   } | sort
 }
 
-# fixture_gone waits up to one GC interval and a minute for dfw-worker2 to
+# fixture_gone waits up to two GC intervals and a minute for dfw-worker2 to
 # hold no VRF of the combined fixture's VPCs and no route in the tables
-# those VRFs used, so nothing the fixture created reaches the next run. It
+# those VRFs used: a pass that deletes the fixture's BGPAdvertisements may
+# still see them while their finalizers run, and reclaim the VRFs only on the
+# next pass. It waits so nothing the fixture created reaches the next run. It
 # fails with what is left: the VRFs, their tables' routes, and any
 # BGPAdvertisement still naming the VPCs, which keeps GC from reclaiming
 # them.
 fixture_gone() {
   local node=dfw-worker2 left vpc name t
-  for _ in $(seq 36); do
+  for _ in $(seq 66); do
     left=""
     for vpc in 80 81; do
       name="G$(printf '%09s' "${vpc}" | tr ' ' 0)V"
@@ -217,7 +219,7 @@ fixture_gone() {
       -o jsonpath='{.items[0].metadata.name}' </dev/null)
     kc -n "${NS}" logs "${pod}" </dev/null 2>&1 | grep -E 'GC|VRF|vpc-8[01]|00000008[01]' | tail -60
   } >"${OUT}/fixture-leftovers.txt" 2>&1
-  fail "cleanup: the combined fixture left${left} after 6 minutes (fixture-leftovers.txt)"
+  fail "cleanup: the combined fixture left${left} after 11 minutes (fixture-leftovers.txt)"
 }
 
 # no_stale_rows waits up to one GC interval and a minute for every node to
