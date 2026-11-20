@@ -685,7 +685,7 @@ where the lab must:
   name to it through a host alias.
 
 Its node-restart row restarts dfw-worker2's container with
-`scripts/restart-node.sh`, which `docker restart`s a Kind node and restores
+`scripts/restart-node.sh`, which `docker restart`s a Kind worker and restores
 what lived in its network namespace: its gvpc.clab.yaml links (through
 `containerlab tools veth create`, so it needs passwordless `sudo`), its
 sysctls and exec commands, its peers' bonds, the pass-through XDP programs and
