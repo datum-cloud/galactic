@@ -164,12 +164,17 @@ galactic-edge reads.
 ## Rollback
 
 1. Stop Worker on the node.
-2. Run `galactic-worker handback`, which gives each Worker-owned scope to a
-   `galactic-handback:<timestamp>` owner.
+2. Run `galactic-worker handback` ([operations](operations.md)), which gives
+   each Worker-owned scope to a `galactic-handback:<timestamp>` owner. It
+   removes the Local module's handoff state but leaves every edge link
+   registered, with its pass-through entries, so edge traffic keeps flowing.
 3. Restart galactic-edge without `--worker-socket`.
+4. Restart galactic-router on the node, which writes the tenant routes
+   Worker's Fabric module wrote, as the handback asks.
 
 galactic-edge takes each handed-back scope over with `Takeover` (D39) and
-registers every link again in its first snapshot commit.
+registers every link again in its first snapshot commit. A link keeps its
+policy token, because its rows are still there.
 
 ## Where provider adapters plug in
 

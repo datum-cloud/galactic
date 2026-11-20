@@ -14,10 +14,10 @@
 #                            dfw edge attachment is Programmed and every VPC
 #                            scope of one is Worker's
 #   edge-worker.sh disable   stop Worker, hand its scopes back with
-#                            HANDBACK_BIN (a binary run inside each node with
-#                            the fence directory as its argument, as
-#                            galactic-worker handback does), undo the patch, and
-#                            wait until galactic-edge owns its scopes again
+#                            galactic-worker handback, undo the patch, restart
+#                            galactic-router on each edge node as the handback
+#                            asks, and wait until galactic-edge owns its scopes
+#                            again
 #   edge-worker.sh status    print the fence records and edge attachments
 set -euo pipefail
 
@@ -135,12 +135,9 @@ EOF
 
 disable() {
   local node
-  : "${HANDBACK_BIN:?HANDBACK_BIN must name the handback binary}"
   NODES="${EDGE_NODES}" "${SCRIPT_DIR}/worker-fabric.sh" stop
   for node in ${EDGE_NODES}; do
-    docker cp "${HANDBACK_BIN}" "${node}:/opt/galactic-worker/handback"
-    docker exec "${node}" /opt/galactic-worker/handback "${FENCE_DIR}"
-    docker exec "${node}" rm -f /opt/galactic-worker/handback
+    docker exec "${node}" /opt/galactic-worker/galactic-worker handback --node-name "${node}"
   done
   if k -n galactic-system get daemonset galactic-edge -o json |
     jq -e '.spec.template.spec.containers[0].args | any(startswith("--worker-socket"))' >/dev/null; then
@@ -152,9 +149,25 @@ disable() {
     echo "galactic-edge still runs with --worker-socket" >&2
     return 1
   fi
+  for node in ${EDGE_NODES}; do
+    k -n galactic-system delete pod -l app.kubernetes.io/name=galactic-router \
+      --field-selector "spec.nodeName=${node}" --wait=true
+  done
+  wait_for "galactic-router ready on the edge nodes" routers_ready
   wait_for "every dfw edge attachment Programmed" all_programmed
   wait_for "every edge VPC scope galactic-edge's" scopes_owned_by "galactic-edge/"
   status
+}
+
+# routers_ready checks that galactic-router runs Ready on every edge node.
+routers_ready() {
+  local node ready
+  for node in ${EDGE_NODES}; do
+    ready=$(k -n galactic-system get pods -l app.kubernetes.io/name=galactic-router \
+      --field-selector "spec.nodeName=${node}" -o json |
+      jq '[.items[] | select(.status.conditions[]? | select(.type == "Ready" and .status == "True"))] | length')
+    [ "${ready:-0}" -ge 1 ] || return 1
+  done
 }
 
 case "${1:-}" in
