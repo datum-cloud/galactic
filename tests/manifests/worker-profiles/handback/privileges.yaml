@@ -1,0 +1,27 @@
+# Privileges the rendered manifests beside this file grant, checked by
+# hack/check-privileges in task test:manifests. Review every change.
+# Regenerate with check-privileges -write, then task lint-fix.
+#
+# The handback pod: NET_ADMIN and BPF to remove the links, filters and rows
+# Worker's Local module wrote; hostNetwork for the namespace they are in;
+# hostPID for the pod processes a routed link's pod end was found through.
+bindings: {}
+roles: {}
+workloads:
+  Pod/galactic-system/galactic-worker-handback-REPLACE_WITH_NODE_NAME:
+    containers:
+      handback:
+        capabilities:
+          - BPF
+          - NET_ADMIN
+        dropsAll: true
+        hostPaths:
+          - /run/galactic-worker:rw
+          - /run/galactic:rw
+          - /sys/fs/bpf:rw
+          - /var/lib/galactic-edge/ownership:rw
+          - /var/lib/galactic-worker:rw
+        runAsGroup: image
+        runAsUser: "0"
+    hostNetwork: true
+    hostPID: true

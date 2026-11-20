@@ -1,0 +1,9 @@
+# The combined profile includes this: galactic-nat shares the node's uplinks
+# with galactic-gateway, so it runs in dispatch mode.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-nat.*

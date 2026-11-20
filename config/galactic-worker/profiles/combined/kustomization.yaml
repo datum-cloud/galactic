@@ -1,0 +1,11 @@
+# Combined placement: a node=edge node with the service opt-ins also hosts
+# TAP-backed tenant guests, pinned to it (docs/operations/node-labels.md).
+# A service reaches a guest on its own node through a Local handoff, which
+# receives public traffic through the public slot galactic-gateway holds in
+# the node's shared XDP dispatcher, so a combined node runs the gateway, and
+# galactic-nat shares the uplinks in dispatch mode.
+# tests/manifests/worker-profiles/combined is the rendered example.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+components:
+  - ../nat-dispatch
