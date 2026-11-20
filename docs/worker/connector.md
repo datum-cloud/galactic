@@ -134,19 +134,29 @@ holds the VPC's own scope.
 
 ## Compatibility
 
-| Entry point or setting           | Without `--worker-socket` | With `--worker-socket`                                                            |
-| -------------------------------- | ------------------------- | --------------------------------------------------------------------------------- |
-| `cmd/galactic-edge`              | Unchanged                 | The same binary and image                                                         |
-| Existing flags                   | Unchanged                 | Unchanged; `--bgp-namespace` is unused, since Worker creates the VPC's state      |
-| `--worker-token-file`            | Unused                    | Projected token with audience `galactic-worker`                                   |
-| `--worker-wait`                  | Unused                    | How long one link waits for Worker, 10 s by default                               |
-| `config/galactic-edge` manifests | Unchanged                 | Add the `/run/galactic-worker` mount, the token and the flag; #1441 packages them |
-| Provider contract and providers  | Unchanged                 | Unchanged                                                                         |
-| Metrics                          | Unchanged                 | Adds `galactic_edge_foundation_worker_capability` and `_worker_claims`            |
-| Condition reasons                | Unchanged                 | Adds `WorkerRefused` and `WorkerUnavailable` on `Programmed`                      |
+| Entry point or setting           | Without `--worker-socket`               | With `--worker-socket`                                                            |
+| -------------------------------- | --------------------------------------- | --------------------------------------------------------------------------------- |
+| `cmd/galactic-edge`              | Unchanged                               | The same binary and image                                                         |
+| Existing flags                   | Unchanged                               | Unchanged; `--bgp-namespace` is unused, since Worker creates the VPC's state      |
+| `--worker-token-file`            | Unused                                  | Projected token with audience `galactic-worker`                                   |
+| `--worker-wait`                  | Unused                                  | How long one link waits for Worker, 10 s by default                               |
+| `config/galactic-edge` manifests | Unchanged                               | Add the `/run/galactic-worker` mount, the token and the flag; #1441 packages them |
+| Provider contract and providers  | Unchanged                               | Unchanged                                                                         |
+| Metrics                          | Unchanged                               | Adds `galactic_edge_foundation_worker_capability` and `_worker_claims`            |
+| Condition reasons                | Unchanged                               | Adds `WorkerRefused` and `WorkerUnavailable` on `Programmed`                      |
+| Forwarding gates                 | Committed under `edge-gates-<id>` (D38) | Committed under `edge-gates-<id>` (D38)                                           |
 
 Worker's allowlist must grant `galactic-system/galactic-edge` the
 `local.routed_link` capability.
+
+The gate scope changes in both modes, and no gate row is stranded by it. A
+scope is only the lock gate writes take. The rows stay in the same pinned
+maps. After an upgrade, a galactic-edge process opens a gate, or confirms one
+closed, only once no older process holds the VPC's own scope, where older
+releases committed gates, so the two locks never guard the same gate at once.
+After a rollback to an older release, that release fences and adopts the VPC
+scope as before and ignores the `edge-gates-<id>` record, which only a newer
+galactic-edge reads.
 
 ## Rollback
 
