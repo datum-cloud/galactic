@@ -48,7 +48,12 @@ Install in this order:
 `task test:manifests` renders both profiles and compares every container's
 capabilities, host namespaces and hostPath mounts, every RBAC rule and the
 allowlist against `privileges.yaml` beside each fixture. Galactic Worker runs
-with `hostNetwork`, `hostPID` and the capabilities `NET_ADMIN` and `BPF`.
+with `hostNetwork`, `hostPID` and four capabilities. `NET_ADMIN` and `BPF`
+program the host. `SYS_PTRACE` and `SYS_ADMIN` let it open and enter a pod's
+network namespace for a routed link's pod end: the kernel refuses the open to
+a process of another user without `SYS_PTRACE`, and `setns` without
+`SYS_ADMIN`. Kubernetes then requires the container to allow privilege
+escalation.
 
 The cluster's CNI must not claim Galactic's interfaces. Pin Cilium's devices
 to the uplinks (the lab uses `eth0 bond+`). Worker creates links named
