@@ -258,6 +258,9 @@ The pod runs `galactic-worker handback`:
    ([ownership](ownership.md#handing-scopes-back)).
 3. It removes the handoff links, tc filters and pass-through entries Worker's
    Local module wrote, and Local's pins under `/sys/fs/bpf/galactic-local`.
+   It leaves galactic-edge's provider attachment links registered, with their
+   pass-through entries, so their traffic keeps flowing until galactic-edge
+   takes them back ([connector](connector.md#rollback)).
 4. It empties `/var/lib/galactic-worker/claims` and removes the status
    snapshot.
 
@@ -275,7 +278,9 @@ kubectl -n galactic-system delete pod -l app.kubernetes.io/name=galactic-router 
 The handback is safe to repeat. A scope another writer took after it is left
 alone. Garbage collection reclaims a handed-back VPC's VRF and BGPVRFInstance
 once nothing uses it, which can take two of its 5-minute passes, and then
-releases the handback label. A Worker installed again later takes back every
+releases the handback label. A provider attachment link enslaved to the VRF
+keeps it in use, so on a node that keeps galactic-edge's links the VRF stays
+until galactic-edge or Worker next reconciles the VPC. A Worker installed again later takes back every
 handed-back scope that no other writer took in between.
 
 ## Uninstall
@@ -286,12 +291,19 @@ handed-back scope that no other writer took in between.
 2. Delete the DaemonSet and wait for its pods to go:
    `kubectl -n galactic-system delete ds galactic-worker`.
 3. Hand back the scopes and restart galactic-router on every node, as above.
+   On a node with provider attachments, run galactic-edge again, pinned or
+   through a new Worker, so it releases or keeps them: the handback leaves
+   their links registered. A node that will not run galactic-edge again needs
+   its attachments deleted while galactic-edge still runs, before the
+   handback, or one Worker run afterwards with no claims, which unregisters
+   the links' rows and pass-through entries.
 4. Delete the rest: `kubectl delete -k config/galactic-worker` and the
    `galactic-worker-allowlist-*` ConfigMap.
 5. Check each node from a node debug pod: no record in
    `/host/var/lib/galactic-edge/ownership/*.json` names a `galactic-worker:`
    owner, `ip link` shows no `G…N`, `G…T`, `G…R` or `G…P` links, and no
-   interface carries a `galactic_local_*` filter.
+   interface carries a `galactic_local_*` filter. Provider attachment links
+   (`E…`) remain while their attachments exist.
 
 ## Roll back a provider attachment node
 
