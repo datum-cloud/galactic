@@ -123,9 +123,8 @@ installer's `vrf_table` repair and its sweep. `galactic-worker handback`
    filters and `PassThroughLocal` entries. Then, only if no Worker answers
    and none owns a scope, the handback removes Local's pins, Worker's stored
    claims and its status snapshot.
-4. The tenant routes the Fabric module wrote stay, so forwarding continues
-   until galactic-router restarts. The restarted router writes them again as
-   their owner once its BGP sessions come back.
+4. The tenant routes the Fabric module wrote stay, so forwarding continues.
+   galactic-router writes them again as their owner once it restarts.
 
 A handed-back scope is not Worker-owned, so GC, the router, CNI and the
 installer, which write with `Exclusive`, work in it as in any scope no Worker

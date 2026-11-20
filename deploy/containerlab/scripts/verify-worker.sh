@@ -307,10 +307,10 @@ all_rows() {
     jq 'length' 2>/dev/null || echo 0
 }
 
-# A galactic-router restart, such as the previous run's uninstall, leaves a
-# node without tenant routes until its BGP sessions come back. Wait until
-# every node has rows, counted in every table: a node may hold only the
-# claimed VPCs' guests, which the snapshot leaves out.
+# The previous run's uninstall restarts galactic-router on every node, so
+# wait until every node has rows before taking the baseline, counted in every
+# table: a node may hold only the claimed VPCs' guests, which the snapshot
+# leaves out.
 log "waiting for every node's egress_route_table rows"
 for _ in $(seq 30); do
   empty=""
@@ -504,10 +504,10 @@ for node in "${NODES[@]}"; do
   fi
 done
 # galactic-router restarted on every node in the uninstall and writes its
-# tenant routes again as its BGP sessions come back. Each node's state is
-# compared once it matches the baseline, within 5 minutes, and the time from
-# that node's router restart until then is its tenant route gap, which the
-# qualification report (#1442) takes from route-gap.txt.
+# tenant routes again. Each node's state is compared once it matches the
+# baseline, within 5 minutes, and the time from that node's router restart
+# until then is its route gap, which the qualification report (#1442) takes
+# from route-gap.txt.
 declare -A gap=()
 mkdir -p "${OUT}/uninstalled"
 for _ in $(seq 60); do
