@@ -1442,8 +1442,8 @@ tasks:
       - LAB={{.LAB}} ./scripts/handoff-twice.sh {{.CLI_ARGS}}
 
   # The Envoy socket checks (docs/envoy-socket.md). Not part of deploy or
-  # verify: they run Worker on dfw-worker, which never hands its VPC scopes
-  # back, so restore the lab with scripts/envoy-socket-restore.sh after.
+  # verify. They run Worker on dfw-worker and hand its VPC scopes back at the
+  # end; run task verify:ns80 and task verify afterwards on the same deploy.
   # REMOTE=dfw-worker4|sjc picks the remote backends.
   "deploy:ns80-envoy":
     desc: Deploy the Envoy socket fixture (Envoy with galactic-vrf, Worker, backends) on dfw
