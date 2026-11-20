@@ -802,7 +802,7 @@ _Appears in:_
 
 
 
-
+MASQUEEndpoint registers a hostname on existing cell provider capacity.
 
 
 
@@ -885,7 +885,7 @@ _Appears in:_
 
 
 
-
+MASQUEEndpointSpec defines the shared endpoint registration and certificate.
 
 
 

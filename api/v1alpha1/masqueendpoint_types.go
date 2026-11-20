@@ -16,6 +16,8 @@ type MASQUEEndpointCertificateReference struct {
 	Revision string `json:"revision"`
 }
 
+// MASQUEEndpointSpec defines the shared endpoint registration and certificate.
+//
 // +kubebuilder:validation:XValidation:rule="self.endpointUID == oldSelf.endpointUID && self.customerProjectUID == oldSelf.customerProjectUID && self.gatewayUID == oldSelf.gatewayUID && self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider",message="endpoint identity is immutable"
 // +kubebuilder:validation:XValidation:rule="self == oldSelf || self.revision > oldSelf.revision",message="changes require a greater revision"
 type MASQUEEndpointSpec struct {
@@ -48,6 +50,8 @@ type MASQUEEndpointStatus struct {
 	Instances []MASQUEEndpointInstanceStatus `json:"instances,omitempty"`
 }
 
+// MASQUEEndpoint registers a hostname on existing cell provider capacity.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:categories=galactic
@@ -58,6 +62,8 @@ type MASQUEEndpoint struct {
 	Status            MASQUEEndpointStatus `json:"status,omitempty"`
 }
 
+// MASQUEEndpointList contains endpoint registrations.
+//
 // +kubebuilder:object:root=true
 type MASQUEEndpointList struct {
 	metav1.TypeMeta `json:",inline"`

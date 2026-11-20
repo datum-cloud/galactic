@@ -18,6 +18,7 @@ spec:
     - name: v1alpha1
       schema:
         openAPIV3Schema:
+          description: MASQUEEndpoint registers a hostname on existing cell provider capacity.
           properties:
             apiVersion:
               description: |-
@@ -37,6 +38,7 @@ spec:
             metadata:
               type: object
             spec:
+              description: MASQUEEndpointSpec defines the shared endpoint registration and certificate.
               properties:
                 cell:
                   type: string

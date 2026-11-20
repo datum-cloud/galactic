@@ -1,0 +1,144 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: masqueendpoints.galactic.datumapis.com
+spec:
+  group: galactic.datumapis.com
+  names:
+    categories:
+      - galactic
+    kind: MASQUEEndpoint
+    listKind: MASQUEEndpointList
+    plural: masqueendpoints
+    singular: masqueendpoint
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: MASQUEEndpoint registers a hostname on existing cell provider capacity.
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: MASQUEEndpointSpec defines the shared endpoint registration and certificate.
+              properties:
+                cell:
+                  type: string
+                certificateRef:
+                  properties:
+                    name:
+                      type: string
+                    revision:
+                      pattern: ^[0-9a-f]{64}$
+                      type: string
+                  required:
+                    - name
+                    - revision
+                  type: object
+                customerProjectUID:
+                  type: string
+                enabled:
+                  type: boolean
+                endpointUID:
+                  type: string
+                gatewayUID:
+                  type: string
+                hostname:
+                  type: string
+                metro:
+                  type: string
+                provider:
+                  type: string
+                revision:
+                  format: int64
+                  minimum: 1
+                  type: integer
+              required:
+                - cell
+                - certificateRef
+                - customerProjectUID
+                - enabled
+                - endpointUID
+                - gatewayUID
+                - hostname
+                - metro
+                - provider
+                - revision
+              type: object
+              x-kubernetes-validations:
+                - message: endpoint identity is immutable
+                  rule: self.endpointUID == oldSelf.endpointUID && self.customerProjectUID == oldSelf.customerProjectUID && self.gatewayUID == oldSelf.gatewayUID && self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider
+                - message: changes require a greater revision
+                  rule: self == oldSelf || self.revision > oldSelf.revision
+            status:
+              properties:
+                instances:
+                  items:
+                    properties:
+                      appliedCertificateRevision:
+                        type: string
+                      appliedRevision:
+                        format: int64
+                        type: integer
+                      forwardingStopped:
+                        type: boolean
+                      instanceName:
+                        type: string
+                      instanceUID:
+                        type: string
+                      lastHeartbeatTime:
+                        format: date-time
+                        type: string
+                      message:
+                        type: string
+                      observedRevision:
+                        format: int64
+                        type: integer
+                      podUID:
+                        type: string
+                      state:
+                        enum:
+                          - Applied
+                          - Disabled
+                          - Error
+                        type: string
+                    required:
+                      - appliedRevision
+                      - forwardingStopped
+                      - instanceName
+                      - instanceUID
+                      - lastHeartbeatTime
+                      - observedRevision
+                      - podUID
+                      - state
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - instanceName
+                  x-kubernetes-list-type: map
+              type: object
+          required:
+            - spec
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

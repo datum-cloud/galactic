@@ -38,9 +38,10 @@ mount when enabling managed mode, but retain the private grant-authority CA.
 
 Install the generated CRD on the distribution control plane and serving cells
 before delivering registrations. `config/masque/managed-endpoints-crd` exports
-only this CRD; its canonical source is in `config/crd`. Standalone Kustomize
-builds of this export need `--load-restrictor LoadRestrictionsNone` for the
-repository-relative generated file. `config/masque` includes runtime RBAC;
+only this CRD; its canonical source is in `config/crd`. `task generate:crd`
+refreshes the local generated copy so the export builds with default Kustomize
+load restrictions. `task test:manifests` checks that both copies match exactly.
+`config/masque` includes runtime RBAC;
 the root Galactic Kustomization still does not enable MASQUE.
 
 ### Registration and delivery contract
