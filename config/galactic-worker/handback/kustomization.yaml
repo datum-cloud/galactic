@@ -1,0 +1,8 @@
+# A one-shot pod that runs galactic-worker handback on one node, after the
+# Worker pod there is gone (docs/worker/operations.md). Not part of any
+# profile. Set the node and apply it:
+#
+#   kustomize build config/galactic-worker/handback |
+#     sed 's/REPLACE_WITH_NODE_NAME/<node>/' | kubectl apply -f -
+resources:
+  - pod.yaml

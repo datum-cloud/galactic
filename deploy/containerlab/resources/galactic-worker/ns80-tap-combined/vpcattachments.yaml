@@ -1,0 +1,46 @@
+# The two TAP attachments with the address each guest's NAD fixes. Worker
+# takes a destination's addresses only from spec.interface.addresses
+# (docs/worker/contract.md, trusted sources), and a routed link's pod end
+# uses its claim attachment's. scripts/publish-attachments.sh creates only
+# attachments that do not exist, so these stand, and it writes their status.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: vpc-a-tap
+  namespace: ns80-tap
+spec:
+  vpc:
+    name: "80"
+  interface:
+    name: eth0
+    mode: Hypervisor
+    addresses:
+      - fd20:80:ff03::1:0:0/96
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: vpc-b-tap
+  namespace: ns80-tap
+spec:
+  vpc:
+    name: "81"
+  interface:
+    name: eth0
+    mode: Hypervisor
+    addresses:
+      - fd20:80:ff03::1:0:0/96
+---
+# The claim's own handoff attachment on the combined node, as a gateway's
+# would be. It has no pod; scripts/verify-worker.sh writes its status.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: vpc-a-svc
+  namespace: ns80-tap
+spec:
+  vpc:
+    name: "80"
+  interface:
+    name: eth0
+    mode: Netns

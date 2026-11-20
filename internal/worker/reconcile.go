@@ -120,6 +120,7 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 		w.reportFailure(evals, workerv1alpha1.ReasonProgrammingFailed, err)
 		return err
 	}
+	digest, drifts := w.checkDrift(vpc, desired, t.Resync, mods, changes)
 	if !empty || ensure || t.Resync {
 		mutate := func() error {
 			// A snapshot reconciles the complete state, including the host
@@ -153,8 +154,9 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 	}
 	w.mu.Lock()
 	s := w.scope(vpc)
-	s.resyncing, s.repair = false, false
+	s.resyncing, s.repair, s.committed = false, false, digest
 	w.mu.Unlock()
+	w.noteDrift(vpc, drifts)
 
 	state := map[workerv1alpha1.Mode]module.State{}
 	for _, m := range mods {
@@ -333,7 +335,7 @@ func applyModules(ctx context.Context, scope module.Scope, mods []module.Module,
 func (w *Worker) completeTransfer(vpc string) error {
 	scope := module.Scope{VPC: vpc}
 	rec, err := w.d.Fence.Read(scope.Name())
-	if err != nil || !rec.Transitioning || !workerOrUnowned(rec) {
+	if err != nil || !rec.Transitioning || !takeable(rec) {
 		return err
 	}
 	t, err := w.acquire(scope)
@@ -588,8 +590,8 @@ func (w *Worker) acquire(scope module.Scope) (ownership.Ticket, error) {
 		return w.d.Fence.Begin(name, w.owner)
 	case !rec.Transitioning && rec.Owner == "":
 		return w.d.Fence.Claim(name, w.owner)
-	case rec.Owner == "" || ownership.WorkerOwned(rec.Owner):
-		return w.d.Fence.Takeover(name, w.owner, workerOrUnowned)
+	case takeable(rec):
+		return w.d.Fence.Takeover(name, w.owner, takeable)
 	case rec.Transitioning:
 		return ownership.Ticket{}, fmt.Errorf("%w: %s is moving to another owner", ownership.ErrTransitioning, name)
 	default:
@@ -597,10 +599,12 @@ func (w *Worker) acquire(scope module.Scope) (ownership.Ticket, error) {
 	}
 }
 
-// workerOrUnowned accepts a scope no writer owns or a Worker incarnation
-// owns, as it stands under the fence's lock.
-func workerOrUnowned(r ownership.Record) bool {
-	return r.Owner == "" || ownership.WorkerOwned(r.Owner)
+// takeable accepts a scope no writer owns, one a Worker incarnation owns, or
+// one a Worker handback left (internal/worker/handback), as it stands under
+// the fence's lock. A Worker installed again after a handback takes back the
+// scopes no legacy writer has taken since.
+func takeable(r ownership.Record) bool {
+	return r.Owner == "" || ownership.WorkerOwned(r.Owner) || ownership.HandedBack(r.Owner)
 }
 
 // reportFailure sets Programmed=False with reason on every live claim of
@@ -613,9 +617,11 @@ func (w *Worker) reportFailure(evals []*claimEval, reason string, err error) {
 		if c == nil || c.rec.Generation != e.gen || c.rec.Releasing {
 			continue
 		}
+		before := cloneCondition(readyCondition(c.status))
 		setCond(c.status, cond(workerv1alpha1.ConditionProgrammed, condFalse, reason, err.Error()))
 		setCond(c.status, cond(workerv1alpha1.ConditionReady, condFalse, reason, ""))
 		c.status.ObservedGeneration = e.gen
+		w.logReadyChange(c, before)
 		w.publish(c)
 	}
 }
@@ -648,7 +654,9 @@ func (w *Worker) report(evals []*claimEval, state map[workerv1alpha1.Mode]module
 		if e.releasing {
 			continue
 		}
+		before := cloneCondition(readyCondition(c.status))
 		w.applyStatus(c, e, state)
+		w.logReadyChange(c, before)
 		c.status.HandoffInterfaces = nil
 		for _, h := range handoffs[e.key] {
 			c.status.HandoffInterfaces = append(c.status.HandoffInterfaces,
