@@ -94,6 +94,7 @@ func (s *subscriber) wants(owner string, k module.ClaimKey) bool {
 // matching subscriber. w.mu must be held.
 func (w *Worker) publish(c *claim) {
 	c.status.Revision = w.nextRevision()
+	w.statusDirty.Store(true)
 	w.fanout(c.rec.Owner, c.key(), c.status)
 }
 

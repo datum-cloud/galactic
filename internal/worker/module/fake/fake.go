@@ -67,6 +67,17 @@ func (h *Host) Rows(vpc string) []Row {
 	return out
 }
 
+// Drop removes one row of module from the host, as a process other than the
+// module would.
+func (h *Host) Drop(moduleName, vpc string, k module.ClaimKey, id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.rows[moduleName+"/"+vpc][k], id)
+	if len(h.rows[moduleName+"/"+vpc][k]) == 0 {
+		delete(h.rows[moduleName+"/"+vpc], k)
+	}
+}
+
 // Module is a fake delivery module.
 type Module struct {
 	ModuleName string
@@ -208,6 +219,9 @@ type change struct {
 }
 
 func (c change) Empty() bool { return c.empty }
+
+// Drift implements module.DriftDescriber.
+func (c change) Drift() (string, bool) { return "rows differ", true }
 
 // Plan implements module.Module.
 func (m *Module) Plan(ctx context.Context, scope module.Scope, desired []module.Claim) (module.Change, error) {

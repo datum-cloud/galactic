@@ -1460,6 +1460,46 @@ tasks:
     cmds:
       - ./scripts/envoy-socket.sh {{.CLI_ARGS | default "../../bin/envoy-socket/run"}}
 
+  # galactic-worker from this checkout's manifests (docs/worker/operations.md).
+  # Not part of deploy or verify: worker:verify installs Worker on dfw in one
+  # placement profile, injects failures, and removes it with the handback.
+  "build:galactic-worker":
+    desc: Build the galactic-worker image
+    cmds:
+      - docker build --network=host -t galactic-worker:latest -f ../../containers/galactic-worker/Dockerfile ../..
+
+  "build:worker-claim":
+    desc: Build the lab's Worker claim client image (tests/handoffs/cmd/worker-claim)
+    dir: ../..
+    cmds:
+      - mkdir -p bin/worker-claim-image
+      - CGO_ENABLED=0 go build -o bin/worker-claim-image/worker-claim ./tests/handoffs/cmd/worker-claim
+      # The client runs as an unprivileged user, so the binary must be
+      # executable by anyone whatever mode the build left it with.
+      - printf 'FROM scratch\nCOPY --chmod=0755 worker-claim /worker-claim\nENTRYPOINT ["/worker-claim"]\n' > bin/worker-claim-image/Dockerfile
+      - docker build -t worker-claim:latest bin/worker-claim-image
+
+  "worker:images":
+    desc: Build galactic-worker and the claim client, and load both on dfw's nodes
+    deps: ["build:galactic-worker", "build:worker-claim"]
+    cmds:
+      - |
+        set -e
+        for node in $(docker exec dfw-control-plane kubectl get nodes \
+            -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[*].metadata.name}'); do
+          for image in galactic-worker:latest worker-claim:latest; do
+            echo "--- ${image} -> ${node} ---"
+            docker save "${image}" | docker exec -i "${node}" ctr --namespace k8s.io images import -
+          done
+        done
+
+  "worker:verify":
+    desc: Install Worker on dfw in PROFILE (dedicated or combined), inject failures, remove it (OUTDIR via -- DIR)
+    requires:
+      vars: [PROFILE]
+    cmds:
+      - LAB={{.LAB}} ./scripts/verify-worker.sh {{.PROFILE}} {{.CLI_ARGS}}
+
   clean:
     desc: Destroy the lab and delete artifacts
     cmds:

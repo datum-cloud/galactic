@@ -1,0 +1,12 @@
+# config/galactic-worker/base/allowlist.yaml, plus the lab's claim client
+# (lab-client/), which requests claims as a gateway or the galactic-vrf
+# sidecar would.
+serviceAccounts:
+  - serviceAccount: galactic-system/galactic-router
+    capabilities: [fabric.routes]
+  - serviceAccount: galactic-system/galactic-nat
+    capabilities: [local.veth_pair, fabric.srv6]
+  - serviceAccount: galactic-system/galactic-gateway
+    capabilities: [local.tap, fabric.srv6]
+  - serviceAccount: galactic-system/galactic-worker-lab-client
+    capabilities: [local.tap, local.routed_link, fabric.srv6]

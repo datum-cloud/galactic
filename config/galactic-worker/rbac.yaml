@@ -1,0 +1,72 @@
+# galactic-worker's RBAC, covering only the calls cmd/galactic-worker makes.
+# tests/manifests/worker-profiles/privileges.yaml records the same grants, and
+# task test:manifests fails when the rendered profiles grant more.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-worker
+rules:
+  # Each Worker API call carries a projected ServiceAccount token, which
+  # Worker validates with a TokenReview (internal/worker/auth).
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  # Trusted sources (internal/worker/sources): a destination's VPC, node and
+  # addresses come from its VPCAttachment or EdgeAttachment, which live in
+  # tenant namespaces. The edge attachment guard (internal/edge/maintenance)
+  # lists edge attachments uncached before reclaiming a VPC.
+  - apiGroups: ["galactic.datumapis.com"]
+    resources:
+      - vpcattachments
+      - edgeattachments
+    verbs: ["get", "list", "watch"]
+  # Node locators come from BGPRouters (internal/nodelocator); the cache's
+  # informer is cluster-wide.
+  - apiGroups: ["galactic.datumapis.com"]
+    resources: ["bgprouters"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: galactic-worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: galactic-worker
+subjects:
+  - kind: ServiceAccount
+    name: galactic-worker
+    namespace: galactic-system
+---
+# Writes stay in galactic-system, where the node's BGPVRFInstances and
+# BGPAdvertisements live. Worker ensures a VPC's BGPVRFInstance for the
+# scopes it owns (internal/nodevpc, create or update) and deletes it, and
+# the VPC's orphaned BGPAdvertisements, when it reclaims an unused scope
+# (internal/gc.ReclaimVPC).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: galactic-worker
+  namespace: galactic-system
+rules:
+  - apiGroups: ["galactic.datumapis.com"]
+    resources: ["bgpvrfinstances"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: ["galactic.datumapis.com"]
+    resources: ["bgpadvertisements"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: galactic-worker
+  namespace: galactic-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: galactic-worker
+subjects:
+  - kind: ServiceAccount
+    name: galactic-worker
+    namespace: galactic-system
