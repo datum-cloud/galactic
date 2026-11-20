@@ -441,6 +441,57 @@ func TestFenceMissedRecreationAndNameReuse(t *testing.T) {
 	}
 }
 
+func TestLegacyPlacementFencePreservesRevocations(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "active", true: "removed"}[removed], func(t *testing.T) {
+			endpoint, secret := testEndpoint(t, "first", time.Now().Add(time.Hour))
+			endpoint.Spec.Revision = 5
+			controller := testController(t, endpoint, secret)
+			revokedRevision := int64(3)
+			if removed {
+				revokedRevision = 5
+			}
+			encoded, err := json.Marshal(Fence{Name: endpoint.Name, ObjectUID: string(endpoint.UID),
+				Spec: endpoint.Spec, Removed: removed, RevokedRevision: revokedRevision})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var legacy map[string]any
+			if err := json.Unmarshal(encoded, &legacy); err != nil {
+				t.Fatal(err)
+			}
+			legacy["spec"].(map[string]any)["cell"] = "previous-cell"
+			legacy["spec"].(map[string]any)["metro"] = "previous-metro"
+			encoded, err = json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Namespace: endpoint.Namespace, Name: FenceName(endpoint.Spec.Hostname),
+				Labels: map[string]string{FenceLabel: testProvider}}, Data: map[string]string{"fence.json": string(encoded)}}
+			if err := controller.Client.Create(t.Context(), config); err != nil {
+				t.Fatal(err)
+			}
+			if err := controller.fence(t.Context(), endpoint, false); (err != nil) != removed {
+				t.Fatalf("same revision legacy fence: removed=%v err=%v", removed, err)
+			}
+			stale := endpoint.DeepCopy()
+			stale.Spec.Revision--
+			if err := controller.fence(t.Context(), stale, false); err == nil {
+				t.Fatal("legacy fence allowed revision rollback")
+			}
+			endpoint.Spec.Revision++
+			if err := controller.fence(t.Context(), endpoint, false); err != nil {
+				t.Fatal(err)
+			}
+			current, revoked, err := GrantRevision(t.Context(), controller.Client, endpoint.Namespace, endpoint.Spec.Hostname)
+			if err != nil || current != 6 || revoked != revokedRevision {
+				t.Fatalf("lost retained revisions: %d %d %v", current, revoked, err)
+			}
+		})
+	}
+}
+
 func TestAcknowledgmentRequiresAcquisition(t *testing.T) {
 	for _, boundary := range []string{"creation", "acquisition", "missing"} {
 		t.Run(boundary, func(t *testing.T) {

@@ -144,6 +144,19 @@ cleanup. A higher revision may reactivate the same live identity; retired
 gateway identities and hostname reservations remain Connect's responsibility.
 Lost-cell cleanup requires explicit operational recovery, not a fabricated ack.
 
+Placement-field upgrade uses compatible decoding of existing hostname fences:
+old `spec.cell` and `spec.metro` JSON fields are ignored, while the registration
+name/incarnation, hostname/provider, accepted revision, revoked revision and
+removed state remain enforced. An otherwise identical live registration may
+reconcile at the same revision without rewriting the fence. A later revision
+rewrites the five-field spec while preserving the revoked revision; removed
+registrations still cannot reactivate at the same revision. Never delete/reset
+fences or private receipts to upgrade. This is not a cross-control-plane
+migration: retain the original selected control plane and authority/grant cell
+scope. Upgrade schema, provider arguments and authority/provider binaries
+together; rollback to a placement-requiring binary is not supported after new
+fences are written without those fields.
+
 ### Endpoint-bound grants
 
 `pkg/masquegrant.New(uncachedCellClient, namespace)` exposes `Create`, `Rotate`,
