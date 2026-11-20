@@ -15,7 +15,8 @@
 #
 # The Kind node shares the host's kernel, so its boot ID does not change;
 # the script prints it before and after. Kubernetes restarts the node's pods
-# in place. Needs passwordless sudo for containerlab. Used by
+# in place. Refuses a Kind control-plane node, whose etcd data is on tmpfs.
+# Needs passwordless sudo for containerlab. Used by
 # TestMASQUEService's node-restart row.
 set -euo pipefail
 
@@ -26,6 +27,15 @@ TOPO="${LAB_DIR}/gvpc.clab.yaml"
 LAB=$(awk '/^name:/ {print $2; exit}' "${TOPO}")
 
 node="${1:?usage: restart-node.sh NODE}"
+
+# A control-plane node keeps etcd's data on its tmpfs /tmp
+# (node_files/<site>/config.yaml), so a restart would wipe its cluster.
+case "${node}" in
+  *-control-plane)
+    echo "restart-node.sh: refusing ${node}: its etcd data is on tmpfs and would not survive a restart; rebuild with task destroy and task deploy" >&2
+    exit 1
+    ;;
+esac
 
 # container NAME prints the Docker container of a topology node: a Kind node
 # keeps its own name, a containerlab node is prefixed with the lab's.
