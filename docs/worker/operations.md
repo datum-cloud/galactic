@@ -274,7 +274,8 @@ kubectl -n galactic-system delete pod -l app.kubernetes.io/name=galactic-router 
 
 The handback is safe to repeat. A scope another writer took after it is left
 alone. Garbage collection reclaims a handed-back VPC's VRF and BGPVRFInstance
-once nothing uses it. A Worker installed again later takes back every
+once nothing uses it, which can take two of its 5-minute passes, and then
+releases the handback label. A Worker installed again later takes back every
 handed-back scope that no other writer took in between.
 
 ## Uninstall
