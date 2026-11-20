@@ -2,6 +2,19 @@ apiVersion: kind.x-k8s.io/v1alpha4
 kind: Cluster
 nodes:
   - role: control-plane
+    # etcd keeps its data on the node's /tmp, which Kind mounts as a tmpfs.
+    # Every cluster here shares one host disk, and the deploy loads images
+    # into every node at once, so etcd on that disk stalls on fdatasync long
+    # enough for the API server to answer "etcdserver: request timed out"
+    # (#1467). The lab is always rebuilt with task destroy and task deploy,
+    # so etcd needs no durability, but restarting a control-plane container
+    # loses its cluster: scripts/restart-node.sh refuses to.
+    kubeadmConfigPatches:
+      - |
+        kind: ClusterConfiguration
+        etcd:
+          local:
+            dataDir: /tmp/etcd
   # Kind names workers sequentially by declaration order: dfw-worker,
   # dfw-worker2, dfw-worker3, dfw-worker4. Those names are used as-is -- no
   # kubeadmConfigPatches rename and no post-deploy `docker rename` -- so a
