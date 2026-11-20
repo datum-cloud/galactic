@@ -475,7 +475,7 @@ fi
 "${LAB}" client-down "${SITE}" >>"${OUT}/steps.log"
 kc -n "${NS}" logs -l app.kubernetes.io/name=galactic-worker --all-containers --prefix --tail=-1 \
   >"${OUT}/worker-logs.txt" 2>&1
-"${LAB}" uninstall "${SITE}" 2>&1 | tee "${OUT}/uninstall.log"
+ROUTER_RESTARTS="${OUT}/router-restarts.txt" "${LAB}" uninstall "${SITE}" 2>&1 | tee "${OUT}/uninstall.log"
 for node in "${NODES[@]}"; do
   docker exec "${node}" sh -c 'cat /var/lib/galactic-edge/ownership/*.json 2>/dev/null || true' >"${OUT}/fence-${node}.json"
   if grep -q '"galactic-worker:' "${OUT}/fence-${node}.json"; then
@@ -490,22 +490,30 @@ for node in "${NODES[@]}"; do
   fi
 done
 # galactic-router restarted on every node in the uninstall and writes its
-# tenant routes again as its BGP sessions come back, so the uninstalled
-# state is compared once it settles, within 5 minutes.
-settled=""
-start=$(date +%s)
-for _ in $(seq 30); do
-  snap_all uninstalled
-  same=1
+# tenant routes again as its BGP sessions come back. Each node's state is
+# compared once it matches the baseline, within 5 minutes, and the time from
+# that node's router restart until then is its tenant route gap, which the
+# qualification report (#1442) takes from route-gap.txt.
+declare -A gap=()
+mkdir -p "${OUT}/uninstalled"
+for _ in $(seq 60); do
+  pending=0
   for node in "${NODES[@]}"; do
-    cmp -s "${OUT}/baseline/${node}.txt" "${OUT}/uninstalled/${node}.txt" || same=0
+    [ -n "${gap[${node}]:-}" ] && continue
+    snapshot "${node}" >"${OUT}/uninstalled/${node}.txt"
+    if cmp -s "${OUT}/baseline/${node}.txt" "${OUT}/uninstalled/${node}.txt"; then
+      restarted=$(awk -v n="${node}" '$1 == n {print $2}' "${OUT}/router-restarts.txt" 2>/dev/null | tail -1)
+      gap[${node}]=$(($(date +%s) - ${restarted:-$(date +%s)}))
+    else
+      pending=1
+    fi
   done
-  if [ "${same}" = 1 ]; then
-    settled=$(($(date +%s) - start))
-    break
-  fi
-  sleep 10
+  [ "${pending}" = 0 ] && break
+  sleep 5
 done
-log "uninstalled state ${settled:+settled after ${settled}s}${settled:-did not settle in 300s}"
+for node in "${NODES[@]}"; do
+  echo "${node} ${gap[${node}]:-unsettled}" | tee -a "${OUT}/route-gap.txt"
+done
+log "tenant route gap after the router restart, seconds per node: $(tr '\n' ' ' <"${OUT}/route-gap.txt")"
 compare uninstalled
 log "done"

@@ -4,6 +4,7 @@
 # here rather than under tenants/ns80-tap, where every directory is a site.
 resources:
   - ../../tenants/ns80-tap/dfw
+  - vpcattachments.yaml
 patches:
   - target:
       kind: Deployment
