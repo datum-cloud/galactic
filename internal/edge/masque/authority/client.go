@@ -20,6 +20,10 @@ import (
 	"sync"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
+	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/connectip"
 	"go.datum.net/galactic/internal/edge/masque"
 )
@@ -35,6 +39,7 @@ const maxResponse = 64 << 10
 // Client is the provider side of the authority: a masque.Authorizer that
 // calls a Server over HTTPS as the pod its ServiceAccount token is bound to.
 type Client struct {
+	Reader client.Reader
 	// URL is the authority's base URL, https://host:port.
 	URL string
 	// TokenFile holds the pod's projected ServiceAccount token for the
@@ -62,14 +67,15 @@ func (c *Client) Authorize(ctx context.Context, credential, vpc string) (masque.
 	if c.Now != nil {
 		now = c.Now
 	}
-	req := AuthorizeRequest{Credential: credential, VPC: vpc, Nonce: rand.Text(), Issued: now()}
+	req := AuthorizeRequest{Credential: credential, VPC: vpc, Nonce: rand.Text(), Issued: now(),
+		EndpointRef: connectip.EndpointFromContext(ctx)}
 	var g Grant
 	var err error
 	for range authorizeAttempts {
 		var sent bool
 		sent, err = c.call(ctx, PathAuthorize, req, &g)
 		if err == nil {
-			return toGrant(&g), nil
+			return c.resolveGrant(ctx, &g)
 		}
 		if sent || ctx.Err() != nil {
 			break
@@ -87,7 +93,7 @@ func (c *Client) Refresh(ctx context.Context, g masque.Grant) (masque.Grant, err
 	if err != nil {
 		return masque.Grant{}, err
 	}
-	return toGrant(&out), nil
+	return c.resolveGrant(ctx, &out)
 }
 
 // Retire implements masque.Authorizer.
@@ -185,7 +191,8 @@ func (c *Client) currentTransport() (*http.Transport, error) {
 
 func toGrant(g *Grant) masque.Grant {
 	return masque.Grant{
-		Connector: g.Connector, Principal: g.Connector, VPC: g.VPC, VPCUID: g.VPCUID, VPCID: g.VPCID,
+		EndpointRef: g.EndpointRef,
+		Connector:   g.Connector, Principal: g.Connector, VPC: g.VPC, VPCUID: g.VPCUID, VPCID: g.VPCID,
 		Service: masque.ServiceRef{Namespace: g.Service.Namespace, Name: g.Service.Name, UID: g.Service.UID},
 		Prefix:  g.Prefix, Routes: g.Routes, NotAfter: g.NotAfter, Authorization: g.Authorization,
 		Revision: g.Revision,
@@ -194,4 +201,30 @@ func toGrant(g *Grant) masque.Grant {
 
 func fromServiceRef(s masque.ServiceRef) ServiceRef {
 	return ServiceRef{Namespace: s.Namespace, Name: s.Name, UID: s.UID}
+}
+
+func (c *Client) resolveGrant(ctx context.Context, grant *Grant) (masque.Grant, error) {
+	if c.Reader == nil {
+		return masque.Grant{}, errors.New("authority client requires an uncached reader")
+	}
+	var service galacticv1alpha1.EdgeService
+	serviceKey := client.ObjectKey{Namespace: grant.Service.Namespace, Name: grant.Service.Name}
+	if err := c.Reader.Get(ctx, serviceKey, &service); err != nil {
+		return masque.Grant{}, err
+	}
+	if !activeReceipt(&service) || service.Annotations[AnnotationAuthorization] != grant.Authorization ||
+		!service.DeletionTimestamp.IsZero() || service.Namespace+"/"+service.Spec.VPCRef.Name != grant.VPC {
+		return masque.Grant{}, fmt.Errorf("%w: authorization service changed", connectip.ErrForbidden)
+	}
+	var vpc cloudv1alpha1.VPC
+	vpcKey := client.ObjectKey{Namespace: service.Namespace, Name: service.Spec.VPCRef.Name}
+	if err := c.Reader.Get(ctx, vpcKey, &vpc); err != nil {
+		return masque.Grant{}, err
+	}
+	if string(vpc.UID) != service.Spec.VPCRef.UID || !vpc.DeletionTimestamp.IsZero() || vpc.Status.VPC != grant.VPCID {
+		return masque.Grant{}, fmt.Errorf("%w: authorized VPC changed", connectip.ErrForbidden)
+	}
+	grant.Service.UID = string(service.UID)
+	grant.VPCUID = string(vpc.UID)
+	return toGrant(grant), nil
 }

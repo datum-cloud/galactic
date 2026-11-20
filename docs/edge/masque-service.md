@@ -23,6 +23,262 @@ Images:
 | `config/masque/provider`                 | The `masque-provider` Deployment and UDP/443 + TCP/443 Service                                                                                                               | `--authority`, Secret `masque-provider-tls` for that name, ConfigMap `masque-authority-ca` (`ca.crt`), and how the Service is exposed |
 
 The [certificates](#certificates) section covers both Secrets and the CA.
+For shared logical gateway hostnames, use [managed endpoints](#managed-endpoints)
+instead of a single `--authority` and mounted public certificate.
+
+## Managed endpoints
+
+`masque-provider --managed-endpoints` serves all
+`galactic.datumapis.com/v1alpha1` `MASQUEEndpoint` resources in `POD_NAMESPACE`
+whose `spec.provider` matches the process's `--provider`. This reuses the existing
+provider Deployment, EdgeInstance/Lease, and both listeners. It creates no
+per-gateway capacity. Defaults remain TCP and UDP `:8443`; expose both through
+the existing Service's port 443. Remove the legacy public TLS volume and its
+mount when enabling managed mode, but retain the private grant-authority CA.
+
+Install the generated CRD on the distribution control plane and serving cells
+before delivering registrations. `config/masque/managed-endpoints-crd` exports
+only this CRD; its canonical source is in `config/crd`. `task generate:crd`
+refreshes the local generated copy so the export builds with default Kustomize
+load restrictions. `task test:manifests` checks that both copies match exactly.
+`config/masque` includes runtime RBAC;
+the root Galactic Kustomization still does not enable MASQUE.
+
+### Registration and delivery contract
+
+The [API reference](../api/galactic.md#masqueendpoint) defines the complete
+schema. The spec contains only `hostname`, `provider`, `revision`,
+`certificateRef` and `enabled`. Registration name, hostname and provider are
+immutable. No customer project, gateway, endpoint,
+network or binding identifiers are copied into the spec or ownership annotations.
+One gateway endpoint serves separately authorized network bindings. The hostname
+is a lowercase DNS name without a port. Every mutable change increments the
+positive `spec.revision`, including certificate replacement, disable and
+reactivation. Exactly one registration may claim a hostname within the namespace,
+even across different providers in that namespace.
+
+Each cell/metro has a separate control plane. Connect retains placement in its
+service-provider Project, targets exactly one selected cell through Karmada,
+and uses that control plane's reader and grant credentials. Registration and
+its retained fence contain no copied cell/metro fields. The provider has no
+`--cell` flag. The grant authority retains `--cell`, and configured grant issuers and
+per-VPC/cell ledgers retain their existing cell scope; a grant from another
+cell remains unauthorized.
+
+`provider` selects a local named `EdgeProvider`, not placement. The runtime
+supports independently selectable providers in one API/namespace: `--provider`
+selects registrations and EdgeInstance membership, and the authority rejects
+other providers' registrations. Each EdgeProvider has its own approval and
+ServiceAccount identities. The default bundle instantiates `masque`, but does
+not impose a singleton provider API.
+
+`certificateRef.name` identifies a same-namespace `kubernetes.io/tls` Secret.
+`certificateRef.revision` is lowercase SHA-256 of the leaf certificate DER,
+matching `TLSCertificate.status.certificateRevision`, never an expiry ordering.
+The Secret contains `tls.crt` and `tls.key` and this annotation:
+
+```yaml
+masque.galactic.datumapis.com/certificate-revision: <leaf-der-sha256>
+```
+
+Use immutable, versioned Secret names. Issuance infrastructure and selected
+serving cells hold the keys; neither customer nor service-provider Projects
+receive them. Delivery validates issuance ownership upstream; the runtime
+checks the named registration certificate reference, exact fingerprint, matching private
+key, SAN hostname and validity. Runtime trusts the authorized delivery writer;
+external probes must verify public WebPKI trust and packet reachability.
+
+### Bounded legacy coexistence
+
+`--managed-endpoints` alone is exclusive: it replaces the file certificate and
+legacy authority with the registration registry. Do not enable it alone while
+legacy clients still need the existing authority and nil-endpoint grants.
+Explicit `--legacy-coexistence` requires `--managed-endpoints` and the existing
+`--authority`. Keep that authority, file certificate/key and volume mount intact.
+The same provider and shared listeners then serve both paths without additional
+capacity or per-gateway deployments.
+
+Only the exact configured legacy HTTP authority (including any explicit port)
+with its matching lowercase DNS SNI can use the legacy path. Its file certificate
+must be available, valid and cover that hostname; it is reloaded on change.
+Only grants with no endpoint reference authorize there. Managed grants cannot
+be replayed there, and legacy grants cannot authorize a managed hostname.
+The legacy hostname is reserved against managed registration. Unknown, stale,
+disabled or mismatched managed names never fall back to the legacy certificate
+or authorization path; unknown SNI fails TLS even if a client skips verification.
+Every stream is checked independently, including reused H3/H2 connections.
+
+Managed certificate replacement and endpoint disable drain only that endpoint's
+streams; legacy streams remain independent and retain ordinary grant revocation.
+The legacy authority is an explicit operator configuration, not a MASQUEEndpoint,
+and has no managed applied-status acknowledgment. Removing the opt-in requires
+first migrating or retiring its clients, not editing grants to bypass scope.
+
+Stage schema/RBAC and compatible authority/provider binaries together. A binary
+upgrade without managed mode keeps the legacy listener behavior but does not
+prove continuity: rolling a single replica interrupts its current connections.
+Before enabling coexistence, verify existing clients reconnect and forward with
+their retained grants and /96 allocations, then exercise both transport paths,
+cross-name denials, managed rotation/disable and legacy grant revocation on the
+same provider. Never reset ledgers/fences or rewrite legacy grants as managed.
+`TestLegacyManagedCoexistenceAuthority` covers shared-listener H3/H2 behavior with
+real envtest authorization and a fake packet backend. It does not establish
+live route/VRF correctness or certify a particular staging client's continuity.
+
+### Activation, readiness and revocation
+
+The runtime polls every two seconds. Each endpoint switches certificate and
+registration together after validation. Same-expiry and shorter-lived rekeys
+are supported. Replacements cancel and drain that endpoint's active requests
+before activation, including emergency rekeys; clients reconnect. Other
+hostnames and their connections are unaffected. SNI selects the certificate;
+every HTTP/3 or HTTP/2 request checks authority and SNI before authenticating
+its own credential and VPC selector against the authority. Two authenticated
+CONNECT-IP streams may select different VPCs on **one** QUIC or TLS/TCP
+connection. Authentication of one stream never authorizes a sibling stream.
+Only the registered hostname or that hostname with `:443` is accepted. Unknown,
+removed and mismatched authorities return 421.
+
+The old valid registration may continue during a failed replacement while its
+own Secret remains readable and valid. Deletion of the active Secret stops
+admission and drains sessions. Ten seconds without successfully validating the
+active Secret, or certificate expiry, closes admission; a 250 ms sweep cancels
+active requests. API failure is not interpreted as registration deletion.
+
+`status.instances` is keyed by `instanceName` and reports `observedRevision`, `appliedRevision`, `appliedCertificateRevision`,
+`state` (`Applied`, `Disabled`, `Error`), `forwardingStopped`,
+`lastHeartbeatTime` and an optional `message`. A failed replacement reports
+the old applied version and `Error`, never the desired certificate revision.
+`Disabled` and `forwardingStopped` are acknowledged only after tracked request
+handlers finish releasing their admission leases and packet backends. Physical
+route withdrawal remains subject to the existing Edge claim lifecycle; this
+acknowledgment does not certify that every kernel route has been removed.
+
+Readiness consumers enumerate **all** matching EdgeInstances in the provider
+namespace using `spec.providerRef.name`, not only instances already in the
+acknowledgment list. Require an exact desired revision/certificate revision, a
+fresh heartbeat (at most ten seconds) strictly after both instance creation and
+Lease `spec.acquireTime`, and a live same-name Lease owned by that instance.
+The provider preserves acquisition time on renewal and changes it on takeover.
+Status does not copy instance or pod UIDs; the runtime privately checks object
+incarnations again before publishing the acknowledgment. Lease boot-clock annotations are not
+wall timestamps; remote readers can use renewal time/duration and released
+state as a liveness check but must not replace the runtime lease gate. New pods
+without acknowledgments block endpoint readiness. Karmada delivery, pod
+`/readyz`, and these acknowledgments alone do not establish DNS, external TLS,
+both transport paths, or real VPC forwarding readiness.
+
+Disable at a new revision and wait for all relevant instances' stopped
+acknowledgments before deleting registrations and delivered Secrets. The
+provider retains `masque-endpoint-<sha256(hostname)>` ConfigMaps labeled
+`masque.galactic.datumapis.com/endpoint-fence=<provider>` without owner references.
+The hash is lowercase hex SHA-256 of canonical hostname bytes only; the
+registration namespace scopes the ConfigMap. The fence privately binds the
+registration name and incarnation, immutable spec identity, and accepted/revoked
+revisions. They fence stale revisions, equal-version conflicts, identity reuse, and
+deletion/recreation. Never delete or roll back these fences during endpoint
+cleanup. A higher revision may reactivate the same live identity; retired
+gateway identities and hostname reservations remain Connect's responsibility.
+Lost-cell cleanup requires explicit operational recovery, not a fabricated ack.
+
+Placement-field upgrade uses compatible decoding of existing hostname fences:
+old `spec.cell` and `spec.metro` JSON fields are ignored, while the registration
+name/incarnation, hostname/provider, accepted revision, revoked revision and
+removed state remain enforced. An otherwise identical live registration may
+reconcile at the same revision without rewriting the fence. A later revision
+rewrites the five-field spec while preserving the revoked revision; removed
+registrations still cannot reactivate at the same revision. Never delete/reset
+fences or private receipts to upgrade. This is not a cross-control-plane
+migration: retain the original selected control plane and authority/grant cell
+scope. Upgrade schema, provider arguments and authority/provider binaries
+together; rollback to a placement-requiring binary is not supported after new
+fences are written without those fields.
+
+### Endpoint-bound grants
+
+`pkg/masquegrant.New(uncachedCellClient, namespace, cell)` exposes `Create`, `Rotate`,
+`Disable` and `Retire` using the existing authority/ledger implementation. Cell is service configuration,
+not a CreateRequest field. An empty configured cell rejects operations, and
+rotation, disable and retirement cannot mutate another cell's grants or
+unrecorded allocations. Administrative NewLedgers.Init retains its explicit cell.
+`CreateRequest.EndpointRef` is `{Namespace, Name}` and `CreateRequest.VPC`
+is the public name-only `VPCRef {Namespace, Name}`. No caller supplies object
+UIDs. Connect authenticates the customer project and caller, resolves authorized
+named bindings/networks, and privately pins their incarnations. Galactic does
+not resolve customer Network objects. Connect checks its pinned VPC before and
+after mint using uncached reads and retires any raced grant before returning it.
+Galactic independently resolves and privately pins the cell VPC at creation,
+verifies each request's controller-issued VPC selector, and rechecks that pin
+on authorization, rotation and refresh. Creation and rotation resolve the named
+endpoint and verify its accepted durable fence. Old managed record schemas are
+rejected rather than silently treated as unscoped legacy credentials.
+Retain a deterministic, binding-specific
+connector UUID across retries: a failed create reuses its allocation, while an
+already-created record requires rotation because plaintext credentials are not
+stored. `Retire` retains the `/96` allocation tombstone.
+
+Each binding has its own credential, EdgeService, route/attachment claims and
+`/96` allocation in its VPC/cell ledger. Revoking a binding or deleting its VPC
+ends only the corresponding sessions, not the shared transport or other VPCs.
+Recreating a same-name VPC cannot revive the old UID-pinned credential. Network
+binding changes do not alter endpoint registration, DNS or certificates.
+Disabling the endpoint drains **all** its streams. Overlapping VPC address
+space still requires isolated VRFs and client routing; sharing a transport
+does not combine routing domains or qualify overlapping OS routes.
+
+`pkg/masquegrant.NewLedgers(client, namespace)` exposes the existing `Ledgers`
+administrative bootstrap API, including `Init`. Provision ledgers explicitly;
+the broker must never initialize them as a side effect of a grant request.
+
+The upstream `config/masque/endpoint-status-policy.yaml` restricts status writes
+by `system:serviceaccount:masque-system:masque-provider` to the authenticated
+pod's `ei-<podUID>` entry and preserves every other entry. Install the policy
+and binding with runtime RBAC; adapt its username if renaming the namespace or
+ServiceAccount. Providers need pod-bound tokens with the Kubernetes pod UID
+authentication extra. Managed listeners disable TLS session tickets so a new
+connection cannot bypass certificate selection through session resumption.
+
+Providers include the locally resolved named endpoint reference in `/v1/authorize`; the authority compares
+it to the credential record and rechecks registration/fences during refresh.
+The `/v1/authorize` response contains named service/endpoint references, not
+VPC or service UIDs. Its opaque authorization receipt binds the private service
+incarnation. The provider uses an uncached local reader to resolve the service
+and VPC, validate the receipt and hydrate private datapath identity. Bind the
+unbound `masque-provider-tenant` ClusterRole in each authorized VPC namespace:
+it grants only `get` on `edgeservices` and `vpcs`, never tenant Secrets or writes.
+Install these tenant bindings before upgrading authority-backed providers,
+including legacy single-hostname deployments. Upgrade authority and providers
+together for the name-only wire contract; stale incarnation receipts fail closed.
+Legacy credentials are accepted only on the legacy single-authority path, never
+on a managed endpoint. Disabling/removing an endpoint advances a durable
+revocation floor. Reactivation does not revive old credentials; retire them and
+create a new authorized connector. Certificate renewal alone preserves the
+credential epoch. Cell migration needs a new assignment, grant and attachment;
+this feature does not implement transparent roaming or address preservation.
+
+### Shared-transport authorization test
+
+With `setup-envtest` installed, run:
+
+```sh
+CI=true GODEBUG=http2xconnect=1 \
+  KUBEBUILDER_ASSETS="$(setup-envtest use 1.37.0 -p path)" \
+  go test -race ./internal/edge/masque/authority \
+  -run '^(TestManagedEndpointMultiplexedAuthority|TestLegacyManagedCoexistenceAuthority)$' -count=1 -v
+```
+
+Alternatively set `KUBEBUILDER_ASSETS` to an installed Kubernetes envtest
+binary directory. `CI=true` makes missing assets fail instead of skipping.
+This test counts physical dials and requires exactly one connection per H3/H2
+case. It uses the real grant ledger, authorization and refresh implementation
+against an API server, with managed SNI/authority resolution and separate
+CONNECT-IP streams. It covers two VPCs, denied sibling/third-VPC replay,
+independent revocation, VPC deletion/recreation, unchanged endpoint identity
+during network changes, shorter-lived certificate replacement, and endpoint
+disable draining all streams. Its packet backend is a test double: this is
+not kernel VRF, route withdrawal, overlapping client OS routes, public TLS/DNS,
+or production datapath qualification. The existing containerlab and external
+cross-system acceptance gates remain required.
 
 The bases leave out `--cell` and `--authority`, so a pod started without its overlay exits at startup instead of serving a wrong name. An overlay appends them, for example:
 

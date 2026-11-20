@@ -20,4 +20,5 @@ resources:
   - namespace.yaml
   - serviceaccount.yaml
   - rbac.yaml
+  - endpoint-status-policy.yaml
   - edgeprovider.yaml

@@ -35,6 +35,7 @@ var (
 
 func addKnownTypes(s *runtime.Scheme) error {
 	s.AddKnownTypes(GroupVersion,
+		&MASQUEEndpoint{}, &MASQUEEndpointList{},
 		&TrafficPolicy{}, &TrafficPolicyList{},
 		&TrafficPolicyBinding{}, &TrafficPolicyBindingList{},
 		&EdgeProvider{}, &EdgeProviderList{},

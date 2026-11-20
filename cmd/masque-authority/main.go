@@ -212,12 +212,14 @@ func newLedgerCommand(namespace *string) *cobra.Command {
 
 func newGrantCommand(namespace *string) *cobra.Command {
 	cmd := &cobra.Command{Use: "grant", Short: "Provision, rotate, disable and retire connector grants"}
+	var cell string
+	cmd.PersistentFlags().StringVar(&cell, "cell", "", "Configured cell name (required for all grant operations)")
 	grants := func() (authority.Grants, error) {
 		if err := requireNamespace(*namespace); err != nil {
 			return authority.Grants{}, err
 		}
 		c, err := newClient()
-		return authority.Grants{Client: c, Namespace: *namespace, Now: time.Now}, err
+		return authority.Grants{Client: c, Namespace: *namespace, Cell: cell, Now: time.Now}, err
 	}
 
 	var req authority.CreateRequest
@@ -260,7 +262,6 @@ func newGrantCommand(namespace *string) *cobra.Command {
 	}
 	f := create.Flags()
 	f.StringVar(&vpc, "vpc", "", "VPC as namespace/name (required)")
-	f.StringVar(&req.Cell, "cell", "", "Cell name (required)")
 	f.StringVar(&req.Connector, "connector", "", "Connector UUID; empty generates one")
 	f.DurationVar(&req.Lifetime, "lifetime", authority.MaxLifetime, "Credential lifetime, at most 24h")
 	f.StringSliceVar(&routes, "route", nil, "gVPC destination prefix the connector may reach; repeatable")

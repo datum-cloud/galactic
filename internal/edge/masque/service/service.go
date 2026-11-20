@@ -28,14 +28,17 @@ import (
 
 	instmetrics "go.miloapis.com/instrumentation/metrics"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/claim"
 	"go.datum.net/galactic/internal/edge/connectip"
 	"go.datum.net/galactic/internal/edge/masque"
+	"go.datum.net/galactic/internal/edge/masque/endpoints"
 	"go.datum.net/galactic/internal/edge/provider"
 	"go.datum.net/galactic/internal/edge/timing"
 )
@@ -46,6 +49,8 @@ const DefaultShutdownTimeout = 20 * time.Second
 
 // Config configures Run.
 type Config struct {
+	ManagedEndpoints  bool
+	LegacyCoexistence bool
 	// Client reaches the cell's API server as the pod's ServiceAccount.
 	Client client.Client
 	// Provider is the EdgeProvider this pod runs as.
@@ -75,6 +80,20 @@ type Config struct {
 	Log *slog.Logger
 }
 
+func validateConfig(cfg Config) error {
+	switch {
+	case cfg.LegacyCoexistence && (!cfg.ManagedEndpoints || cfg.Authority == "" || cfg.GetCertificate == nil):
+		return errors.New("legacy coexistence requires managed endpoints, authority and file certificate")
+	case cfg.Client == nil || cfg.Authorizer == nil || !cfg.ManagedEndpoints && cfg.GetCertificate == nil:
+		return errors.New("client, authorizer and certificate source are required")
+	case cfg.Listen == "":
+		return errors.New("listen address is required")
+	case cfg.ListenTCP != "" && !connectip.ExtendedConnectEnabled():
+		return connectip.ErrExtendedConnectDisabled
+	}
+	return nil
+}
+
 // Run serves until ctx is done or a component fails. It holds the pod's
 // EdgeInstance lease through the adapter, serves CONNECT-IP over HTTP/3 on
 // Listen and over HTTP/2 on ListenTCP, and reports ready on /readyz while
@@ -82,13 +101,8 @@ type Config struct {
 // On return the server has ended every session, then the adapter released
 // the routes, deleted the attachments and released the lease.
 func Run(ctx context.Context, cfg Config) error {
-	switch {
-	case cfg.Client == nil || cfg.Authorizer == nil || cfg.GetCertificate == nil:
-		return errors.New("client, authorizer and certificate source are required")
-	case cfg.Listen == "":
-		return errors.New("listen address is required")
-	case cfg.ListenTCP != "" && !connectip.ExtendedConnectEnabled():
-		return connectip.ErrExtendedConnectDisabled
+	if err := validateConfig(cfg); err != nil {
+		return err
 	}
 	log := cfg.Log
 	if log == nil {
@@ -107,11 +121,27 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	srv, err := connectip.NewServer(connectip.Config{
+	serverConfig := connectip.Config{
 		Authority: cfg.Authority,
 		TLSConfig: &tls.Config{GetCertificate: cfg.GetCertificate, MinVersion: tls.VersionTLS13},
 		Limits:    cfg.Limits, Admission: a, Backend: a, Logger: log,
-	})
+	}
+	var endpointController *endpoints.Controller
+	if cfg.ManagedEndpoints {
+		registry := endpoints.NewRegistry()
+		if cfg.LegacyCoexistence {
+			registry, err = endpoints.NewRegistryWithLegacy(cfg.Authority, cfg.GetCertificate)
+			if err != nil {
+				return err
+			}
+		}
+		serverConfig.TLSConfig.SessionTicketsDisabled = true
+		serverConfig.TLSConfig.GetCertificate = registry.GetCertificate
+		serverConfig.ResolveEndpoint = registry.Resolve
+		endpointController = &endpoints.Controller{Client: cfg.Client, Registry: registry, Namespace: cfg.Pod.Namespace,
+			Provider: cfg.Provider, PodUID: cfg.Pod.UID, Ready: a.Ready}
+	}
+	srv, err := connectip.NewServer(serverConfig)
 	if err != nil {
 		return err
 	}
@@ -149,6 +179,11 @@ func Run(ctx context.Context, cfg Config) error {
 		go func() { serveTCPErr <- srv.ServeTLS(ln) }()
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	if endpointController != nil {
+		go endpointController.Run(runCtx)
+		go endpointController.Registry.RunExpiry(runCtx)
+	}
 	runErr := make(chan error, 1)
 	go func() { runErr <- a.Run(runCtx) }()
 	log.Info("serving CONNECT-IP", "listen", cfg.Listen, "listenTCP", cfg.ListenTCP, "authority", cfg.Authority,
@@ -240,7 +275,9 @@ func HealthHandler(ready func() bool) http.Handler {
 // configuration, able to read and write what the adapter uses.
 func NewClient() (client.Client, error) {
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{galacticv1alpha1.AddToScheme, coordinationv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{
+		galacticv1alpha1.AddToScheme, cloudv1alpha1.AddToScheme, coordinationv1.AddToScheme, corev1.AddToScheme,
+	} {
 		if err := add(scheme); err != nil {
 			return nil, err
 		}

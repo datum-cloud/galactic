@@ -65,7 +65,7 @@ func TestStoppedGrantIsNotRenewed(t *testing.T) {
 	t.Run("credential expiring within MaxSkew", func(t *testing.T) {
 		next()
 		is, err := f.grants.Create(ctx, CreateRequest{
-			VPC: VPCRef{Namespace: tenantNS, Name: vpcName}, Cell: testCell, Lifetime: time.Minute,
+			VPC: VPCRef{Namespace: tenantNS, Name: vpcName}, Lifetime: time.Minute,
 		})
 		if err != nil {
 			t.Fatal(err)

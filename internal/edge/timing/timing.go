@@ -12,8 +12,6 @@ package timing
 import (
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"go.datum.net/galactic/internal/edge/claim"
 )
 
@@ -31,16 +29,3 @@ var Params = claim.Params{
 // RenewInterval is how often a provider instance renews its lease: two
 // renewals in a row can fail before the lease expires.
 const RenewInterval = 5 * time.Second
-
-// BootClock reads CLOCK_BOOTTIME, the clock the datapath's gate deadlines are
-// on. It keeps counting across suspend, so a suspended node cannot extend a
-// deadline.
-func BootClock() time.Duration {
-	var ts unix.Timespec
-	if err := unix.ClockGettime(unix.CLOCK_BOOTTIME, &ts); err != nil {
-		// CLOCK_BOOTTIME exists on every kernel this runs on; failing to
-		// read it leaves nothing safe to measure with.
-		panic("timing: read CLOCK_BOOTTIME: " + err.Error())
-	}
-	return time.Duration(ts.Nano())
-}
