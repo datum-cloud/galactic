@@ -689,7 +689,8 @@ Its node-restart row restarts dfw-worker2's container with
 what lived in its network namespace: its gvpc.clab.yaml links (through
 `containerlab tools veth create`, so it needs passwordless `sudo`), its
 sysctls and exec commands, its peers' bonds, the pass-through XDP programs and
-its addresses. The script works for any Kind node of the topology.
+its addresses. The script works for any Kind worker of the topology. It
+refuses a control-plane node, whose etcd data is on tmpfs (see Notes).
 
 ## Notes
 
@@ -697,6 +698,11 @@ its addresses. The script works for any Kind node of the topology.
   by `scripts/deploy-cni.sh` (task `deploy:cni`); the BGP (datum-cloud/network) and VPC
   (datum-cloud/cloud) CRDs are installed by `scripts/deploy-system.sh` (task `deploy:system`).
   Neither is baked into the `kindest/node:galactic` image.
+- Each site's etcd keeps its data in `/tmp/etcd` on the control-plane node, a tmpfs Kind mounts,
+  set by a `ClusterConfiguration` patch in `node_files/<site>/config.yaml`. On the shared host
+  disk, etcd's fsync stalls during a deploy made the API servers time out. The data does not
+  survive a restart of the control-plane container, a Docker daemon restart or a host reboot.
+  Rebuild the lab with `task destroy` and `task deploy` after any of those.
 - Every link is dual-stack: numbered IPv6 (/64) and IPv4 (/24) subnets, each carrying its own
   BGP session — eBGP on the edge uplinks, iBGP on the site-internal links.
 - Kind worker names are used exactly as Kind assigns them. Nothing renames a container or a
