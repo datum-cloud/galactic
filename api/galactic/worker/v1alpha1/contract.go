@@ -143,6 +143,11 @@ const (
 	// ReasonReturnPathNotProgrammed is a destination whose return traffic
 	// this node cannot yet decapsulate into the VPC's table.
 	ReasonReturnPathNotProgrammed = "ReturnPathNotProgrammed"
+	// ReasonRoutedLinkUnavailable marks local.routed_link and local.socket
+	// on a Worker without CAP_SYS_PTRACE and CAP_SYS_ADMIN, which open and
+	// enter a pod's network namespace for the link's pod end. Only a
+	// placement that enables routed links grants them.
+	ReasonRoutedLinkUnavailable = "RoutedLinkUnavailable"
 	// ReasonHandoffHookMissing is a Local destination whose handoff program
 	// is not on its hook: Worker's own tc program, or the program the
 	// client attaches to the NAT end of a veth pair.

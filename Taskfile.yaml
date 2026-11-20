@@ -244,7 +244,7 @@ tasks:
       - CGO_ENABLED=0 GOBIN={{.GOBGP_BIN}} go install github.com/osrg/gobgp/v4/cmd/gobgpd@v4.10.0 github.com/osrg/gobgp/v4/cmd/gobgp@v4.10.0
       - go run ./hack/fabric-api-loadtest --mrt {{.MRT}} --gobgp-bin {{.GOBGP_BIN}} {{.CLI_ARGS}}
   test:manifests:
-    desc: Render the opt-in Component fixtures in tests/manifests and check every manifest's log settings
+    desc: Render the opt-in Component fixtures in tests/manifests, check every manifest's log settings and the Worker profiles' privileges
     # Every fixture under tests/manifests/fabric-api and
     # tests/manifests/masque composes Components the way a cell overlay does
     # and must build; every fixture under
@@ -259,9 +259,16 @@ tasks:
     # only once the lab scripts copy config/ onto a node, so they are not
     # rendered here; their source YAML, inline patches included, is checked
     # instead.
+    #
+    # Each Worker placement profile under tests/manifests/worker-profiles is
+    # also checked by hack/check-privileges against the privileges.yaml
+    # beside it: every capability, host namespace, hostPath, RBAC rule and
+    # Worker allowlist grant the profile renders must be recorded there, and
+    # nothing more.
     deps: [kustomize]
     cmds:
       - go build -o {{.LOCALBIN}}/check-log-settings ./hack/check-log-settings
+      - go build -o {{.LOCALBIN}}/check-privileges ./hack/check-privileges
       - |
         status=0
         for file in $(find config deploy tests/manifests -name kustomization.yaml | sort); do
@@ -278,6 +285,11 @@ tasks:
         if ! find config deploy tests/manifests -name '*.yaml' -print0 | xargs -0 {{.LOCALBIN}}/check-log-settings; then
           echo "FAIL: source YAML sets an unsupported log setting"; status=1
         fi
+        for dir in tests/manifests/worker-profiles/*/; do
+          if ! {{.KUSTOMIZE}} build "$dir" | {{.LOCALBIN}}/check-privileges -expect "${dir}privileges.yaml"; then
+            echo "FAIL: $dir grants other privileges than ${dir}privileges.yaml records"; status=1
+          fi
+        done
         for dir in tests/manifests/invalid/*/; do
           if {{.KUSTOMIZE}} build "$dir" > /dev/null 2>&1; then
             echo "FAIL: $dir builds, but omits a required Component"; status=1
