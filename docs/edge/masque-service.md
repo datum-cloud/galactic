@@ -23,6 +23,133 @@ Images:
 | `config/masque/provider`                 | The `masque-provider` Deployment and UDP/443 + TCP/443 Service                                                                                                               | `--authority`, Secret `masque-provider-tls` for that name, ConfigMap `masque-authority-ca` (`ca.crt`), and how the Service is exposed |
 
 The [certificates](#certificates) section covers both Secrets and the CA.
+For shared logical gateway hostnames, use [managed endpoints](#managed-endpoints)
+instead of a single `--authority` and mounted public certificate.
+
+## Managed endpoints
+
+`masque-provider --managed-endpoints --cell=<cell>` serves all
+`galactic.datumapis.com/v1alpha1` `MASQUEEndpoint` resources in `POD_NAMESPACE`
+whose `spec.provider` and `spec.cell` match the process. This reuses the existing
+provider Deployment, EdgeInstance/Lease, and both listeners. It creates no
+per-gateway capacity. Defaults remain TCP and UDP `:8443`; expose both through
+the existing Service's port 443. Remove the legacy public TLS volume and its
+mount when enabling managed mode, but retain the private grant-authority CA.
+
+Install the generated CRD on the distribution control plane and serving cells
+before delivering registrations. `config/masque/managed-endpoints-crd` exports
+only this CRD; its canonical source is in `config/crd`. Standalone Kustomize
+builds of this export need `--load-restrictor LoadRestrictionsNone` for the
+repository-relative generated file. `config/masque` includes runtime RBAC;
+the root Galactic Kustomization still does not enable MASQUE.
+
+### Registration and delivery contract
+
+The [API reference](../api/galactic.md#masqueendpoint) defines the complete
+schema. Immutable identity is `endpointUID`, `customerProjectUID`, `gatewayUID`,
+`networkUID`, `metro`, `cell`, `provider`, `hostname` and `vpcRef` (namespace,
+name, UID). `endpointUID` is the service-project ConnectEndpoint UID, not the
+distributed object's UID. The hostname is a lowercase DNS name without a port.
+Every mutable change increments the positive `spec.revision`, including
+certificate replacement, disable and reactivation. Exactly one registration
+may claim an endpoint UID or hostname within this provider and cell.
+
+`certificateRef.name` identifies a same-namespace `kubernetes.io/tls` Secret.
+`certificateRef.revision` is lowercase SHA-256 of the leaf certificate DER,
+matching `TLSCertificate.status.certificateRevision`, never an expiry ordering.
+The Secret contains `tls.crt` and `tls.key` and these annotations:
+
+```yaml
+masque.galactic.datumapis.com/endpoint-uid: <service-project-endpoint-uid>
+masque.galactic.datumapis.com/certificate-revision: <leaf-der-sha256>
+```
+
+Use immutable, versioned Secret names. Issuance infrastructure and selected
+serving cells hold the keys; neither customer nor service-provider Projects
+receive them. Delivery validates issuance ownership upstream; the runtime
+additionally checks endpoint ownership, exact fingerprint, matching private
+key, SAN hostname and validity. Runtime trusts the authorized delivery writer;
+external probes must verify public WebPKI trust and packet reachability.
+
+### Activation, readiness and revocation
+
+The runtime polls every two seconds. Each endpoint switches certificate and
+registration together after validation. Same-expiry and shorter-lived rekeys
+are supported. Replacements cancel and drain that endpoint's active requests
+before activation, including emergency rekeys; clients reconnect. Other
+hostnames and their connections are unaffected. SNI selects the certificate;
+every HTTP/3 or HTTP/2 request checks authority, SNI and VPC again, including
+multiplexed streams. Only the registered hostname or that hostname with `:443`
+is accepted. Unknown, removed and mismatched authorities return 421.
+
+The old valid registration may continue during a failed replacement while its
+own Secret remains readable and valid. Deletion of the active Secret stops
+admission and drains sessions. Ten seconds without successfully validating the
+active Secret, or certificate expiry, closes admission; a 250 ms sweep cancels
+active requests. API failure is not interpreted as registration deletion.
+
+`status.instances` is keyed by `instanceName` and reports `instanceUID`,
+`podUID`, `observedRevision`, `appliedRevision`, `appliedCertificateRevision`,
+`state` (`Applied`, `Disabled`, `Error`), `forwardingStopped`,
+`lastHeartbeatTime` and an optional `message`. A failed replacement reports
+the old applied version and `Error`, never the desired certificate revision.
+`Disabled` and `forwardingStopped` are acknowledged only after tracked request
+handlers finish releasing their admission leases and packet backends. Physical
+route withdrawal remains subject to the existing Edge claim lifecycle; this
+acknowledgment does not certify that every kernel route has been removed.
+
+Readiness consumers enumerate **all** matching EdgeInstances in the provider
+namespace using `spec.providerRef.name`, not only instances already in the
+acknowledgment list. Match the instance UID and pod UID, require an exact desired
+revision/certificate revision, fresh heartbeat (at most ten seconds), and a live
+same-name Lease owned by that instance. Lease boot-clock annotations are not
+wall timestamps; remote readers can use renewal time/duration and released
+state as a liveness check but must not replace the runtime lease gate. New pods
+without acknowledgments block endpoint readiness. Karmada delivery, pod
+`/readyz`, and these acknowledgments alone do not establish DNS, external TLS,
+both transport paths, or real VPC forwarding readiness.
+
+Disable at a new revision and wait for all relevant instances' stopped
+acknowledgments before deleting registrations and delivered Secrets. The
+provider retains `masque-endpoint-<sha256(endpointUID)>` ConfigMaps labeled
+`masque.galactic.datumapis.com/endpoint-fence=<provider>` without owner references.
+They fence stale revisions, equal-version conflicts, identity reuse, and
+deletion/recreation. Never delete or roll back these fences during endpoint
+cleanup. A higher revision may reactivate the same live identity; retired
+gateway identities and hostname reservations remain Connect's responsibility.
+Lost-cell cleanup requires explicit operational recovery, not a fabricated ack.
+
+### Endpoint-bound grants
+
+`pkg/masquegrant.New(uncachedCellClient, namespace)` exposes `Create`, `Rotate`,
+`Disable` and `Retire` using the existing authority/ledger implementation.
+`CreateRequest.Endpoint` adds the exact endpoint/project/gateway/network/cell/
+hostname scope to the existing VPC selector and UID. Creation and rotation
+verify the delivered registration and durable fence. Retain a deterministic
+connector UUID across retries: a failed create reuses its allocation, while an
+already-created record requires rotation because plaintext credentials are not
+stored. `Retire` retains the `/96` allocation tombstone.
+
+`pkg/masquegrant.NewLedgers(client, namespace)` exposes the existing `Ledgers`
+administrative bootstrap API, including `Init`. Provision ledgers explicitly;
+the broker must never initialize them as a side effect of a grant request.
+
+The upstream `config/masque/endpoint-status-policy.yaml` restricts status writes
+by `system:serviceaccount:masque-system:masque-provider` to the authenticated
+pod's `ei-<podUID>` entry and preserves every other entry. Install the policy
+and binding with runtime RBAC; adapt its username if renaming the namespace or
+ServiceAccount. Providers need pod-bound tokens with the Kubernetes pod UID
+authentication extra. Managed listeners disable TLS session tickets so a new
+connection cannot bypass certificate selection through session resumption.
+
+Providers include this trusted scope in `/v1/authorize`; the authority compares
+it to the credential record and rechecks registration/fences during refresh.
+Legacy credentials are accepted only on the legacy single-authority path, never
+on a managed endpoint. Disabling/removing an endpoint advances a durable
+revocation floor. Reactivation does not revive old credentials; rotate them or
+create a new authorized connector. Certificate renewal alone preserves the
+credential epoch. Cell migration needs a new assignment, grant and attachment;
+this feature does not implement transparent roaming or address preservation.
 
 The bases leave out `--cell` and `--authority`, so a pod started without its overlay exits at startup instead of serving a wrong name. An overlay appends them, for example:
 

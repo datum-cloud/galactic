@@ -367,6 +367,9 @@ func (a *Adapter) admit(ctx context.Context, credential, vpc string) (connectip.
 	actx, stopAuthorize := context.WithTimeout(ctx, a.cfg.AuthorizeTimeout)
 	g, err := a.cfg.Authorizer.Authorize(actx, credential, vpc)
 	stopAuthorize()
+	if err == nil && !SameEndpoint(connectip.EndpointFromContext(ctx), g.Endpoint) {
+		return nil, admitForbidden, connectip.ErrForbidden
+	}
 	switch {
 	case errors.Is(err, connectip.ErrUnauthenticated):
 		return nil, admitUnauthenticated, err

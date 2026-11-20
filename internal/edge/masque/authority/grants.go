@@ -19,6 +19,7 @@ import (
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
+	"go.datum.net/galactic/internal/edge/masque/endpoints"
 )
 
 // Grants provisions connector grant records in Namespace for an operator.
@@ -42,6 +43,7 @@ type Issued struct {
 
 // CreateRequest describes a new connector.
 type CreateRequest struct {
+	Endpoint *galacticv1alpha1.MASQUEEndpointScope
 	// VPC is the VPC's namespace and name; its UID is read from the API.
 	VPC  VPCRef
 	Cell string
@@ -90,9 +92,25 @@ func (g Grants) Create(ctx context.Context, req CreateRequest) (Issued, error) {
 		return Issued{}, fmt.Errorf("VPC %s has UID %s, not %s", req.VPC.Selector(), vpc.UID, req.VPC.UID)
 	}
 	req.VPC.UID = string(vpc.UID)
+	var endpointRevision int64
+	if req.Endpoint != nil {
+		if req.Endpoint.Cell != req.Cell {
+			return Issued{}, errors.New("endpoint cell mismatch")
+		}
+		vpc := galacticv1alpha1.MASQUEEndpointVPCReference(req.VPC)
+		if err := endpoints.CheckScope(ctx, g.Client, g.Namespace, "", req.Endpoint, vpc); err != nil {
+			return Issued{}, err
+		}
+		endpointRevision, _, err = endpoints.GrantRevision(ctx, g.Client, g.Namespace, req.Endpoint.EndpointUID)
+		if err != nil {
+			return Issued{}, err
+		}
+	}
 	cred := NewCredential()
 	r := &Record{
-		Connector: req.Connector, Cell: req.Cell, VPC: req.VPC, Revision: 1, Digest: Digest(cred),
+		EndpointRevision: endpointRevision,
+		Endpoint:         req.Endpoint,
+		Connector:        req.Connector, Cell: req.Cell, VPC: req.VPC, Revision: 1, Digest: Digest(cred),
 		Expires: expires, Enabled: true, Routes: req.Routes, TrafficPolicy: req.TrafficPolicy,
 	}
 	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: g.Namespace}}
@@ -130,6 +148,17 @@ func (g Grants) Rotate(ctx context.Context, connector string, lifetime time.Dura
 	err = g.update(ctx, connector, func(r *Record) error {
 		if !r.Enabled {
 			return errors.New("connector is disabled")
+		}
+		if r.Endpoint != nil {
+			vpc := galacticv1alpha1.MASQUEEndpointVPCReference(r.VPC)
+			if err := endpoints.CheckScope(ctx, g.Client, g.Namespace, "", r.Endpoint, vpc); err != nil {
+				return err
+			}
+			revision, _, err := endpoints.GrantRevision(ctx, g.Client, g.Namespace, r.Endpoint.EndpointUID)
+			if err != nil {
+				return err
+			}
+			r.EndpointRevision = revision
 		}
 		r.Revision++
 		r.Digest, r.Expires = Digest(cred), expires

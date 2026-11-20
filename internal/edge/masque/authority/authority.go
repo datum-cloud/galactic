@@ -25,6 +25,7 @@ import (
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/admission"
 	"go.datum.net/galactic/internal/edge/connectip"
+	"go.datum.net/galactic/internal/edge/masque/endpoints"
 	"go.datum.net/galactic/internal/edge/timing"
 )
 
@@ -93,17 +94,18 @@ type ServiceRef struct {
 
 // Grant is an issued authorization, as the provider receives it.
 type Grant struct {
-	Authorization string         `json:"authorization"`
-	Connector     string         `json:"connector"`
-	Allocation    string         `json:"allocation"`
-	VPC           string         `json:"vpc"`
-	VPCUID        string         `json:"vpcUID"`
-	VPCID         string         `json:"vpcID"`
-	Service       ServiceRef     `json:"service"`
-	Prefix        netip.Prefix   `json:"prefix"`
-	Routes        []netip.Prefix `json:"routes"`
-	Revision      int64          `json:"revision"`
-	NotAfter      time.Time      `json:"notAfter"`
+	Endpoint      *galacticv1alpha1.MASQUEEndpointScope `json:"endpoint,omitempty"`
+	Authorization string                                `json:"authorization"`
+	Connector     string                                `json:"connector"`
+	Allocation    string                                `json:"allocation"`
+	VPC           string                                `json:"vpc"`
+	VPCUID        string                                `json:"vpcUID"`
+	VPCID         string                                `json:"vpcID"`
+	Service       ServiceRef                            `json:"service"`
+	Prefix        netip.Prefix                          `json:"prefix"`
+	Routes        []netip.Prefix                        `json:"routes"`
+	Revision      int64                                 `json:"revision"`
+	NotAfter      time.Time                             `json:"notAfter"`
 }
 
 // Authority decides Authorize, Refresh and Retire calls of the provider pods
@@ -235,14 +237,14 @@ func (a *Authority) Authorize(ctx context.Context, id admission.Identity, req Au
 	if err != nil {
 		return Grant{}, err
 	}
+	if err := a.requestScope(ctx, req.Endpoint, vpc, r); err != nil {
+		return Grant{}, err
+	}
 	// This precedes the retry lookup: a retry's grant expires no later than
 	// the credential, so core would refuse it too.
 	until, err := a.until(start, r)
 	if err != nil {
 		return Grant{}, err
-	}
-	if vpc != r.VPC.Selector() {
-		return Grant{}, fmt.Errorf("%w: connector %s may not use VPC %q", connectip.ErrForbidden, r.Connector, vpc)
 	}
 	vpcID, err := a.vpc(ctx, r.VPC)
 	if err != nil {
@@ -430,6 +432,7 @@ func (a *Authority) grant(s *galacticv1alpha1.EdgeService, r *Record, e Entry, v
 		return Grant{}, fmt.Errorf("%w: EdgeService %s/%s has no validUntil", ErrUnavailable, s.Namespace, s.Name)
 	}
 	return Grant{
+		Endpoint:      r.Endpoint,
 		Authorization: s.Annotations[AnnotationAuthorization], Connector: r.Connector, Allocation: e.Allocation,
 		VPC: r.VPC.Selector(), VPCUID: r.VPC.UID, VPCID: vpcID,
 		Service: ServiceRef{Namespace: s.Namespace, Name: s.Name, UID: string(s.UID)},
@@ -490,6 +493,9 @@ func (a *Authority) revalidate(ctx context.Context, s *galacticv1alpha1.EdgeServ
 	if err := a.current(r, start); err != nil {
 		return Grant{}, err
 	}
+	if err := a.endpoint(ctx, r); err != nil {
+		return Grant{}, err
+	}
 	if r.Revision != revision || r.VPC.UID != s.Spec.VPCRef.UID {
 		return Grant{}, fmt.Errorf("%w: connector %s's grant changed", connectip.ErrForbidden, connector)
 	}
@@ -523,7 +529,8 @@ func (a *Authority) revalidate(ctx context.Context, s *galacticv1alpha1.EdgeServ
 // deletion that raced the write never leaves s live.
 func (a *Authority) unchanged(ctx context.Context, s *galacticv1alpha1.EdgeService, r *Record) error {
 	cur, _, err := readRecord(ctx, a.Client, a.Namespace, r.Connector)
-	if err == nil && cur.Revision == r.Revision && cur.Enabled && sameDigest(cur.Digest, r.Digest) {
+	if err == nil && cur.Revision == r.Revision && cur.Enabled && sameDigest(cur.Digest, r.Digest) &&
+		sameEndpoint(cur.Endpoint, r.Endpoint) && a.endpoint(ctx, cur) == nil {
 		return nil
 	}
 	if rerr := a.retire(ctx, s, "grant changed during issue"); rerr != nil {
@@ -533,6 +540,32 @@ func (a *Authority) unchanged(ctx context.Context, s *galacticv1alpha1.EdgeServi
 		return fmt.Errorf("%w: reread grant record of %s: %w", ErrUnavailable, r.Connector, err)
 	}
 	return fmt.Errorf("%w: connector %s's grant changed", connectip.ErrForbidden, r.Connector)
+}
+
+func sameEndpoint(first, second *galacticv1alpha1.MASQUEEndpointScope) bool {
+	return first == nil && second == nil || first != nil && second != nil && *first == *second
+}
+
+func (a *Authority) endpoint(ctx context.Context, record *Record) error {
+	vpc := galacticv1alpha1.MASQUEEndpointVPCReference(record.VPC)
+	if err := endpoints.CheckScope(ctx, a.Client, a.Namespace, a.Provider, record.Endpoint, vpc); err != nil {
+		return fmt.Errorf("%w: endpoint unavailable: %w", connectip.ErrForbidden, err)
+	}
+	if record.Endpoint != nil {
+		current, revoked, err := endpoints.GrantRevision(ctx, a.Client, a.Namespace, record.Endpoint.EndpointUID)
+		if err != nil || record.EndpointRevision <= revoked || record.EndpointRevision > current {
+			return fmt.Errorf("%w: endpoint grant was revoked", connectip.ErrForbidden)
+		}
+	}
+	return nil
+}
+
+func (a *Authority) requestScope(ctx context.Context, scope *galacticv1alpha1.MASQUEEndpointScope,
+	vpc string, record *Record) error {
+	if !sameEndpoint(scope, record.Endpoint) || vpc != record.VPC.Selector() {
+		return fmt.Errorf("%w: endpoint or VPC scope mismatch", connectip.ErrForbidden)
+	}
+	return a.endpoint(ctx, record)
 }
 
 // service reads the issued EdgeService ref and checks it is authorization

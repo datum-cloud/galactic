@@ -29,6 +29,7 @@ docs/enhancements/networking/galactic-edge).
 - [EdgeRoute](#edgeroute)
 - [EdgeRouteIndex](#edgerouteindex)
 - [EdgeService](#edgeservice)
+- [MASQUEEndpoint](#masqueendpoint)
 - [TrafficPolicy](#trafficpolicy)
 - [TrafficPolicyBinding](#trafficpolicybinding)
 
@@ -795,6 +796,151 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name is the TrafficPolicy's name. |  | MaxLength: 253 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` <br /> |
+
+
+#### MASQUEEndpoint
+
+
+
+
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `MASQUEEndpoint` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[MASQUEEndpointSpec](#masqueendpointspec)_ |  |  |  |
+| `status` _[MASQUEEndpointStatus](#masqueendpointstatus)_ |  |  |  |
+
+
+#### MASQUEEndpointCertificateReference
+
+
+
+
+
+
+
+_Appears in:_
+- [MASQUEEndpointSpec](#masqueendpointspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ |  |  |  |
+| `revision` _string_ |  |  | Pattern: `^[0-9a-f]\{64\}$` <br /> |
+
+
+#### MASQUEEndpointInstanceStatus
+
+
+
+
+
+
+
+_Appears in:_
+- [MASQUEEndpointStatus](#masqueendpointstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `instanceName` _string_ |  |  |  |
+| `instanceUID` _string_ |  |  |  |
+| `podUID` _string_ |  |  |  |
+| `observedRevision` _integer_ |  |  |  |
+| `appliedRevision` _integer_ |  |  |  |
+| `appliedCertificateRevision` _string_ |  |  |  |
+| `state` _string_ |  |  | Enum: [Applied Disabled Error] <br /> |
+| `forwardingStopped` _boolean_ |  |  |  |
+| `lastHeartbeatTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ |  |  |  |
+| `message` _string_ |  |  |  |
+
+
+#### MASQUEEndpointScope
+
+
+
+
+
+
+
+_Appears in:_
+- [MASQUEEndpointSpec](#masqueendpointspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `endpointUID` _string_ |  |  |  |
+| `customerProjectUID` _string_ |  |  |  |
+| `gatewayUID` _string_ |  |  |  |
+| `networkUID` _string_ |  |  |  |
+| `cell` _string_ |  |  |  |
+| `hostname` _string_ |  |  |  |
+
+
+#### MASQUEEndpointSpec
+
+
+
+
+
+
+
+_Appears in:_
+- [MASQUEEndpoint](#masqueendpoint)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `endpointUID` _string_ |  |  |  |
+| `customerProjectUID` _string_ |  |  |  |
+| `gatewayUID` _string_ |  |  |  |
+| `networkUID` _string_ |  |  |  |
+| `cell` _string_ |  |  |  |
+| `hostname` _string_ |  |  |  |
+| `metro` _string_ |  |  |  |
+| `provider` _string_ |  |  |  |
+| `vpcRef` _[MASQUEEndpointVPCReference](#masqueendpointvpcreference)_ |  |  |  |
+| `revision` _integer_ |  |  | Minimum: 1 <br /> |
+| `certificateRef` _[MASQUEEndpointCertificateReference](#masqueendpointcertificatereference)_ |  |  |  |
+| `enabled` _boolean_ |  |  |  |
+
+
+#### MASQUEEndpointStatus
+
+
+
+
+
+
+
+_Appears in:_
+- [MASQUEEndpoint](#masqueendpoint)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `instances` _[MASQUEEndpointInstanceStatus](#masqueendpointinstancestatus) array_ |  |  |  |
+
+
+#### MASQUEEndpointVPCReference
+
+
+
+
+
+
+
+_Appears in:_
+- [MASQUEEndpointSpec](#masqueendpointspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `namespace` _string_ |  |  |  |
+| `name` _string_ |  |  |  |
+| `uid` _string_ |  |  |  |
 
 
 #### NodeBindingStatus

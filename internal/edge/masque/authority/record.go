@@ -51,6 +51,8 @@ func (v VPCRef) Selector() string { return v.Namespace + "/" + v.Name }
 
 // Record is one connector's grant, as the operator approved it.
 type Record struct {
+	EndpointRevision int64                                 `json:"endpointRevision,omitempty"`
+	Endpoint         *galacticv1alpha1.MASQUEEndpointScope `json:"endpoint,omitempty"`
 	// Connector is the connector's immutable UUID.
 	Connector string `json:"connector"`
 	// Cell is the only cell whose authority honors the record.
@@ -78,6 +80,11 @@ func RecordName(connector string) string { return "masque-grant-" + connector }
 
 // validate reports the first malformed field of r.
 func (r *Record) validate() error {
+	if r.Endpoint != nil && (r.EndpointRevision <= 0 || r.Endpoint.EndpointUID == "" ||
+		r.Endpoint.CustomerProjectUID == "" || r.Endpoint.GatewayUID == "" || r.Endpoint.NetworkUID == "" ||
+		r.Endpoint.Hostname == "" || r.Endpoint.Cell != r.Cell) {
+		return errors.New("complete matching endpoint scope is required")
+	}
 	if _, err := uuid.Parse(r.Connector); err != nil || r.Connector != uuid.MustParse(r.Connector).String() {
 		return fmt.Errorf("connector %q is not a lowercase UUID", r.Connector)
 	}

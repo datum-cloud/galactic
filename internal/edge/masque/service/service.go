@@ -28,6 +28,7 @@ import (
 
 	instmetrics "go.miloapis.com/instrumentation/metrics"
 	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,6 +37,7 @@ import (
 	"go.datum.net/galactic/internal/edge/claim"
 	"go.datum.net/galactic/internal/edge/connectip"
 	"go.datum.net/galactic/internal/edge/masque"
+	"go.datum.net/galactic/internal/edge/masque/endpoints"
 	"go.datum.net/galactic/internal/edge/provider"
 	"go.datum.net/galactic/internal/edge/timing"
 )
@@ -46,6 +48,8 @@ const DefaultShutdownTimeout = 20 * time.Second
 
 // Config configures Run.
 type Config struct {
+	ManagedEndpoints bool
+	Cell             string
 	// Client reaches the cell's API server as the pod's ServiceAccount.
 	Client client.Client
 	// Provider is the EdgeProvider this pod runs as.
@@ -83,8 +87,10 @@ type Config struct {
 // the routes, deleted the attachments and released the lease.
 func Run(ctx context.Context, cfg Config) error {
 	switch {
-	case cfg.Client == nil || cfg.Authorizer == nil || cfg.GetCertificate == nil:
+	case cfg.Client == nil || cfg.Authorizer == nil || !cfg.ManagedEndpoints && cfg.GetCertificate == nil:
 		return errors.New("client, authorizer and certificate source are required")
+	case cfg.ManagedEndpoints && cfg.Cell == "":
+		return errors.New("cell is required for managed endpoints")
 	case cfg.Listen == "":
 		return errors.New("listen address is required")
 	case cfg.ListenTCP != "" && !connectip.ExtendedConnectEnabled():
@@ -107,11 +113,21 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	srv, err := connectip.NewServer(connectip.Config{
+	serverConfig := connectip.Config{
 		Authority: cfg.Authority,
 		TLSConfig: &tls.Config{GetCertificate: cfg.GetCertificate, MinVersion: tls.VersionTLS13},
 		Limits:    cfg.Limits, Admission: a, Backend: a, Logger: log,
-	})
+	}
+	var endpointController *endpoints.Controller
+	if cfg.ManagedEndpoints {
+		registry := endpoints.NewRegistry()
+		serverConfig.TLSConfig.SessionTicketsDisabled = true
+		serverConfig.TLSConfig.GetCertificate = registry.GetCertificate
+		serverConfig.ResolveEndpoint = registry.Resolve
+		endpointController = &endpoints.Controller{Client: cfg.Client, Registry: registry, Namespace: cfg.Pod.Namespace,
+			Provider: cfg.Provider, Cell: cfg.Cell, PodUID: cfg.Pod.UID, Ready: a.Ready}
+	}
+	srv, err := connectip.NewServer(serverConfig)
 	if err != nil {
 		return err
 	}
@@ -149,6 +165,11 @@ func Run(ctx context.Context, cfg Config) error {
 		go func() { serveTCPErr <- srv.ServeTLS(ln) }()
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	if endpointController != nil {
+		go endpointController.Run(runCtx)
+		go endpointController.Registry.RunExpiry(runCtx)
+	}
 	runErr := make(chan error, 1)
 	go func() { runErr <- a.Run(runCtx) }()
 	log.Info("serving CONNECT-IP", "listen", cfg.Listen, "listenTCP", cfg.ListenTCP, "authority", cfg.Authority,
@@ -240,7 +261,9 @@ func HealthHandler(ready func() bool) http.Handler {
 // configuration, able to read and write what the adapter uses.
 func NewClient() (client.Client, error) {
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{galacticv1alpha1.AddToScheme, coordinationv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{
+		galacticv1alpha1.AddToScheme, coordinationv1.AddToScheme, corev1.AddToScheme,
+	} {
 		if err := add(scheme); err != nil {
 			return nil, err
 		}

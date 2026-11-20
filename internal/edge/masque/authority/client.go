@@ -62,7 +62,8 @@ func (c *Client) Authorize(ctx context.Context, credential, vpc string) (masque.
 	if c.Now != nil {
 		now = c.Now
 	}
-	req := AuthorizeRequest{Credential: credential, VPC: vpc, Nonce: rand.Text(), Issued: now()}
+	req := AuthorizeRequest{Credential: credential, VPC: vpc, Nonce: rand.Text(), Issued: now(),
+		Endpoint: connectip.EndpointFromContext(ctx)}
 	var g Grant
 	var err error
 	for range authorizeAttempts {
@@ -185,6 +186,7 @@ func (c *Client) currentTransport() (*http.Transport, error) {
 
 func toGrant(g *Grant) masque.Grant {
 	return masque.Grant{
+		Endpoint:  g.Endpoint,
 		Connector: g.Connector, Principal: g.Connector, VPC: g.VPC, VPCUID: g.VPCUID, VPCID: g.VPCID,
 		Service: masque.ServiceRef{Namespace: g.Service.Namespace, Name: g.Service.Name, UID: g.Service.UID},
 		Prefix:  g.Prefix, Routes: g.Routes, NotAfter: g.NotAfter, Authorization: g.Authorization,

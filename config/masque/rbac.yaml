@@ -8,9 +8,45 @@ metadata:
   name: masque-authority
   namespace: masque-system
 rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [masqueendpoints]
+    verbs: [get, list, watch]
   - apiGroups: [""]
     resources: [secrets, configmaps]
     verbs: [get, list, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: masque-endpoints
+  namespace: masque-system
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [masqueendpoints]
+    verbs: [get, list, watch]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [masqueendpoints/status]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: masque-endpoints
+  namespace: masque-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: masque-endpoints
+subjects:
+  - kind: ServiceAccount
+    name: masque-provider
+    namespace: masque-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

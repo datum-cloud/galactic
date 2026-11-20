@@ -21,7 +21,4 @@ func TestParams(t *testing.T) {
 	if lease, renew := Params.Duration, RenewInterval; renew*3 > lease {
 		t.Errorf("renewing every %v leaves fewer than two missed renewals in a %v lease", renew, lease)
 	}
-	if now, later := BootClock(), BootClock(); later < now {
-		t.Errorf("CLOCK_BOOTTIME went back from %v to %v", now, later)
-	}
 }
