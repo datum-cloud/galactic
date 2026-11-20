@@ -428,6 +428,23 @@ WORKER_STARTED=1
 NODES=${NODE} WORKER_ALLOWLIST="${OUT}/configs/allowlist.yaml" "${SCRIPT_DIR}/worker-fabric.sh" start \
   >"${OUT}/logs/worker.log" 2>&1
 
+# A routed link's pod end needs SYS_PTRACE and SYS_ADMIN beside NET_ADMIN
+# and BPF; a packaged Worker gets them only from the routed-link profile
+# Component (config/galactic-worker/profiles/routed-link). Here Worker runs
+# as a bare process in the Kind node (worker-fabric.sh), not the packaged
+# DaemonSet, so the run records what it actually holds.
+volatile worker-placement "bare process in ${NODE} (worker-fabric.sh), not the packaged DaemonSet"
+wpid=$(docker exec "${NODE}" pgrep -f "^${WORKER_BIN}" | head -1)
+capeff=$(docker exec "${NODE}" awk '/^CapEff:/ {print $2}' "/proc/${wpid}/status" 2>/dev/null || true)
+volatile worker-capeff "${capeff:-unknown}"
+for c in NET_ADMIN:12 SYS_PTRACE:19 SYS_ADMIN:21 BPF:39; do
+  has=no
+  if [ -n "${capeff}" ] && (((16#${capeff} >> ${c#*:}) & 1)); then
+    has=yes
+  fi
+  record setup "Worker's effective capabilities include CAP_${c%%:*}" yes "${has}"
+done
+
 # Worker takes a destination's addresses only from its VPCAttachment's
 # spec.interface.addresses. Fill them in where ns80's attachments have none
 # (#1460 adds them); cleanup takes them out again.
@@ -808,6 +825,12 @@ state() {
   f="${OUT}/logs/${w}/metrics.txt"
   metrics >"${f}" 2>&1 || true
   record "${w}" "sidecar: connected to Worker" 1 "$(metric "${f}" worker_connected)"
+  # RoutedLinkUnavailable here means Worker lacks the routed-link
+  # capabilities (above).
+  for cap in local.socket fabric.srv6; do
+    record "${w}" "sidecar: Worker reports ${cap} available" 1 \
+      "$(metric "${f}" worker_capability "capability=\"${cap}\",reason=\"\",state=\"available\"")"
+  done
   record "${w}" "sidecar: ready claims" 2 "$(metric "${f}" worker_claims 'state="ready"')"
   record "${w}" "sidecar: local destinations" 2 "$(metric "${f}" worker_destinations 'mode="local"')"
   if [ "${REMOTE}" = dfw-worker4 ]; then

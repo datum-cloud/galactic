@@ -448,6 +448,13 @@ withdraws it when the pod is gone, on release, on lease expiry, and before it
 reclaims a VPC with no claims. Worker needs RBAC to write BGPAdvertisements;
 [#1441](https://github.com/datum-cloud/galactic/issues/1441) packages it.
 
+**Placement.** The Worker on a node that runs the proxy must be deployed
+with the routed-link profile Component
+(`config/galactic-worker/profiles/routed-link`), which adds `SYS_PTRACE` and
+`SYS_ADMIN` so Worker can open and set up the pod end. Without it Worker
+reports `local.socket` unavailable with `RoutedLinkUnavailable` and programs
+none of the sidecar's claims ([operations](operations.md#install)).
+
 **Sidecar side.** The sidecar owns everything inside the pod: the per-VPC pod
 VRF (a table from the sidecar range, starting at `0x10000`), the pod end's
 enslavement into it, the gateway `/128` address on the pod end (`NODAD`), and

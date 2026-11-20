@@ -55,6 +55,14 @@ Worker's allowlist, using the Deployment's namespace:
 
 ## Prerequisites outside this Component
 
+- Galactic Worker on every node that runs the proxy must be deployed with the
+  `config/galactic-worker/profiles/routed-link` Component. The sidecar's
+  `local.socket` claims need a routed link, and Worker can set up the link's
+  pod end only with `SYS_PTRACE` and `SYS_ADMIN`, which that Component adds
+  to Worker's base `NET_ADMIN` and `BPF`. Without it, Worker reports
+  `local.socket` unavailable with `RoutedLinkUnavailable`, the sidecar's
+  claims are never programmed, and the proxy never becomes ready
+  ([Worker operations](../../docs/worker/operations.md#install)).
 - NSO (network-services-operator) creates the proxy pod's per-VPC
   VPCAttachment in production. This Component does not.
 - bpffs mounted at `/sys/fs/bpf` and `/run/galactic-worker` present on each
