@@ -242,6 +242,19 @@ func applyEdge(h edgeHost, p *edgePlan) error {
 		}
 	}
 	for _, r := range p.register {
+		// A link that is not registered but has rows has a reused ifindex:
+		// the rows are a deleted link's, possibly another attachment's or
+		// VPC's, and RegisterHostLink would keep their policy token. They
+		// go first, so the link starts with its own.
+		if has, err := h.HasRows(r.link.Index); err != nil {
+			errs = append(errs, fmt.Errorf("local: read edge link %s: %w", r.link.Name, err))
+			continue
+		} else if has {
+			if err := h.Unregister(r.link.Index); err != nil {
+				errs = append(errs, fmt.Errorf("local: clear the reused ifindex of edge link %s: %w", r.link.Name, err))
+				continue
+			}
+		}
 		if err := h.Register(p.table, r.link.Index, r.link.Name, r.addr); err != nil {
 			errs = append(errs, fmt.Errorf("local: register edge link %s: %w", r.link.Name, err))
 		}

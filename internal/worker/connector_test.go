@@ -146,6 +146,8 @@ func TestConnectorClaimRefusals(t *testing.T) {
 			workerv1alpha1.ReasonMalformedSpec},
 		{"bad prefix", edgeSA, edgeAtt, edgeSpec(edgeLink, "2001:db8::1"), codes.InvalidArgument,
 			workerv1alpha1.ReasonMalformedSpec},
+		{"default route", edgeSA, edgeAtt, edgeSpec(edgeLink, "::/0"), codes.InvalidArgument,
+			workerv1alpha1.ReasonMalformedSpec},
 		{"denied attachment", edgeSA, "edge-denied", edgeSpec(edgeLink), codes.PermissionDenied,
 			workerv1alpha1.ReasonVPCNotAuthorized},
 		{"other node", edgeSA, "edge-other-node", edgeSpec(edgeLink), codes.PermissionDenied,
