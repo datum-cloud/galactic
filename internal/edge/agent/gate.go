@@ -417,6 +417,13 @@ func (a *Agent) gateCommit(vpc string, opening bool, mutate func() error) error 
 			return fmt.Errorf("%w: an older galactic-edge process still owns %s", ownership.ErrTransitioning,
 				ownership.VPCScope(vpc))
 		}
+		if strings.HasPrefix(rec.Owner, ownerPrefix) && rec.Owner != a.Owner {
+			// A newer galactic-edge process holds the VPC: this one was
+			// fenced and never opens a gate again.
+			a.markLost(EdgeGateScope(vpc))
+			return fmt.Errorf("%w: a newer galactic-edge process owns %s", ownership.ErrNotOwner,
+				ownership.VPCScope(vpc))
+		}
 	}
 	return a.commitAs(EdgeGateScope(vpc), true, mutate)
 }

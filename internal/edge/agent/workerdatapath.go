@@ -27,12 +27,15 @@ import (
 
 // Condition reasons a Worker-backed datapath gives the agent.
 const (
-	// ReasonWorkerUnavailable: Worker could not be reached, or did not
-	// program or release the link in time.
+	// ReasonWorkerUnavailable: Worker could not be reached, or answered
+	// that it is unavailable, such as while it resyncs after a restart.
 	ReasonWorkerUnavailable = "WorkerUnavailable"
 	// ReasonWorkerRefused: Worker refused the link's claim; the message
 	// carries Worker's reason.
 	ReasonWorkerRefused = "WorkerRefused"
+	// ReasonWorkerPending: Worker answers but did not program or release
+	// the link in time; the message carries Worker's reason.
+	ReasonWorkerPending = "WorkerPending"
 )
 
 // WorkerError is a Worker-backed datapath's failure, with the agent reason
@@ -42,7 +45,11 @@ type WorkerError struct {
 	Reason string
 	// WorkerReason is Worker's contract reason, when it gave one.
 	WorkerReason string
-	Err          error
+	// Unreachable is set when the call failed for want of a Worker to
+	// answer it: no connection, or Worker unavailable while it resyncs or
+	// stops. Links Worker already registered keep forwarding meanwhile.
+	Unreachable bool
+	Err         error
 }
 
 func (e *WorkerError) Error() string {
@@ -269,7 +276,8 @@ func workerError(err error) error {
 	case codes.PermissionDenied, codes.InvalidArgument, codes.FailedPrecondition, codes.Aborted:
 		return &WorkerError{Reason: ReasonWorkerRefused, WorkerReason: reason, Err: err}
 	}
-	return &WorkerError{Reason: ReasonWorkerUnavailable, WorkerReason: reason, Err: err}
+	return &WorkerError{Reason: ReasonWorkerUnavailable, WorkerReason: reason,
+		Unreachable: status.Code(err) == codes.Unavailable, Err: err}
 }
 
 // put makes l's claim carry spec, with Request for a claim Worker does not
@@ -360,7 +368,7 @@ func (d *WorkerDatapath) waitFor(ctx context.Context, uid string,
 					msg = p.GetReason() + ": " + p.GetMessage()
 				}
 			}
-			return &WorkerError{Reason: ReasonWorkerUnavailable, Err: fmt.Errorf("%w waiting for Worker (%s)",
+			return &WorkerError{Reason: ReasonWorkerPending, Err: fmt.Errorf("%w waiting for Worker (%s)",
 				ctx.Err(), msg)}
 		}
 	}

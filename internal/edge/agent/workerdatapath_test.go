@@ -205,10 +205,25 @@ func TestWorkerDatapathRefusal(t *testing.T) {
 		t.Fatalf("Register of a revoked claim = %v, want AuthorizationRevoked", err)
 	}
 
-	// No status in time is WorkerUnavailable.
+	// No status in time is WorkerPending, which keeps nothing Programmed.
 	d = &WorkerDatapath{Client: newScriptedWorker(), Node: node, Gates: nopGates{}, Wait: 20 * time.Millisecond}
-	if err := d.Register(testLink); workerReason(err) != ReasonWorkerUnavailable {
-		t.Fatalf("Register with no status = %v, want WorkerUnavailable", err)
+	err = d.Register(testLink)
+	if !errors.As(err, &we) || we.Reason != ReasonWorkerPending || we.Unreachable {
+		t.Fatalf("Register with no status = %v, want WorkerPending and reachable", err)
+	}
+
+	// A Worker that cannot answer is unreachable, resyncing included.
+	for _, down := range []error{
+		errWorkerDown,
+		refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "resyncing", nil),
+	} {
+		w := newScriptedWorker()
+		w.refuse = down
+		d = &WorkerDatapath{Client: w, Node: node, Gates: nopGates{}}
+		err = d.Prepare(testLink)
+		if !errors.As(err, &we) || we.Reason != ReasonWorkerUnavailable || !we.Unreachable {
+			t.Fatalf("Prepare against %v = %v, want WorkerUnavailable and unreachable", down, err)
+		}
 	}
 }
 

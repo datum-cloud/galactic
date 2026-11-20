@@ -301,6 +301,16 @@ func (a *Agent) resolve(ctx context.Context, podUID string) podNS {
 // and programs every live attachment, in one snapshot commit.
 func (a *Agent) reconcileScope(vpc string, active, releasing []*galacticv1alpha1.EdgeAttachment,
 	pods map[string]podNS) ([]outcome, error) {
+	// The edge gate scope is taken before anything else in the pass, so a
+	// newer process fences an older one there at once, not only at its first
+	// gate commit. A process a newer one fenced stops writing the VPC
+	// altogether and leaves its status to the newer one.
+	if _, err := a.ticket(EdgeGateScope(vpc)); err != nil {
+		if errors.Is(err, ownership.ErrNotOwner) || errors.Is(err, ownership.ErrTransitioning) {
+			a.markLost(EdgeGateScope(vpc))
+		}
+		return nil, fmt.Errorf("edge gate scope of VPC %s: %w", vpc, err)
+	}
 	if c, ok := a.Datapath.(Connector); ok {
 		return a.reconcileWorkerScope(c, vpc, active, releasing, pods)
 	}
@@ -368,6 +378,12 @@ func (a *Agent) reconcileScope(vpc string, active, releasing []*galacticv1alpha1
 func (a *Agent) reconcileWorkerScope(c Connector, vpc string, active, releasing []*galacticv1alpha1.EdgeAttachment,
 	pods map[string]podNS) ([]outcome, error) {
 	if err := a.handOver(c, vpc, active); err != nil {
+		// While Worker cannot be reached the scope stays as it is, and so
+		// does every attachment's status: its links keep forwarding.
+		var we *WorkerError
+		if errors.As(err, &we) && we.Unreachable {
+			return nil, err
+		}
 		out := make([]outcome, 0, len(active))
 		for _, att := range active {
 			out = append(out, outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
@@ -425,6 +441,16 @@ func (a *Agent) handOver(c Connector, vpc string, active []*galacticv1alpha1.Edg
 		}
 		if err := c.Prepare(Link{VPC: vpc, AttachmentUID: string(att.UID), Index: uint32(l.HostIndex),
 			Name: l.HostLink, Addr: addr}); err != nil {
+			// Worker refuses a link it would not authorize, such as one
+			// of an attachment no longer admitted. Worker removes that
+			// link's rows once it takes the scope, as revocation does, so
+			// the transfer goes on without it.
+			var we *WorkerError
+			if errors.As(err, &we) && we.Reason == ReasonWorkerRefused {
+				slog.Warn("galactic-edge: Worker refused a link's claim during the transfer",
+					"vpc", vpc, "link", l.HostLink, "err", err)
+				continue
+			}
 			return fmt.Errorf("claim %s before handing %s to Worker: %w", l.HostLink, scope, err)
 		}
 	}
@@ -794,7 +820,7 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 	// rather than ending its routes and sessions for an outage of Worker.
 	workerFail := func(err error) outcome {
 		var we *WorkerError
-		if errors.As(err, &we) && we.Reason == ReasonWorkerUnavailable && link.ID == spec.ID &&
+		if errors.As(err, &we) && we.Unreachable && link.ID == spec.ID &&
 			meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentProgrammed) {
 			slog.Warn("galactic-edge: Galactic Worker is unreachable; keeping the attachment's registered link",
 				"attachment", att.Namespace+"/"+att.Name, "link", spec.HostLink, "err", err)

@@ -107,7 +107,10 @@ call needs it, so it starts, renews gates and serves providers while Worker is
 down. An attachment that is `Programmed` on a link Worker registered stays
 `Programmed`: Worker keeps the link's rows while it is down and rebuilds them
 from its store when it restarts. A new attachment waits, reporting
-`WorkerUnavailable`, until Worker is back.
+`WorkerUnavailable`, until Worker is back. Only an unreachable Worker, one
+that does not answer or answers that it is resyncing or stopping, keeps an
+attachment `Programmed` this way. A Worker that answers but does not program a
+link in time reports `WorkerPending`, and the attachment is not `Programmed`.
 
 ## Ownership transfer
 
@@ -143,7 +146,7 @@ holds the VPC's own scope.
 | `config/galactic-edge` manifests | Unchanged                               | Add the `/run/galactic-worker` mount, the token and the flag; #1441 packages them |
 | Provider contract and providers  | Unchanged                               | Unchanged                                                                         |
 | Metrics                          | Unchanged                               | Adds `galactic_edge_foundation_worker_capability` and `_worker_claims`            |
-| Condition reasons                | Unchanged                               | Adds `WorkerRefused` and `WorkerUnavailable` on `Programmed`                      |
+| Condition reasons                | Unchanged                               | Adds `WorkerRefused`, `WorkerUnavailable` and `WorkerPending` on `Programmed`     |
 | Forwarding gates                 | Committed under `edge-gates-<id>` (D38) | Committed under `edge-gates-<id>` (D38)                                           |
 
 Worker's allowlist must grant `galactic-system/galactic-edge` the
