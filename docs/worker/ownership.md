@@ -128,7 +128,11 @@ installer's `vrf_table` repair and its sweep. `galactic-worker handback`
 
 A handed-back scope is not Worker-owned, so GC, the router, CNI and the
 installer, which write with `Exclusive`, work in it as in any scope no Worker
-owns. A writer that needs to own the scope takes it with `Takeover`, accepting
+owns. When GC reclaims a handed-back scope whose VPC the node no longer
+serves, it also releases the handback label, under the scope's lock and only
+while that label still owns the scope, leaving the scope unowned; nothing
+else would adopt it. A handed-back scope still in use keeps its label until
+a writer takes it. A writer that needs to own the scope takes it with `Takeover`, accepting
 the label: Worker does, and galactic-edge's pinned mode does once
 [#1440](https://github.com/datum-cloud/galactic/issues/1440) lands. Until then
 galactic-edge refuses a handed-back scope with `ErrNotOwner`. A Worker started later takes every handed-back
