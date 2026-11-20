@@ -229,12 +229,17 @@ fixture_restored() {
   fi
 }
 
-# no_stale_rows waits up to one GC interval and a minute for every node to
-# have no egress_route_table row of a table no VRF holds, and fails naming
-# the nodes that still do: rows a run's VPCs left behind would be a leak.
+# no_stale_rows waits up to 16 minutes for every node to have no
+# egress_route_table row of a table no VRF holds, and fails naming the nodes
+# that still do: rows a run's VPCs left behind would be a leak. Such rows go
+# only once the table's reservation is released (internal/gc/vrftables.go):
+# galactic-router's GC removes the VPC's BGPVRFInstance, one galactic-cni
+# sweep sees the reservation unreferenced, and a sweep at least 2 minutes
+# later releases it and removes the rows. Both run every 5 minutes, so that
+# takes up to three intervals.
 no_stale_rows() {
   local left="" node
-  for _ in $(seq 36); do
+  for _ in $(seq 96); do
     left=""
     for node in "${NODES[@]}"; do
       if snapshot "${node}" | grep -q '^stale_egress_row '; then
@@ -244,7 +249,7 @@ no_stale_rows() {
     [ -z "${left}" ] && return 0
     sleep 10
   done
-  fail "$1: egress_route_table rows of a table no VRF holds remain on${left} after 6 minutes"
+  fail "$1: egress_route_table rows of a table no VRF holds remain on${left} after 16 minutes"
 }
 
 # snap_all LABEL writes every Worker node's snapshot under OUT/LABEL.
