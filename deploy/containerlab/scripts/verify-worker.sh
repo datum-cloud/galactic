@@ -169,63 +169,64 @@ snapshot() {
   } | sort
 }
 
-# fixture_gone waits up to two GC intervals and a minute for dfw-worker2 to
-# hold no VRF of the combined fixture's VPCs and no route in the tables
-# those VRFs used: a pass that deletes the fixture's BGPAdvertisements may
-# still see them while their finalizers run, and reclaim the VRFs only on the
-# next pass. It waits so nothing the fixture created reaches the next run. It
-# fails with what is left: the VRFs, their tables' routes, and any
-# BGPAdvertisement still naming the VPCs, which keeps GC from reclaiming
-# them.
-fixture_gone() {
-  local node=dfw-worker2 left vpc name t
-  for _ in $(seq 66); do
-    left=""
-    for vpc in 80 81; do
-      name="G$(printf '%09s' "${vpc}" | tr ' ' 0)V"
-      docker exec "${node}" ip link show dev "${name}" >/dev/null 2>&1 && left="${left} VRF ${name};"
-    done
-    for t in ${FIXTURE_TABLES:-}; do
-      routes=$(docker exec "${node}" ip -6 route show table "${t}" 2>/dev/null || true)
-      [ -n "${routes}" ] && left="${left} routes in table ${t};"
-    done
-    [ -z "${left}" ] && return 0
-    sleep 10
-  done
+# fixture_state prints dfw-worker2's VRFs and its fence records for the
+# combined fixture's VPCs, one sorted line each.
+fixture_state() {
+  local node=dfw-worker2
   {
-    echo "left on ${node}:${left}"
-    for t in ${FIXTURE_TABLES:-}; do
-      echo "--- table ${t}"
-      docker exec "${node}" ip -6 route show table "${t}" 2>&1
+    docker exec "${node}" ip -j -d link show type vrf |
+      jq -r '.[] | "vrf \(.ifname) table \(.linkinfo.info_data.table)"'
+    docker exec "${node}" sh -c 'for f in /var/lib/galactic-edge/ownership/vpc-8[01].json; do
+      [ -e "$f" ] && echo "fence $(basename "$f" .json) $(cat "$f")"; done; true'
+  } | sort
+}
+
+# fixture_restored puts dfw-worker2 back as it was before the combined
+# fixture and checks it. galactic-bgp publishes an EndpointSlice for every
+# attached pod, labelled with its VPC, and GC counts a VPC active on every
+# node while any such slice names it (internal/gc, activeVPCsFromEndpointSlices).
+# ns80's standing guests on dfw-worker and dfw-worker4 keep VPC 80 and 81
+# active cluster-wide by design, so GC never reclaims the VRFs the fixture
+# created on dfw-worker2. Its teardown therefore removes each VRF it created,
+# once no link is enslaved to it, under that VPC's fence lock as GC would.
+# dfw-worker2's VRFs must then match those before the fixture, the fixture's
+# tables must hold no route, and its fences must be neither Worker-owned nor
+# moving. The fence records stay, as they do for every VPC a node has served.
+fixture_restored() {
+  local node=dfw-worker2 vpc name t slaves before after
+  before=$(grep '^vrf ' "${OUT}/fixture-before.txt" || true)
+  for vpc in 80 81; do
+    name="G$(printf '%09s' "${vpc}" | tr ' ' 0)V"
+    grep -q "^vrf ${name} " <<<"${before}" && continue
+    docker exec "${node}" ip link show dev "${name}" >/dev/null 2>&1 || continue
+    for _ in $(seq 30); do
+      slaves=$(docker exec "${node}" ip -o link show master "${name}" 2>/dev/null || true)
+      [ -z "${slaves}" ] && break
+      sleep 2
     done
-    echo "--- BGPAdvertisements naming VPC 80 or 81"
-    kc -n "${NS}" get bgpadvertisements -o json </dev/null |
-      jq -r '.items[] | select((.metadata.name + " " + (.spec | tostring)) | test("(^|[^0-9])8[01]([^0-9]|$)"))
-        | "\(.metadata.name) router=\(.spec.routerRef.name // "-")"'
-    # What GC weighs before it reclaims a VPC's VRF on the node.
-    echo "--- BGPRouters targeting ${node}"
-    kc -n "${NS}" get bgprouters -o json </dev/null |
-      jq -r --arg n "${node}" '.items[] | select(.spec.targetRef.name == $n) | .metadata.name'
-    echo "--- fence records of VPC 80 and 81"
-    docker exec "${node}" sh -c 'for f in /var/lib/galactic-edge/ownership/vpc-8[01].json; do [ -e "$f" ] && echo "$f $(cat "$f")"; done'
-    echo "--- links enslaved to the fixture's VRFs"
-    for vpc in 80 81; do
-      docker exec "${node}" ip -o link show master "G$(printf '%09s' "${vpc}" | tr ' ' 0)V" 2>&1
-    done
-    echo "--- EdgeAttachments"
-    kc get edgeattachments -A -o wide </dev/null 2>&1
-    # GC counts a VPC active on every node while any tenant EndpointSlice in
-    # the cluster names it.
-    echo "--- tenant EndpointSlices"
-    kc get endpointslices -A -l galactic.datum.net/tenant-id \
-      -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,TENANT:.metadata.labels.galactic\.datum\.net/tenant-id' \
-      </dev/null 2>&1
-    echo "--- galactic-router GC log on ${node}"
-    pod=$(kc -n "${NS}" get pod -l app.kubernetes.io/name=galactic-router --field-selector "spec.nodeName=${node}" \
-      -o jsonpath='{.items[0].metadata.name}' </dev/null)
-    kc -n "${NS}" logs "${pod}" </dev/null 2>&1 | grep -E 'GC|VRF|vpc-8[01]|00000008[01]' | tail -60
-  } >"${OUT}/fixture-leftovers.txt" 2>&1
-  fail "cleanup: the combined fixture left${left} after 11 minutes (fixture-leftovers.txt)"
+    if [ -n "${slaves}" ]; then
+      fail "cleanup: links are still enslaved to ${name} on ${node}: ${slaves}"
+      continue
+    fi
+    t=$(table_of "${node}" "${vpc}")
+    log "removing ${name} (table ${t}), which the fixture created on ${node}"
+    docker exec "${node}" flock "/var/lib/galactic-edge/ownership/vpc-${vpc}.lock" sh -c \
+      "ip -4 route flush table ${t}; ip -6 route flush table ${t}; ip link del ${name}" >>"${OUT}/steps.log" 2>&1 ||
+      fail "cleanup: could not remove ${name} on ${node}"
+  done
+  fixture_state >"${OUT}/fixture-after.txt"
+  after=$(grep '^vrf ' "${OUT}/fixture-after.txt" || true)
+  if [ "${before}" != "${after}" ]; then
+    diff <(echo "${before}") <(echo "${after}") >"${OUT}/fixture-vrfs.diff"
+    fail "cleanup: dfw-worker2's VRFs differ from before the fixture (fixture-vrfs.diff)"
+  fi
+  for t in ${FIXTURE_TABLES:-}; do
+    routes=$(docker exec "${node}" ip -6 route show table "${t}" 2>/dev/null || true)
+    [ -z "${routes}" ] || fail "cleanup: table ${t} on ${node} still holds routes: ${routes}"
+  done
+  if grep -E '^fence ' "${OUT}/fixture-after.txt" | grep -qE '"owner":"galactic-worker:|"transitioning":true'; then
+    fail "cleanup: a fence of VPC 80 or 81 on ${node} is Worker-owned or moving (fixture-after.txt)"
+  fi
 }
 
 # no_stale_rows waits up to one GC interval and a minute for every node to
@@ -357,8 +358,8 @@ cleanup() {
   fi
   if [ "${PROFILE}" = combined ]; then
     "${SCRIPT_DIR}/handoff-fixture.sh" down >>"${OUT}/steps.log" 2>&1 || fail "cleanup: ns80-tap removal failed"
-    log "fixture check: no VRF or route of VPC 80 or 81 left on dfw-worker2"
-    fixture_gone
+    log "fixture check: dfw-worker2 as it was before the fixture"
+    fixture_restored
   fi
   if [ "${status}" -eq 0 ] && [ "${#NODES[@]}" -gt 0 ]; then
     log "leak check: rows of tables no VRF holds"
@@ -374,6 +375,7 @@ cleanup() {
 trap cleanup EXIT
 
 if [ "${PROFILE}" = combined ]; then
+  fixture_state >"${OUT}/fixture-before.txt"
   log "deploy ns80-tap on dfw-worker2"
   "${SCRIPT_DIR}/deploy-tenant-policy.sh" ns80-tap dfw >>"${OUT}/steps.log"
   copy_to "${CP}" tenants/base

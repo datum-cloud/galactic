@@ -26,6 +26,17 @@ and may not do. Evidence lands in `bin/worker-lab/<UTC timestamp>-<profile>/`
 at the repository root, and every failed check is listed in its `failures`
 file.
 
+The combined run pins ns80-tap's TAP guests to `dfw-worker2`, an edge node
+that otherwise holds no VRF for VPC 80 or 81. galactic-router's GC never
+reclaims those VRFs once the fixture goes: galactic-bgp publishes an
+EndpointSlice for every attached pod, labelled with its VPC, and GC counts a
+VPC active on every node while any such slice names it. ns80's standing
+guests on `dfw-worker` and `dfw-worker4` keep VPC 80 and 81 active
+cluster-wide by design. The run's teardown therefore removes the VRFs it
+created, under each VPC's fence lock, and checks that `dfw-worker2`'s VRFs
+and the fixture's tables are as they were before it, and its fences neither
+Worker-owned nor moving.
+
 `scripts/worker-lab.sh` runs the steps by hand: `install SITE PROFILE`,
 `inspect SITE NODE`, `uninstall SITE`, and the claim client pod
 (`resources/galactic-worker/lab-client/`). `scripts/worker-fabric.sh` still
