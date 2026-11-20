@@ -158,11 +158,18 @@ wait_mode() {
   sleep 5
 }
 
+# handoffs_ready reports whether galactic-nat says Worker reports VPC 80's and
+# VPC 81's Local handoffs Ready. It names them: galactic-nat also claims a
+# pair for every other VPC with an attachment on the node, such as the edge
+# conformance clients'.
+VPCS=(80 81)
 handoffs_ready() {
-  local m
-  m=$(docker exec "${EDGE}" curl -s --max-time 4 "${NAT_METRICS}" |
-    awk '$1 ~ /^galactic_nat_local_handoff_ready\{/ && $2 == 1' | wc -l)
-  [ "${m}" -ge 2 ]
+  local metrics v
+  metrics=$(docker exec "${EDGE}" curl -s --max-time 4 "${NAT_METRICS}") || return 1
+  for v in "${VPCS[@]}"; do
+    awk -v v="vpc=\"${v}\"" '$1 ~ /^galactic_nat_local_handoff_ready\{/ && index($1, v) && $2 == 1 {f = 1}
+      END {exit !f}' <<<"${metrics}" || return 1
+  done
 }
 
 # local_rows_dump prints dfw-worker2's egress_local_shard rows. The node
@@ -171,15 +178,46 @@ handoffs_ready() {
 local_rows_dump() {
   local pid
   pid=$(docker inspect -f '{{.State.Pid}}' "${EDGE}")
-  sudo bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic/egress_local_shard"
+  sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic/egress_local_shard"
 }
 
+# local_rows reports whether egress_local_shard holds a row toward a pair for
+# VPC 80's and VPC 81's VRF tables. A failed read or an unparseable dump ends
+# the run at once, rather than reading as "no rows".
 local_rows() {
-  local n
-  n=$(local_rows_dump 2>/dev/null | python3 -c 'import json,sys
-try: print(len(json.load(sys.stdin)))
-except Exception: print(0)')
-  [ "${n}" -ge 2 ]
+  local dump tables=() v t
+  for v in "${VPCS[@]}"; do
+    t=$("${SCRIPT_DIR}/worker-fabric.sh" table "${EDGE}" "${v}") || die "cannot read VPC ${v}'s VRF table on ${EDGE}"
+    [[ "${t}" =~ ^[0-9]+$ ]] || die "VPC ${v}'s VRF table on ${EDGE} reads '${t}'"
+    tables+=("${t}")
+  done
+  dump=$(local_rows_dump 2>&1) || die "bpftool could not read egress_local_shard on ${EDGE}: ${dump}"
+  python3 -c '
+import json, struct, sys
+try:
+    rows = json.loads(sys.argv[1])
+except ValueError as e:
+    print("unparseable egress_local_shard dump: %s" % e, file=sys.stderr)
+    sys.exit(2)
+def u32(v):
+    if isinstance(v, int):
+        return v
+    return struct.unpack("<I", bytes(int(b, 16) for b in v[:4]))[0]
+have = {}
+for r in rows:
+    key, val = r.get("key"), r.get("value")
+    if isinstance(r.get("formatted"), dict):
+        key, val = r["formatted"]["key"], r["formatted"]["value"]
+    pair = val.get("pair_ifindex", 0) if isinstance(val, dict) else u32(val[16:20])
+    have[u32(key)] = pair
+want = [int(t) for t in sys.argv[2:]]
+sys.exit(0 if all(have.get(t, 0) > 0 for t in want) else 1)
+' "${dump}" "${tables[@]}"
+  case $? in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) die "egress_local_shard on ${EDGE} could not be parsed" ;;
+  esac
 }
 
 # diagnostics prints what a failed run needs to be understood, before the
@@ -203,18 +241,33 @@ diagnostics() {
 
 # hairpin_start / hairpin_check capture packets toward dfw-worker2's own
 # shard SID on its uplinks: a Local flow must never cross the underlay.
+# Only packets leaving the node count: other nodes' tenants reach this shard
+# over the same uplinks, inbound.
+BONDS=()
 hairpin_start() {
-  docker exec -d "${EDGE}" sh -c "timeout 600 tcpdump -i any -nn -U -w /tmp/nat-local-hairpin.pcap 'ip6 and dst net ${LSID64}' >/dev/null 2>&1"
-  sleep 1
+  mapfile -t BONDS < <(docker exec "${EDGE}" ip -o link show type bond | awk -F': ' '{print $2}')
+  [ "${#BONDS[@]}" -gt 0 ] || die "${EDGE} has no bond uplinks"
+  local b
+  for b in "${BONDS[@]}"; do
+    docker exec -d "${EDGE}" sh -c "timeout 600 tcpdump -i ${b} -Q out -nn -U -w /tmp/nat-local-hairpin-${b}.pcap 'ip6 and dst net ${LSID64}' >/dev/null 2>&1"
+  done
+  sleep 2
+  for b in "${BONDS[@]}"; do
+    docker exec "${EDGE}" pgrep -f "nat-local-hairpin-${b}.pcap" >/dev/null || die "the hairpin capture on ${b} did not start"
+  done
 }
 hairpin_check() {
-  docker exec "${EDGE}" sh -c 'pkill -INT -f nat-local-hairpin.pcap || true'
-  sleep 1
-  local n
-  n=$(docker exec "${EDGE}" sh -c 'tcpdump -nn -r /tmp/nat-local-hairpin.pcap 2>/dev/null | wc -l')
-  docker exec "${EDGE}" rm -f /tmp/nat-local-hairpin.pcap
-  [ "${n}" -eq 0 ] || die "${n} packets toward dfw-worker2's own shard SID crossed the underlay (hairpin)"
-  echo "    no underlay hairpin toward ${LSID64}"
+  docker exec "${EDGE}" sh -c 'pkill -INT -f nat-local-hairpin- || true'
+  sleep 2
+  local b n total=0
+  for b in "${BONDS[@]}"; do
+    n=$(docker exec "${EDGE}" sh -c "tcpdump -nn -r /tmp/nat-local-hairpin-${b}.pcap 2>/dev/null | wc -l") ||
+      die "cannot read the hairpin capture on ${b}"
+    total=$((total + n))
+  done
+  docker exec "${EDGE}" sh -c 'rm -f /tmp/nat-local-hairpin-*.pcap'
+  [ "${total}" -eq 0 ] || die "${total} packets toward ${EDGE}'s own shard SID left through its uplinks (hairpin)"
+  echo "    no packet toward ${LSID64} left through ${BONDS[*]}"
 }
 
 # probe KIND GUEST COUNT ALLOWED... sends COUNT requests of KIND (tcp6, tcp4,
@@ -314,9 +367,11 @@ wait_true "galactic-nat's Local handoffs on ${EDGE} are not ready after 300s" 30
 wait_true "${EDGE} holds no egress_local_shard row for both VPCs after 120s" 120 local_rows
 echo "    both VPCs' Local handoffs ready; egress_local_shard rows present"
 
-docker exec -d "${REMOTE}" sh -c "socat UDP6-RECVFROM:${ECHO_PORT},fork EXEC:cat"
+docker exec -d "${REMOTE}" sh -c "socat UDP6-RECVFROM:${ECHO_PORT},ipv6only=1,fork EXEC:cat"
 docker exec -d "${REMOTE}" sh -c "socat UDP4-RECVFROM:${ECHO_PORT},fork EXEC:cat"
 sleep 1
+n=$(docker exec "${REMOTE}" sh -c 'pgrep -f "socat UDP" | wc -l')
+[ "${n}" -eq 2 ] || die "remote-host runs ${n} UDP echo servers, want 2"
 
 # --- 2. ordered: the local shard --------------------------------------------------------
 
@@ -373,10 +428,19 @@ echo "    galactic-nat restart: ${before} -> ${after}"
 # The NAT end is the pair end outside any VRF; the tenant end has one as
 # its master.
 nat_end=$(docker exec "${EDGE}" ip -o link show type veth |
-  awk '/alias galactic-local:/ && !/ master / {sub(/@.*/, "", $2); print $2; exit}')
-[ -n "${nat_end}" ] || die "found no pair NAT end on ${EDGE}"
+  awk '/alias galactic-local:80\// && !/ master / {sub(/@.*/, "", $2); print $2; exit}')
+[ -n "${nat_end}" ] || die "found no NAT end of VPC 80's pair on ${EDGE}"
+old_idx=$(docker exec "${EDGE}" cat "/sys/class/net/${nat_end}/ifindex")
 docker exec "${EDGE}" ip link del "${nat_end}"
-sleep 5
+# pair_back reports whether Worker recreated the pair under a new ifindex and
+# galactic-nat attached its program to the new NAT end.
+pair_back() {
+  local idx
+  idx=$(docker exec "${EDGE}" cat "/sys/class/net/${nat_end}/ifindex" 2>/dev/null) || return 1
+  [ "${idx}" != "${old_idx}" ] || return 1
+  docker exec "${EDGE}" ip -d link show "${nat_end}" | grep -E 'xdp(drv|generic)?/id:|prog/xdp' >/dev/null
+}
+wait_true "VPC 80's pair is not back with galactic-nat's program after 300s" 300 pair_back
 wait_true "Local handoffs not ready after the pair was recreated" 300 handoffs_ready
 wait_true "egress_local_shard rows not back after the pair was recreated" 120 local_rows
 after=$(udp_tuple guest-a-edge 6)
