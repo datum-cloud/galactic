@@ -680,7 +680,7 @@ func TestOverHTTPS(t *testing.T) {
 		}
 	}
 	writeToken("pod-a-token")
-	c := &Client{URL: ts.URL, TokenFile: tokenFile, CAFile: caFile, Now: f.clock}
+	c := &Client{Reader: f.admin, URL: ts.URL, TokenFile: tokenFile, CAFile: caFile, Now: f.clock}
 	ctx := context.Background()
 
 	g, err := c.Authorize(ctx, c1.Credential, vpcSelector)
@@ -725,7 +725,7 @@ func TestOverHTTPS(t *testing.T) {
 	t.Run("untrusted server", func(t *testing.T) {
 		other := httptest.NewTLSServer(nil)
 		defer other.Close()
-		u := &Client{URL: other.URL, TokenFile: tokenFile, CAFile: caFile, Now: f.clock}
+		u := &Client{Reader: f.admin, URL: other.URL, TokenFile: tokenFile, CAFile: caFile, Now: f.clock}
 		_, err := u.Authorize(ctx, c1.Credential, vpcSelector)
 		if err == nil || errors.Is(err, connectip.ErrForbidden) || errors.Is(err, connectip.ErrUnauthenticated) {
 			t.Fatalf("Authorize against an untrusted server = %v, want a retryable TLS error", err)

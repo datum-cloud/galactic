@@ -16,10 +16,12 @@ import (
 	"testing"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -29,6 +31,7 @@ import (
 
 const testNamespace = "masque-system"
 const testProvider = "masque"
+const testInstanceName = "ei-pod"
 
 func testEndpoint(t *testing.T, identity string, expires time.Time) (*galacticv1alpha1.MASQUEEndpoint, *corev1.Secret) {
 	t.Helper()
@@ -53,15 +56,13 @@ func testEndpoint(t *testing.T, identity string, expires time.Time) (*galacticv1
 	endpoint := &galacticv1alpha1.MASQUEEndpoint{ObjectMeta: metav1.ObjectMeta{
 		Name: identity, Namespace: testNamespace, UID: types.UID("registration-" + identity)},
 		Spec: galacticv1alpha1.MASQUEEndpointSpec{
-			MASQUEEndpointScope: galacticv1alpha1.MASQUEEndpointScope{
-				EndpointUID: identity, CustomerProjectUID: "project-" + identity,
-				GatewayUID: "gateway-" + identity, Cell: "cell-a", Hostname: hostname},
+			Cell: "cell-a", Hostname: hostname,
 			Metro: "metro-a", Provider: testProvider, Revision: 1, Enabled: true,
 			CertificateRef: galacticv1alpha1.MASQUEEndpointCertificateReference{Name: identity + "-tls", Revision: revision},
 		}}
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 		Name: endpoint.Spec.CertificateRef.Name, Namespace: endpoint.Namespace,
-		Annotations: map[string]string{CertificateRevisionAnnotation: revision, EndpointUIDAnnotation: identity}},
+		Annotations: map[string]string{CertificateRevisionAnnotation: revision}},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{corev1.TLSCertKey: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 			corev1.TLSPrivateKeyKey: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey})}}
@@ -86,7 +87,7 @@ func TestRegistryRotationsAndRemoval(t *testing.T) {
 		endpoint *galacticv1alpha1.MASQUEEndpoint
 		secret   *corev1.Secret
 	}{{first, secret}, {second, otherSecret}} {
-		if err := registry.Apply(pair.endpoint.Spec, pair.secret); err != nil {
+		if err := registry.Apply(pair.endpoint, pair.secret); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -98,7 +99,7 @@ func TestRegistryRotationsAndRemoval(t *testing.T) {
 			t.Fatal(err)
 		}
 		applied := make(chan error, 1)
-		go func() { applied <- registry.Apply(replacement.Spec, replacementSecret) }()
+		go func() { applied <- registry.Apply(replacement, replacementSecret) }()
 		select {
 		case <-ctx.Done():
 		case <-time.After(time.Second):
@@ -119,7 +120,7 @@ func TestRegistryRotationsAndRemoval(t *testing.T) {
 		}
 		first = replacement
 	}
-	registry.Remove(first.Spec.EndpointUID)
+	registry.Remove(first.Spec.Hostname)
 	if _, _, err := registry.Resolve(request(first.Spec)); err == nil {
 		t.Fatal("removed authority accepted")
 	}
@@ -134,7 +135,7 @@ func TestRegistryRotationsAndRemoval(t *testing.T) {
 func TestRegistryRejectsAuthorityAndBadCertificates(t *testing.T) {
 	endpoint, secret := testEndpoint(t, "first", time.Now().Add(time.Hour))
 	registry := NewRegistry()
-	if err := registry.Apply(endpoint.Spec, secret); err != nil {
+	if err := registry.Apply(endpoint, secret); err != nil {
 		t.Fatal(err)
 	}
 	for _, selector := range []string{"tenant/first", "tenant/second"} {
@@ -164,24 +165,24 @@ func TestRegistryRejectsAuthorityAndBadCertificates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := connectip.EndpointFromContext(ctx); got == nil || *got != endpoint.Spec.MASQUEEndpointScope {
+	expected := galacticv1alpha1.MASQUEEndpointReference{Namespace: endpoint.Namespace, Name: endpoint.Name}
+	if got := connectip.EndpointFromContext(ctx); got == nil || *got != expected {
 		t.Fatal("missing trusted scope")
 	}
 	release()
 	for _, mutate := range []func(*corev1.Secret){
-		func(secret *corev1.Secret) { secret.Annotations[EndpointUIDAnnotation] = "other" },
 		func(secret *corev1.Secret) { secret.Annotations[CertificateRevisionAnnotation] = "wrong" },
 		func(secret *corev1.Secret) { secret.Data[corev1.TLSPrivateKeyKey] = []byte("bad key") },
 		func(secret *corev1.Secret) { secret.Type = corev1.SecretTypeOpaque },
 	} {
 		broken := secret.DeepCopy()
 		mutate(broken)
-		if err := registry.Apply(endpoint.Spec, broken); err == nil {
+		if err := registry.Apply(endpoint, broken); err == nil {
 			t.Fatal("bad certificate accepted")
 		}
 	}
 	expired, expiredSecret := testEndpoint(t, "expired", time.Now().Add(-time.Second))
-	if err := registry.Apply(expired.Spec, expiredSecret); err == nil {
+	if err := registry.Apply(expired, expiredSecret); err == nil {
 		t.Fatal("expired certificate accepted")
 	}
 }
@@ -191,7 +192,7 @@ func TestRegistryStalenessStopsSessions(t *testing.T) {
 	registry := NewRegistry()
 	now := time.Now()
 	registry.now = func() time.Time { return now }
-	if err := registry.Apply(endpoint.Spec, secret); err != nil {
+	if err := registry.Apply(endpoint, secret); err != nil {
 		t.Fatal(err)
 	}
 	ctx, release, err := registry.Resolve(request(endpoint.Spec))
@@ -216,6 +217,9 @@ func TestRegistryStalenessStopsSessions(t *testing.T) {
 func testController(t *testing.T, objects ...client.Object) *Controller {
 	t.Helper()
 	scheme := runtime.NewScheme()
+	if err := coordinationv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
@@ -223,10 +227,17 @@ func testController(t *testing.T, objects ...client.Object) *Controller {
 		t.Fatal(err)
 	}
 	instance := &galacticv1alpha1.EdgeInstance{ObjectMeta: metav1.ObjectMeta{
-		Name: "ei-pod", Namespace: testNamespace, UID: "instance"},
+		Name: testInstanceName, Namespace: testNamespace, UID: "instance"},
 		Spec: galacticv1alpha1.EdgeInstanceSpec{PodUID: "pod",
 			ProviderRef: galacticv1alpha1.EdgeProviderReference{Name: testProvider}}}
-	objects = append(objects, instance)
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{Name: instance.Name, Namespace: instance.Namespace, UID: "lease",
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: galacticv1alpha1.GroupVersion.String(),
+				Kind: "EdgeInstance", Name: instance.Name, UID: instance.UID, Controller: ptr.To(true)}}},
+		Spec: coordinationv1.LeaseSpec{HolderIdentity: ptr.To("holder"),
+			AcquireTime: ptr.To(metav1.NewMicroTime(time.Now().Add(-time.Minute)))},
+	}
+	objects = append(objects, instance, lease)
 	cellClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&galacticv1alpha1.MASQUEEndpoint{}).WithObjects(objects...).Build()
 	return &Controller{Client: cellClient, Registry: NewRegistry(),
@@ -246,7 +257,7 @@ func TestControllerFencesRemovalAndRecreation(t *testing.T) {
 	}
 	status := observed.Status.Instances[0]
 	if status.AppliedRevision != 1 || status.AppliedCertificateRevision != endpoint.Spec.CertificateRef.Revision ||
-		status.State != stateApplied || status.InstanceUID != "instance" {
+		status.State != stateApplied || status.InstanceName != testInstanceName {
 		t.Fatalf("bad applied acknowledgment: %+v", status)
 	}
 	observed.Spec.Enabled = false
@@ -317,7 +328,7 @@ func TestControllerMissingSecretAndFailedRenewal(t *testing.T) {
 	if err := controller.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if current, ok := controller.Registry.Current(endpoint.Spec.EndpointUID); !ok || current.Revision != 1 {
+	if current, ok := controller.Registry.Current(endpoint.Spec.Hostname); !ok || current.Revision != 1 {
 		t.Fatal("valid old certificate was lost")
 	}
 	if err := controller.Client.Get(ctx, client.ObjectKeyFromObject(endpoint), &updated); err != nil {
@@ -332,7 +343,7 @@ func TestControllerMissingSecretAndFailedRenewal(t *testing.T) {
 	if err := controller.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := controller.Registry.Current(endpoint.Spec.EndpointUID); ok {
+	if _, ok := controller.Registry.Current(endpoint.Spec.Hostname); ok {
 		t.Fatal("removed Secret still active")
 	}
 }
@@ -360,7 +371,7 @@ func TestControllerPendingVersionedSecretRetainsValidatedCertificate(t *testing.
 	}
 	now = now.Add(MaxStaleness / 2)
 	controller.Registry.Expire()
-	if current, ok := controller.Registry.Current(endpoint.Spec.EndpointUID); !ok || current.Revision != 1 {
+	if current, ok := controller.Registry.Current(endpoint.Spec.Hostname); !ok || current.Revision != 1 {
 		t.Fatal("independently validated old certificate was lost during delivery")
 	}
 	if err := controller.Client.Delete(ctx, secret); err != nil {
@@ -369,19 +380,19 @@ func TestControllerPendingVersionedSecretRetainsValidatedCertificate(t *testing.
 	if err := controller.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := controller.Registry.Current(endpoint.Spec.EndpointUID); ok {
+	if _, ok := controller.Registry.Current(endpoint.Spec.Hostname); ok {
 		t.Fatal("pending replacement hid active Secret removal")
 	}
 }
 
 func TestControllerDuplicateRegistrationsFailClosed(t *testing.T) {
-	for _, duplicateUID := range []bool{false, true} {
+	for _, foreignProvider := range []bool{false, true} {
 		endpoint, secret := testEndpoint(t, "first", time.Now().Add(time.Hour))
 		duplicate, _ := testEndpoint(t, "duplicate", time.Now().Add(time.Hour))
-		if duplicateUID {
-			duplicate.Spec.EndpointUID = endpoint.Spec.EndpointUID
-		} else {
-			duplicate.Spec.Hostname = endpoint.Spec.Hostname
+		duplicate.Spec.Hostname = endpoint.Spec.Hostname
+		if foreignProvider {
+			duplicate.Spec.Provider = "other"
+			duplicate.Spec.Cell = "other"
 		}
 		controller := testController(t, endpoint, secret)
 		if err := controller.Sync(t.Context()); err != nil {
@@ -393,8 +404,77 @@ func TestControllerDuplicateRegistrationsFailClosed(t *testing.T) {
 		if err := controller.Sync(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := controller.Registry.Current(endpoint.Spec.EndpointUID); ok {
+		if _, ok := controller.Registry.Current(endpoint.Spec.Hostname); ok {
 			t.Fatal("ambiguous registration remained active")
 		}
+	}
+}
+
+func TestFenceMissedRecreationAndNameReuse(t *testing.T) {
+	endpoint, secret := testEndpoint(t, "first", time.Now().Add(time.Hour))
+	controller := testController(t, endpoint, secret)
+	if err := controller.Sync(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	recreated := endpoint.DeepCopy()
+	recreated.UID = "new-incarnation"
+	if err := controller.fence(t.Context(), recreated, false); err == nil {
+		t.Fatal("same revision recreated registration accepted")
+	}
+	recreated.Spec.Revision++
+	if err := controller.fence(t.Context(), recreated, false); err != nil {
+		t.Fatal(err)
+	}
+	current, revoked, err := GrantRevision(t.Context(), controller.Client, endpoint.Namespace, endpoint.Spec.Hostname)
+	if err != nil || current != 2 || revoked != 1 {
+		t.Fatalf("bad recreation fence: %d %d %v", current, revoked, err)
+	}
+	changedHost := recreated.DeepCopy()
+	changedHost.Spec.Hostname = "different.connect.example"
+	if err := controller.fence(t.Context(), changedHost, false); err == nil {
+		t.Fatal("same registration name changed its reserved hostname")
+	}
+	recreated.Name = "different-name"
+	recreated.Spec.Revision++
+	if err := controller.fence(t.Context(), recreated, false); err == nil {
+		t.Fatal("different registration stole reserved hostname")
+	}
+}
+
+func TestAcknowledgmentRequiresAcquisition(t *testing.T) {
+	for _, boundary := range []string{"creation", "acquisition", "missing"} {
+		t.Run(boundary, func(t *testing.T) {
+			endpoint, secret := testEndpoint(t, "first", time.Now().Add(time.Hour))
+			controller := testController(t, endpoint, secret)
+			key := client.ObjectKey{Namespace: endpoint.Namespace, Name: testInstanceName}
+			var instance galacticv1alpha1.EdgeInstance
+			var lease coordinationv1.Lease
+			if err := controller.Client.Get(t.Context(), key, &instance); err != nil {
+				t.Fatal(err)
+			}
+			if err := controller.Client.Get(t.Context(), key, &lease); err != nil {
+				t.Fatal(err)
+			}
+			switch boundary {
+			case "creation":
+				instance.CreationTimestamp = metav1.NewTime(time.Now().Add(time.Minute))
+				if err := controller.Client.Update(t.Context(), &instance); err != nil {
+					t.Fatal(err)
+				}
+			case "acquisition":
+				lease.Spec.AcquireTime = ptr.To(metav1.NewMicroTime(time.Now().Add(time.Minute)))
+				if err := controller.Client.Update(t.Context(), &lease); err != nil {
+					t.Fatal(err)
+				}
+			case "missing":
+				lease.Spec.AcquireTime = nil
+				if err := controller.Client.Update(t.Context(), &lease); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := controller.report(t.Context(), endpoint, nil); err == nil {
+				t.Fatal("acknowledged without a strictly earlier membership acquisition")
+			}
+		})
 	}
 }

@@ -21,10 +21,10 @@ import (
 )
 
 const CertificateRevisionAnnotation = "masque.galactic.datumapis.com/certificate-revision"
-const EndpointUIDAnnotation = "masque.galactic.datumapis.com/endpoint-uid"
 const MaxStaleness = 10 * time.Second
 
 type entry struct {
+	ref         galacticv1alpha1.MASQUEEndpointReference
 	spec        galacticv1alpha1.MASQUEEndpointSpec
 	certificate *tls.Certificate
 	expires     time.Time
@@ -46,8 +46,7 @@ func NewRegistry() *Registry {
 }
 
 func ValidateSpec(spec galacticv1alpha1.MASQUEEndpointSpec) error {
-	if spec.EndpointUID == "" || spec.CustomerProjectUID == "" || spec.GatewayUID == "" ||
-		spec.Cell == "" || spec.Provider == "" || spec.Metro == "" || spec.Revision <= 0 || spec.CertificateRef.Name == "" {
+	if spec.Cell == "" || spec.Provider == "" || spec.Metro == "" || spec.Revision <= 0 || spec.CertificateRef.Name == "" {
 		return errors.New("endpoint identity, certificate and positive revision are required")
 	}
 	if spec.Hostname != strings.ToLower(spec.Hostname) || len(validation.IsDNS1123Subdomain(spec.Hostname)) != 0 ||
@@ -65,8 +64,7 @@ func ValidateSpec(spec galacticv1alpha1.MASQUEEndpointSpec) error {
 func certificate(spec galacticv1alpha1.MASQUEEndpointSpec, secret *corev1.Secret,
 	now time.Time) (*tls.Certificate, error) {
 	if secret.Type != corev1.SecretTypeTLS ||
-		secret.Annotations[CertificateRevisionAnnotation] != spec.CertificateRef.Revision ||
-		secret.Annotations[EndpointUIDAnnotation] != spec.EndpointUID {
+		secret.Annotations[CertificateRevisionAnnotation] != spec.CertificateRef.Revision {
 		return nil, errors.New("TLS Secret revision does not match registration")
 	}
 	pair, err := tls.X509KeyPair(secret.Data[corev1.TLSCertKey], secret.Data[corev1.TLSPrivateKeyKey])
@@ -86,12 +84,17 @@ func certificate(spec galacticv1alpha1.MASQUEEndpointSpec, secret *corev1.Secret
 	return &pair, nil
 }
 
-func (registry *Registry) Apply(spec galacticv1alpha1.MASQUEEndpointSpec, secret *corev1.Secret) error {
+func (registry *Registry) Apply(endpoint *galacticv1alpha1.MASQUEEndpoint, secret *corev1.Secret) error {
+	spec := endpoint.Spec
+	ref := galacticv1alpha1.MASQUEEndpointReference{Namespace: endpoint.Namespace, Name: endpoint.Name}
+	if ref.Namespace == "" || ref.Name == "" {
+		return errors.New("named endpoint is required")
+	}
 	if err := ValidateSpec(spec); err != nil {
 		return err
 	}
 	if !spec.Enabled {
-		registry.Remove(spec.EndpointUID)
+		registry.Remove(spec.Hostname)
 		return nil
 	}
 	registry.mutation.Lock()
@@ -107,7 +110,7 @@ func (registry *Registry) Apply(spec galacticv1alpha1.MASQUEEndpointSpec, secret
 		registry.mu.Unlock()
 		return errors.New("obsolete or conflicting registration")
 	}
-	if previous != nil && previous.spec.EndpointUID != spec.EndpointUID {
+	if previous != nil && previous.ref != ref {
 		registry.mu.Unlock()
 		return errors.New("hostname already registered")
 	}
@@ -127,22 +130,22 @@ func (registry *Registry) Apply(spec galacticv1alpha1.MASQUEEndpointSpec, secret
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
-	registry.entries[spec.Hostname] = &entry{spec: spec, certificate: pair, expires: pair.Leaf.NotAfter,
+	registry.entries[spec.Hostname] = &entry{ref: ref, spec: spec, certificate: pair, expires: pair.Leaf.NotAfter,
 		checked: registry.now(), ctx: ctx, cancel: cancel}
 	return nil
 }
 
-func (registry *Registry) Remove(endpointUID string) {
+func (registry *Registry) Remove(hostname string) {
 	registry.mutation.Lock()
 	defer registry.mutation.Unlock()
-	registry.remove(endpointUID)
+	registry.remove(hostname)
 }
 
-func (registry *Registry) remove(endpointUID string) {
+func (registry *Registry) remove(targetHostname string) {
 	registry.mu.Lock()
 	var removed []*entry
 	for hostname, current := range registry.entries {
-		if current.spec.EndpointUID == endpointUID {
+		if current.spec.Hostname == targetHostname {
 			delete(registry.entries, hostname)
 			current.cancel()
 			removed = append(removed, current)
@@ -154,13 +157,13 @@ func (registry *Registry) remove(endpointUID string) {
 	}
 }
 
-func (registry *Registry) Current(endpointUID string) (galacticv1alpha1.MASQUEEndpointSpec, bool) {
+func (registry *Registry) Current(hostname string) (galacticv1alpha1.MASQUEEndpointSpec, bool) {
 	registry.mutation.Lock()
 	defer registry.mutation.Unlock()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	for _, current := range registry.entries {
-		if current.spec.EndpointUID == endpointUID {
+		if current.spec.Hostname == hostname {
 			return current.spec, true
 		}
 	}
@@ -189,7 +192,7 @@ func (registry *Registry) Resolve(request *http.Request) (context.Context, func(
 	if !registry.valid(current) || request.TLS == nil || request.TLS.ServerName != hostname {
 		return nil, nil, errors.New("authority or SNI mismatch")
 	}
-	ctx, cancel := context.WithCancel(connectip.WithEndpoint(request.Context(), current.spec.MASQUEEndpointScope))
+	ctx, cancel := context.WithCancel(connectip.WithEndpoint(request.Context(), current.ref))
 	stop := context.AfterFunc(current.ctx, cancel)
 	current.requests.Add(1)
 	return ctx, func() { stop(); cancel(); current.requests.Done() }, nil
@@ -202,12 +205,12 @@ func (registry *Registry) Expire() {
 	var expired []string
 	for _, current := range registry.entries {
 		if !registry.valid(current) {
-			expired = append(expired, current.spec.EndpointUID)
+			expired = append(expired, current.spec.Hostname)
 		}
 	}
 	registry.mu.Unlock()
-	for _, endpointUID := range expired {
-		registry.remove(endpointUID)
+	for _, hostname := range expired {
+		registry.remove(hostname)
 	}
 }
 
@@ -224,6 +227,6 @@ func (registry *Registry) RunExpiry(ctx context.Context) {
 	}
 }
 
-func FenceName(endpointUID string) string {
-	return fmt.Sprintf("masque-endpoint-%x", sha256.Sum256([]byte(endpointUID)))
+func FenceName(hostname string) string {
+	return fmt.Sprintf("masque-endpoint-%x", sha256.Sum256([]byte(hostname)))
 }

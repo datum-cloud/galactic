@@ -42,7 +42,7 @@ type managedAdmission struct {
 
 func (admission *managedAdmission) Admit(ctx context.Context, credential, vpc string) (connectip.Lease, error) {
 	grant, err := admission.fixture.auth.Authorize(ctx, podID(testPodA), AuthorizeRequest{
-		Credential: credential, VPC: vpc, Endpoint: connectip.EndpointFromContext(ctx),
+		Credential: credential, VPC: vpc, EndpointRef: connectip.EndpointFromContext(ctx),
 		Nonce: rand.Text(), Issued: admission.fixture.clock(),
 	})
 	if err != nil {
@@ -135,8 +135,7 @@ func managedCertificate(t *testing.T, endpoint *galacticv1alpha1.MASQUEEndpoint)
 	digest := sha256.Sum256(der)
 	endpoint.Spec.CertificateRef.Revision = hex.EncodeToString(digest[:])
 	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-		endpoints.CertificateRevisionAnnotation: endpoint.Spec.CertificateRef.Revision,
-		endpoints.EndpointUIDAnnotation:         endpoint.Spec.EndpointUID}}, Type: corev1.SecretTypeTLS,
+		endpoints.CertificateRevisionAnnotation: endpoint.Spec.CertificateRef.Revision}}, Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{corev1.TLSCertKey: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
 			corev1.TLSPrivateKeyKey: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey})}}
 }
@@ -153,7 +152,7 @@ func applyManagedEndpoint(t *testing.T, fixture *fixture, registry *endpoints.Re
 	if err != nil {
 		t.Fatal(err)
 	}
-	fence := endpoints.Fence{Spec: endpoint.Spec}
+	fence := endpoints.Fence{Name: endpoint.Name, ObjectUID: string(endpoint.UID), Spec: endpoint.Spec}
 	if !endpoint.Spec.Enabled {
 		fence.RevokedRevision = endpoint.Spec.Revision
 	}
@@ -161,7 +160,7 @@ func applyManagedEndpoint(t *testing.T, fixture *fixture, registry *endpoints.Re
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := client.ObjectKey{Namespace: testNS, Name: endpoints.FenceName(endpoint.Spec.EndpointUID)}
+	key := client.ObjectKey{Namespace: testNS, Name: endpoints.FenceName(endpoint.Spec.Hostname)}
 	var config corev1.ConfigMap
 	if err := fixture.admin.Get(t.Context(), key, &config); client.IgnoreNotFound(err) != nil {
 		t.Fatal(err)
@@ -176,7 +175,7 @@ func applyManagedEndpoint(t *testing.T, fixture *fixture, registry *endpoints.Re
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := registry.Apply(endpoint.Spec, secret); err != nil {
+	if err := registry.Apply(endpoint, secret); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -303,19 +302,19 @@ func TestManagedEndpointMultiplexedAuthority(t *testing.T) {
 			if err := fixture.grants.ledgers().Init(t.Context(), ref, testCell, testConnectors, testPools); err != nil {
 				t.Fatal(err)
 			}
-			mint := func(vpc *cloudv1alpha1.VPC, binding string) Issued {
+			mint := func(vpc *cloudv1alpha1.VPC) Issued {
 				t.Helper()
 				issued, err := fixture.grants.Create(t.Context(), CreateRequest{
-					Endpoint: &endpoint.Spec.MASQUEEndpointScope, BindingUID: binding, NetworkUID: "network-" + vpc.Name,
-					VPC:  VPCRef{Namespace: vpc.Namespace, Name: vpc.Name, UID: string(vpc.UID)},
-					Cell: testCell, Lifetime: time.Hour, Routes: []netip.Prefix{netip.MustParsePrefix("fd20:a1b:2c3d::/48")},
+					EndpointRef: &galacticv1alpha1.MASQUEEndpointReference{Namespace: endpoint.Namespace, Name: endpoint.Name},
+					VPC:         VPCRef{Namespace: vpc.Namespace, Name: vpc.Name, UID: string(vpc.UID)},
+					Cell:        testCell, Lifetime: time.Hour, Routes: []netip.Prefix{netip.MustParsePrefix("fd20:a1b:2c3d::/48")},
 				})
 				if err != nil {
 					t.Fatal(err)
 				}
 				return issued
 			}
-			firstGrant, secondGrant := mint(fixture.vpc, "binding-first"), mint(second, "binding-second")
+			firstGrant, secondGrant := mint(fixture.vpc), mint(second)
 			backend := &managedBackend{opened: make(chan *managedPacketSession, 10)}
 			server, err := connectip.NewServer(connectip.Config{ResolveEndpoint: registry.Resolve,
 				TLSConfig: &tls.Config{GetCertificate: registry.GetCertificate, MinVersion: tls.VersionTLS13,
@@ -349,7 +348,7 @@ func TestManagedEndpointMultiplexedAuthority(t *testing.T) {
 			requireManagedLive(t, secondSession)
 			managedRequest(t, transport, protocol, endpoint.Spec.Hostname,
 				firstGrant.Credential, firstGrant.VPC, http.StatusForbidden)
-			firstGrant = mint(fixture.vpc, "binding-replacement")
+			firstGrant = mint(fixture.vpc)
 			firstSession = open(firstGrant)
 			if err := fixture.admin.Delete(t.Context(), second); err != nil {
 				t.Fatal(err)
@@ -371,7 +370,7 @@ func TestManagedEndpointMultiplexedAuthority(t *testing.T) {
 			if err := fixture.grants.ledgers().Init(t.Context(), ref, testCell, testConnectors, testPools); err != nil {
 				t.Fatal(err)
 			}
-			secondGrant = mint(second, "binding-recreated-vpc")
+			secondGrant = mint(second)
 			secondSession = open(secondGrant)
 			requireManagedLive(t, firstSession)
 			var unchanged galacticv1alpha1.MASQUEEndpoint
@@ -394,9 +393,9 @@ func TestManagedEndpointMultiplexedAuthority(t *testing.T) {
 			if hex.EncodeToString(digest[:]) != endpoint.Spec.CertificateRef.Revision {
 				t.Fatal("wrong active certificate")
 			}
-			firstGrant = mint(fixture.vpc, "binding-after-cert")
+			firstGrant = mint(fixture.vpc)
 			firstSession = open(firstGrant)
-			secondGrant = mint(second, "binding-second-after-cert")
+			secondGrant = mint(second)
 			secondSession = open(secondGrant)
 			endpoint.Spec.Revision++
 			endpoint.Spec.Enabled = false
@@ -409,8 +408,9 @@ func TestManagedEndpointMultiplexedAuthority(t *testing.T) {
 				t.Fatalf("used %d transport connections, want exactly one", connections.Load())
 			}
 			if _, err := fixture.auth.Authorize(t.Context(), podID(testPodA), AuthorizeRequest{
-				Credential: firstGrant.Credential, VPC: firstGrant.VPC, Endpoint: &endpoint.Spec.MASQUEEndpointScope,
-				Nonce: rand.Text(), Issued: fixture.clock(),
+				Credential: firstGrant.Credential, VPC: firstGrant.VPC,
+				EndpointRef: &galacticv1alpha1.MASQUEEndpointReference{Namespace: endpoint.Namespace, Name: endpoint.Name},
+				Nonce:       rand.Text(), Issued: fixture.clock(),
 			}); !errors.Is(err, connectip.ErrForbidden) {
 				t.Fatalf("disabled endpoint authority: %v", err)
 			}

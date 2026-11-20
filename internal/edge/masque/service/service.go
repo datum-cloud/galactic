@@ -33,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/claim"
 	"go.datum.net/galactic/internal/edge/connectip"
@@ -262,7 +263,7 @@ func HealthHandler(ready func() bool) http.Handler {
 func NewClient() (client.Client, error) {
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		galacticv1alpha1.AddToScheme, coordinationv1.AddToScheme, corev1.AddToScheme,
+		galacticv1alpha1.AddToScheme, cloudv1alpha1.AddToScheme, coordinationv1.AddToScheme, corev1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			return nil, err

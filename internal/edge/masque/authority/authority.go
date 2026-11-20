@@ -61,9 +61,7 @@ const (
 	// AnnotationRetiredAt is when the authorization was retired.
 	AnnotationRetiredAt = annotationPrefix + "retired-at"
 	// AnnotationCell is the cell of the authority that issued it.
-	AnnotationCell    = annotationPrefix + "cell"
-	AnnotationNetwork = annotationPrefix + "network-uid"
-	AnnotationBinding = annotationPrefix + "binding-uid"
+	AnnotationCell = annotationPrefix + "cell"
 
 	// packetAccess and prefixReachability are the capabilities an issued
 	// EdgeService grants.
@@ -91,25 +89,23 @@ var nonceRE = regexp.MustCompile(`^[A-Za-z0-9]{16,64}$`)
 type ServiceRef struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
-	UID       string `json:"uid"`
+	UID       string `json:"-"`
 }
 
 // Grant is an issued authorization, as the provider receives it.
 type Grant struct {
-	NetworkUID    string                                `json:"networkUID,omitempty"`
-	BindingUID    string                                `json:"bindingUID,omitempty"`
-	Endpoint      *galacticv1alpha1.MASQUEEndpointScope `json:"endpoint,omitempty"`
-	Authorization string                                `json:"authorization"`
-	Connector     string                                `json:"connector"`
-	Allocation    string                                `json:"allocation"`
-	VPC           string                                `json:"vpc"`
-	VPCUID        string                                `json:"vpcUID"`
-	VPCID         string                                `json:"vpcID"`
-	Service       ServiceRef                            `json:"service"`
-	Prefix        netip.Prefix                          `json:"prefix"`
-	Routes        []netip.Prefix                        `json:"routes"`
-	Revision      int64                                 `json:"revision"`
-	NotAfter      time.Time                             `json:"notAfter"`
+	EndpointRef   *galacticv1alpha1.MASQUEEndpointReference `json:"endpointRef,omitempty"`
+	Authorization string                                    `json:"authorization"`
+	Connector     string                                    `json:"connector"`
+	Allocation    string                                    `json:"allocation"`
+	VPC           string                                    `json:"vpc"`
+	VPCUID        string                                    `json:"-"`
+	VPCID         string                                    `json:"vpcID"`
+	Service       ServiceRef                                `json:"service"`
+	Prefix        netip.Prefix                              `json:"prefix"`
+	Routes        []netip.Prefix                            `json:"routes"`
+	Revision      int64                                     `json:"revision"`
+	NotAfter      time.Time                                 `json:"notAfter"`
 }
 
 // Authority decides Authorize, Refresh and Retire calls of the provider pods
@@ -241,7 +237,7 @@ func (a *Authority) Authorize(ctx context.Context, id admission.Identity, req Au
 	if err != nil {
 		return Grant{}, err
 	}
-	if err := a.requestScope(ctx, req.Endpoint, vpc, r); err != nil {
+	if err := a.requestScope(ctx, req.EndpointRef, vpc, r); err != nil {
 		return Grant{}, err
 	}
 	// This precedes the retry lookup: a retry's grant expires no later than
@@ -277,7 +273,7 @@ func (a *Authority) Authorize(ctx context.Context, id admission.Identity, req Au
 	}
 	for i := range list.Items {
 		s := &list.Items[i]
-		if !retired(s) && s.Annotations[AnnotationPod] == id.PodUID &&
+		if activeReceipt(s) && s.Annotations[AnnotationPod] == id.PodUID &&
 			s.Annotations[AnnotationRevision] == strconv.FormatInt(r.Revision, 10) && !a.expired(s, a.now()) {
 			if err := a.renew(ctx, s, until); err != nil {
 				return Grant{}, err
@@ -406,8 +402,7 @@ func (a *Authority) issue(ctx context.Context, id admission.Identity, r *Record,
 			Annotations: map[string]string{
 				AnnotationAuthorization: auth, AnnotationPod: id.PodUID, AnnotationNonce: nonce,
 				AnnotationRevision: strconv.FormatInt(r.Revision, 10), AnnotationAllocation: e.Allocation,
-				AnnotationCell:    a.Cell,
-				AnnotationNetwork: r.NetworkUID, AnnotationBinding: r.BindingUID,
+				AnnotationCell: a.Cell,
 			},
 		},
 		Spec: galacticv1alpha1.EdgeServiceSpec{
@@ -423,6 +418,11 @@ func (a *Authority) issue(ctx context.Context, id admission.Identity, r *Record,
 	if err := a.Client.Create(ctx, s); err != nil {
 		return Grant{}, fmt.Errorf("%w: create EdgeService %s/%s: %w", ErrUnavailable, s.Namespace, s.Name, err)
 	}
+	auth = receipt(s)
+	s.Annotations[AnnotationAuthorization] = auth
+	if err := a.Client.Update(ctx, s); err != nil {
+		return Grant{}, fmt.Errorf("%w: bind authorization receipt: %w", ErrUnavailable, err)
+	}
 	if err := a.unchanged(ctx, s, r); err != nil {
 		return Grant{}, err
 	}
@@ -433,12 +433,14 @@ func (a *Authority) issue(ctx context.Context, id admission.Identity, r *Record,
 
 // grant is the Grant of issued service s.
 func (a *Authority) grant(s *galacticv1alpha1.EdgeService, r *Record, e Entry, vpcID string) (Grant, error) {
+	if !validReceipt(s) {
+		return Grant{}, fmt.Errorf("%w: stale authorization receipt", connectip.ErrForbidden)
+	}
 	if s.Spec.ValidUntil == nil {
 		return Grant{}, fmt.Errorf("%w: EdgeService %s/%s has no validUntil", ErrUnavailable, s.Namespace, s.Name)
 	}
 	return Grant{
-		NetworkUID: r.NetworkUID, BindingUID: r.BindingUID,
-		Endpoint:      r.Endpoint,
+		EndpointRef:   r.EndpointRef,
 		Authorization: s.Annotations[AnnotationAuthorization], Connector: r.Connector, Allocation: e.Allocation,
 		VPC: r.VPC.Selector(), VPCUID: r.VPC.UID, VPCID: vpcID,
 		Service: ServiceRef{Namespace: s.Namespace, Name: s.Name, UID: string(s.UID)},
@@ -502,8 +504,7 @@ func (a *Authority) revalidate(ctx context.Context, s *galacticv1alpha1.EdgeServ
 	if err := a.endpoint(ctx, r); err != nil {
 		return Grant{}, err
 	}
-	if r.Revision != revision || r.VPC.UID != s.Spec.VPCRef.UID ||
-		r.NetworkUID != s.Annotations[AnnotationNetwork] || r.BindingUID != s.Annotations[AnnotationBinding] {
+	if r.Revision != revision || r.VPC.UID != s.Spec.VPCRef.UID {
 		return Grant{}, fmt.Errorf("%w: connector %s's grant changed", connectip.ErrForbidden, connector)
 	}
 	vpcID, err := a.vpc(ctx, r.VPC)
@@ -537,7 +538,8 @@ func (a *Authority) revalidate(ctx context.Context, s *galacticv1alpha1.EdgeServ
 func (a *Authority) unchanged(ctx context.Context, s *galacticv1alpha1.EdgeService, r *Record) error {
 	cur, _, err := readRecord(ctx, a.Client, a.Namespace, r.Connector)
 	if err == nil && cur.Revision == r.Revision && cur.Enabled && sameDigest(cur.Digest, r.Digest) &&
-		sameEndpoint(cur.Endpoint, r.Endpoint) && cur.NetworkUID == r.NetworkUID && cur.BindingUID == r.BindingUID &&
+		sameEndpoint(cur.EndpointRef, r.EndpointRef) && cur.EndpointHostname == r.EndpointHostname &&
+		cur.VPC == r.VPC &&
 		a.endpoint(ctx, cur) == nil {
 		return nil
 	}
@@ -550,26 +552,31 @@ func (a *Authority) unchanged(ctx context.Context, s *galacticv1alpha1.EdgeServi
 	return fmt.Errorf("%w: connector %s's grant changed", connectip.ErrForbidden, r.Connector)
 }
 
-func sameEndpoint(first, second *galacticv1alpha1.MASQUEEndpointScope) bool {
+func sameEndpoint(first, second *galacticv1alpha1.MASQUEEndpointReference) bool {
 	return first == nil && second == nil || first != nil && second != nil && *first == *second
 }
 
 func (a *Authority) endpoint(ctx context.Context, record *Record) error {
-	if err := endpoints.CheckScope(ctx, a.Client, a.Namespace, a.Provider, record.Endpoint); err != nil {
+	if record.EndpointRef == nil {
+		return nil
+	}
+	endpoint, err := endpoints.Resolve(ctx, a.Client, a.Namespace, a.Provider, record.EndpointRef)
+	if err != nil {
 		return fmt.Errorf("%w: endpoint unavailable: %w", connectip.ErrForbidden, err)
 	}
-	if record.Endpoint != nil {
-		current, revoked, err := endpoints.GrantRevision(ctx, a.Client, a.Namespace, record.Endpoint.EndpointUID)
-		if err != nil || record.EndpointRevision <= revoked || record.EndpointRevision > current {
-			return fmt.Errorf("%w: endpoint grant was revoked", connectip.ErrForbidden)
-		}
+	if endpoint.Spec.Cell != record.Cell || endpoint.Spec.Hostname != record.EndpointHostname {
+		return fmt.Errorf("%w: endpoint identity changed", connectip.ErrForbidden)
+	}
+	current, revoked, err := endpoints.GrantRevision(ctx, a.Client, a.Namespace, record.EndpointHostname)
+	if err != nil || record.EndpointRevision <= revoked || record.EndpointRevision > current {
+		return fmt.Errorf("%w: endpoint grant was revoked", connectip.ErrForbidden)
 	}
 	return nil
 }
 
-func (a *Authority) requestScope(ctx context.Context, scope *galacticv1alpha1.MASQUEEndpointScope,
+func (a *Authority) requestScope(ctx context.Context, scope *galacticv1alpha1.MASQUEEndpointReference,
 	vpc string, record *Record) error {
-	if !sameEndpoint(scope, record.Endpoint) || vpc != record.VPC.Selector() {
+	if !sameEndpoint(scope, record.EndpointRef) || vpc != record.VPC.Selector() {
 		return fmt.Errorf("%w: endpoint or VPC scope mismatch", connectip.ErrForbidden)
 	}
 	return a.endpoint(ctx, record)
@@ -585,7 +592,7 @@ func (a *Authority) service(ctx context.Context, id admission.Identity, auth str
 		return nil, fmt.Errorf("%w: authorization %s no longer exists", connectip.ErrForbidden, auth)
 	case err != nil:
 		return nil, fmt.Errorf("%w: read EdgeService %s/%s: %w", ErrUnavailable, ref.Namespace, ref.Name, err)
-	case string(s.UID) != ref.UID || s.Labels[LabelManagedBy] != ManagedBy ||
+	case ref.UID != "" && string(s.UID) != ref.UID || !validReceipt(&s) || s.Labels[LabelManagedBy] != ManagedBy ||
 		s.Annotations[AnnotationAuthorization] != auth || s.Annotations[AnnotationPod] != id.PodUID ||
 		!s.DeletionTimestamp.IsZero():
 		return nil, fmt.Errorf("%w: EdgeService %s/%s is not authorization %s of this pod", connectip.ErrForbidden,
@@ -617,7 +624,7 @@ func (a *Authority) Retire(ctx context.Context, id admission.Identity, auth stri
 	}
 	var cur galacticv1alpha1.EdgeService
 	err := a.Client.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &cur)
-	if apierrors.IsNotFound(err) || (err == nil && string(cur.UID) != ref.UID) {
+	if apierrors.IsNotFound(err) || (err == nil && ref.UID != "" && string(cur.UID) != ref.UID) {
 		// The incarnation is already gone.
 		return nil
 	}
@@ -751,3 +758,18 @@ func (a *Authority) RunSweeps(ctx context.Context, interval time.Duration) {
 }
 
 func retired(s *galacticv1alpha1.EdgeService) bool { return s.Annotations[AnnotationRetired] == yes }
+
+func receipt(service *galacticv1alpha1.EdgeService) string {
+	digest := sha256.Sum256([]byte(string(service.UID) + "\x00" + service.Spec.VPCRef.UID + "\x00" +
+		service.Labels[LabelConnector] + "\x00" + service.Annotations[AnnotationRevision] + "\x00" +
+		service.Annotations[AnnotationPod] + "\x00" + service.Annotations[AnnotationNonce]))
+	return hex.EncodeToString(digest[:])
+}
+
+func validReceipt(service *galacticv1alpha1.EdgeService) bool {
+	return service.UID != "" && service.Annotations[AnnotationAuthorization] == receipt(service)
+}
+
+func activeReceipt(service *galacticv1alpha1.EdgeService) bool {
+	return !retired(service) && validReceipt(service)
+}

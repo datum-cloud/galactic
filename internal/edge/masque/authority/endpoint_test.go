@@ -18,9 +18,7 @@ import (
 
 func scopedEndpoint() *galacticv1alpha1.MASQUEEndpoint {
 	return &galacticv1alpha1.MASQUEEndpoint{ObjectMeta: metav1.ObjectMeta{Name: "endpoint", Namespace: testNS},
-		Spec: galacticv1alpha1.MASQUEEndpointSpec{MASQUEEndpointScope: galacticv1alpha1.MASQUEEndpointScope{
-			EndpointUID: "endpoint", CustomerProjectUID: "project", GatewayUID: "gateway",
-			Cell: testCell, Hostname: "gateway.example.com"},
+		Spec: galacticv1alpha1.MASQUEEndpointSpec{Cell: testCell, Hostname: "gateway.example.com",
 			Provider: testProvider,
 			Metro:    "metro", Revision: 1, Enabled: true,
 			CertificateRef: galacticv1alpha1.MASQUEEndpointCertificateReference{
@@ -36,10 +34,11 @@ func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	fence := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-		Name: endpoints.FenceName(endpoint.Spec.EndpointUID), Namespace: testNS}}
+		Name: endpoints.FenceName(endpoint.Spec.Hostname), Namespace: testNS}}
 	writeFence := func(revoked int64) {
 		t.Helper()
-		encoded, err := json.Marshal(endpoints.Fence{Spec: endpoint.Spec, RevokedRevision: revoked})
+		encoded, err := json.Marshal(endpoints.Fence{Name: endpoint.Name, ObjectUID: string(endpoint.UID),
+			Spec: endpoint.Spec, RevokedRevision: revoked})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -54,11 +53,10 @@ func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 		}
 	}
 	writeFence(0)
-	const bindingIdentity = "binding"
-	const networkIdentity = "network"
 	issued, err := grants.Create(ctx, CreateRequest{VPC: ref, Cell: testCell,
-		NetworkUID: networkIdentity, BindingUID: bindingIdentity,
-		Lifetime: time.Hour, Endpoint: &endpoint.Spec.MASQUEEndpointScope})
+
+		Lifetime:    time.Hour,
+		EndpointRef: &galacticv1alpha1.MASQUEEndpointReference{Namespace: endpoint.Namespace, Name: endpoint.Name}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,44 +64,27 @@ func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.NetworkUID != networkIdentity || record.BindingUID != bindingIdentity {
-		t.Fatal("grant lost its binding-scoped network identity")
-	}
 	authority := &Authority{Client: grants.Client, Namespace: testNS, Provider: testProvider, Cell: testCell}
 	if err := authority.endpoint(ctx, record); err != nil {
 		t.Fatal(err)
 	}
-	for _, missing := range []string{networkIdentity, bindingIdentity} {
-		invalid := *record
-		if missing == networkIdentity {
-			invalid.NetworkUID = ""
-		} else {
-			invalid.BindingUID = ""
-		}
-		if invalid.validate() == nil {
-			t.Fatal("managed grant accepted incomplete binding identity")
-		}
-	}
 	const otherIdentity = "other"
-	for _, mutate := range []func(*galacticv1alpha1.MASQUEEndpointScope){
-		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.EndpointUID = otherIdentity },
-		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.CustomerProjectUID = otherIdentity },
-		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.GatewayUID = otherIdentity },
-		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.Cell = otherIdentity },
-		func(scope *galacticv1alpha1.MASQUEEndpointScope) { scope.Hostname = "other.example.com" },
+	for _, mutate := range []func(*galacticv1alpha1.MASQUEEndpointReference){
+		func(scope *galacticv1alpha1.MASQUEEndpointReference) { scope.Name = otherIdentity },
+		func(scope *galacticv1alpha1.MASQUEEndpointReference) { scope.Namespace = otherIdentity },
 	} {
 		copied := *record
-		scope := *record.Endpoint
+		scope := *record.EndpointRef
 		mutate(&scope)
-		copied.Endpoint = &scope
+		copied.EndpointRef = &scope
 		if !errors.Is(authority.endpoint(ctx, &copied), connectip.ErrForbidden) {
 			t.Fatal("scope substitution allowed")
 		}
-		if sameEndpoint(record.Endpoint, &scope) {
+		if sameEndpoint(record.EndpointRef, &scope) {
 			t.Fatal("request scope substitution allowed")
 		}
 	}
-	if sameEndpoint(record.Endpoint, nil) || sameEndpoint(nil, record.Endpoint) {
+	if sameEndpoint(record.EndpointRef, nil) || sameEndpoint(nil, record.EndpointRef) {
 		t.Fatal("legacy/managed replay allowed")
 	}
 	endpoint.Spec.Revision = 2
@@ -127,19 +108,8 @@ func TestEndpointGrantIsolationAndReactivation(t *testing.T) {
 	if !errors.Is(authority.endpoint(ctx, record), connectip.ErrForbidden) {
 		t.Fatal("reactivation resurrected revoked credential")
 	}
-	rotated, err := grants.Rotate(ctx, issued.Connector, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	record, _, err = readRecord(ctx, grants.Client, testNS, issued.Connector)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := authority.endpoint(ctx, record); err != nil {
-		t.Fatal(err)
-	}
-	if rotated.Prefix != issued.Prefix || len(grants.entries(t)) != 1 {
-		t.Fatal("rotation changed retained allocation")
+	if _, err := grants.Rotate(ctx, issued.Connector, time.Hour); err == nil {
+		t.Fatal("rotation resurrected revoked endpoint grant")
 	}
 	if err := grants.Retire(ctx, issued.Connector); err != nil {
 		t.Fatal(err)

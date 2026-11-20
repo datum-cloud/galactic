@@ -43,11 +43,7 @@ type Issued struct {
 
 // CreateRequest describes a new connector.
 type CreateRequest struct {
-	Endpoint *galacticv1alpha1.MASQUEEndpointScope
-	// NetworkUID and BindingUID are resolved by the trusted issuer and are
-	// required for managed grants, independent of the shared endpoint identity.
-	NetworkUID string
-	BindingUID string
+	EndpointRef *galacticv1alpha1.MASQUEEndpointReference
 	// VPC is the VPC's namespace and name; its UID is read from the API.
 	VPC  VPCRef
 	Cell string
@@ -97,26 +93,29 @@ func (g Grants) Create(ctx context.Context, req CreateRequest) (Issued, error) {
 	}
 	req.VPC.UID = string(vpc.UID)
 	var endpointRevision int64
-	if req.Endpoint != nil {
+	var endpointHostname string
+	if req.EndpointRef != nil {
 		if !vpc.DeletionTimestamp.IsZero() {
 			return Issued{}, errors.New("endpoint grant VPC is being deleted")
 		}
-		if req.Endpoint.Cell != req.Cell {
-			return Issued{}, errors.New("endpoint cell mismatch")
-		}
-		if err := endpoints.CheckScope(ctx, g.Client, g.Namespace, "", req.Endpoint); err != nil {
+		endpoint, err := endpoints.Resolve(ctx, g.Client, g.Namespace, "", req.EndpointRef)
+		if err != nil {
 			return Issued{}, err
 		}
-		endpointRevision, _, err = endpoints.GrantRevision(ctx, g.Client, g.Namespace, req.Endpoint.EndpointUID)
+		if endpoint.Spec.Cell != req.Cell {
+			return Issued{}, errors.New("endpoint cell mismatch")
+		}
+		endpointHostname = endpoint.Spec.Hostname
+		endpointRevision, _, err = endpoints.GrantRevision(ctx, g.Client, g.Namespace, endpointHostname)
 		if err != nil {
 			return Issued{}, err
 		}
 	}
 	cred := NewCredential()
 	r := &Record{
-		NetworkUID: req.NetworkUID, BindingUID: req.BindingUID,
+		EndpointHostname: endpointHostname,
 		EndpointRevision: endpointRevision,
-		Endpoint:         req.Endpoint,
+		EndpointRef:      req.EndpointRef,
 		Connector:        req.Connector, Cell: req.Cell, VPC: req.VPC, Revision: 1, Digest: Digest(cred),
 		Expires: expires, Enabled: true, Routes: req.Routes, TrafficPolicy: req.TrafficPolicy,
 	}
@@ -156,7 +155,7 @@ func (g Grants) Rotate(ctx context.Context, connector string, lifetime time.Dura
 		if !r.Enabled {
 			return errors.New("connector is disabled")
 		}
-		if r.Endpoint != nil {
+		if r.EndpointRef != nil {
 			var vpc cloudv1alpha1.VPC
 			key := client.ObjectKey{Namespace: r.VPC.Namespace, Name: r.VPC.Name}
 			if err := g.Client.Get(ctx, key, &vpc); err != nil {
@@ -165,12 +164,19 @@ func (g Grants) Rotate(ctx context.Context, connector string, lifetime time.Dura
 			if string(vpc.UID) != r.VPC.UID || !vpc.DeletionTimestamp.IsZero() {
 				return errors.New("endpoint grant VPC was replaced or is being deleted")
 			}
-			if err := endpoints.CheckScope(ctx, g.Client, g.Namespace, "", r.Endpoint); err != nil {
-				return err
-			}
-			revision, _, err := endpoints.GrantRevision(ctx, g.Client, g.Namespace, r.Endpoint.EndpointUID)
+			endpoint, err := endpoints.Resolve(ctx, g.Client, g.Namespace, "", r.EndpointRef)
 			if err != nil {
 				return err
+			}
+			if endpoint.Spec.Cell != r.Cell || endpoint.Spec.Hostname != r.EndpointHostname {
+				return errors.New("endpoint identity changed")
+			}
+			revision, revoked, err := endpoints.GrantRevision(ctx, g.Client, g.Namespace, r.EndpointHostname)
+			if err != nil {
+				return err
+			}
+			if r.EndpointRevision <= revoked {
+				return errors.New("endpoint grant revoked")
 			}
 			r.EndpointRevision = revision
 		}

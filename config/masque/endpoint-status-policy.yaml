@@ -26,15 +26,13 @@ spec:
     - expression: >-
         variables.pods.size() == 1 && variables.current.all(entry,
 
-
-          (entry.podUID == variables.pods[0] && entry.instanceName == 'ei-' + variables.pods[0]) ||
+          (entry.instanceName == 'ei-' + variables.pods[0]) ||
           variables.previous.exists(previous, previous == entry))
       message: a provider may acknowledge only its own instance
     - expression: >-
         variables.pods.size() == 1 && variables.previous.all(previous,
 
-
-          previous.podUID == variables.pods[0] || variables.current.exists(entry, entry == previous))
+          previous.instanceName == 'ei-' + variables.pods[0] || variables.current.exists(entry, entry == previous))
       message: a provider may not remove another instance acknowledgment
 ---
 apiVersion: admissionregistration.k8s.io/v1

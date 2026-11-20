@@ -59,10 +59,10 @@ func TestSharedListenersCheckEveryMultiplexedAuthority(t *testing.T) {
 			registry := NewRegistry()
 			first, firstSecret := testEndpoint(t, "first", time.Now().Add(time.Hour))
 			second, secondSecret := testEndpoint(t, "second", time.Now().Add(time.Hour))
-			if err := registry.Apply(first.Spec, firstSecret); err != nil {
+			if err := registry.Apply(first, firstSecret); err != nil {
 				t.Fatal(err)
 			}
-			if err := registry.Apply(second.Spec, secondSecret); err != nil {
+			if err := registry.Apply(second, secondSecret); err != nil {
 				t.Fatal(err)
 			}
 			server, err := connectip.NewServer(connectip.Config{ResolveEndpoint: registry.Resolve,
@@ -137,7 +137,7 @@ func TestSharedListenersCheckEveryMultiplexedAuthority(t *testing.T) {
 			if connections.Load() != 1 {
 				t.Fatalf("requests not multiplexed: %d connections", connections.Load())
 			}
-			registry.Remove(first.Spec.EndpointUID)
+			registry.Remove(first.Spec.Hostname)
 			req := connectRequest(t, protocol, first.Spec.Hostname, "tenant/first")
 			response, err := client.Do(req)
 			if err != nil {

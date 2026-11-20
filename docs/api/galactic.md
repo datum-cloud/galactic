@@ -850,8 +850,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `instanceName` _string_ |  |  |  |
-| `instanceUID` _string_ |  |  |  |
-| `podUID` _string_ |  |  |  |
 | `observedRevision` _integer_ |  |  |  |
 | `appliedRevision` _integer_ |  |  |  |
 | `appliedCertificateRevision` _string_ |  |  |  |
@@ -861,24 +859,6 @@ _Appears in:_
 | `message` _string_ |  |  |  |
 
 
-#### MASQUEEndpointScope
-
-
-
-
-
-
-
-_Appears in:_
-- [MASQUEEndpointSpec](#masqueendpointspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `endpointUID` _string_ |  |  |  |
-| `customerProjectUID` _string_ |  |  |  |
-| `gatewayUID` _string_ |  |  |  |
-| `cell` _string_ |  |  |  |
-| `hostname` _string_ |  |  |  |
 
 
 #### MASQUEEndpointSpec
@@ -894,11 +874,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `endpointUID` _string_ |  |  |  |
-| `customerProjectUID` _string_ |  |  |  |
-| `gatewayUID` _string_ |  |  |  |
-| `cell` _string_ |  |  |  |
 | `hostname` _string_ |  |  |  |
+| `cell` _string_ |  |  |  |
 | `metro` _string_ |  |  |  |
 | `provider` _string_ |  |  |  |
 | `revision` _integer_ |  |  | Minimum: 1 <br /> |

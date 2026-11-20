@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -22,6 +23,8 @@ const stateApplied = "Applied"
 const stateError = "Error"
 
 type Fence struct {
+	Name            string                              `json:"name"`
+	ObjectUID       string                              `json:"objectUID"`
 	RevokedRevision int64                               `json:"revokedRevision,omitempty"`
 	Spec            galacticv1alpha1.MASQUEEndpointSpec `json:"spec"`
 	Removed         bool                                `json:"removed"`
@@ -35,13 +38,30 @@ type Controller struct {
 }
 
 func SameIdentity(first, second galacticv1alpha1.MASQUEEndpointSpec) bool {
-	return first.MASQUEEndpointScope == second.MASQUEEndpointScope &&
+	return first.Hostname == second.Hostname && first.Cell == second.Cell &&
 		first.Metro == second.Metro && first.Provider == second.Provider
 }
 
-func (controller *Controller) fence(ctx context.Context, spec galacticv1alpha1.MASQUEEndpointSpec, removed bool) error {
+func (controller *Controller) fence(
+	ctx context.Context, endpoint *galacticv1alpha1.MASQUEEndpoint, removed bool,
+) error {
+	spec := endpoint.Spec
+	var retained corev1.ConfigMapList
+	if err := controller.Client.List(ctx, &retained, client.InNamespace(controller.Namespace),
+		client.HasLabels{FenceLabel}); err != nil {
+		return err
+	}
+	for _, config := range retained.Items {
+		var previous Fence
+		if err := json.Unmarshal([]byte(config.Data["fence.json"]), &previous); err != nil {
+			return err
+		}
+		if previous.Name == endpoint.Name && !SameIdentity(previous.Spec, spec) {
+			return errors.New("registration name is reserved for another endpoint identity")
+		}
+	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		key := client.ObjectKey{Namespace: controller.Namespace, Name: FenceName(spec.EndpointUID)}
+		key := client.ObjectKey{Namespace: controller.Namespace, Name: FenceName(spec.Hostname)}
 		var config corev1.ConfigMap
 		err := controller.Client.Get(ctx, key, &config)
 		missing := apierrors.IsNotFound(err)
@@ -55,9 +75,13 @@ func (controller *Controller) fence(ctx context.Context, spec galacticv1alpha1.M
 				return err
 			}
 			revokedRevision = previous.RevokedRevision
-			if !SameIdentity(previous.Spec, spec) || spec.Revision < previous.Spec.Revision ||
-				(spec.Revision == previous.Spec.Revision && (spec != previous.Spec || previous.Removed && !removed)) {
+			if previous.Name != endpoint.Name || !SameIdentity(previous.Spec, spec) || spec.Revision < previous.Spec.Revision ||
+				(spec.Revision == previous.Spec.Revision && (spec != previous.Spec || previous.Removed && !removed ||
+					previous.ObjectUID != string(endpoint.UID))) {
 				return errors.New("obsolete or conflicting endpoint revision")
+			}
+			if previous.ObjectUID != string(endpoint.UID) {
+				revokedRevision = previous.Spec.Revision
 			}
 			if previous.Spec == spec && previous.Removed == removed {
 				return nil
@@ -69,7 +93,8 @@ func (controller *Controller) fence(ctx context.Context, spec galacticv1alpha1.M
 		if removed || !spec.Enabled {
 			revokedRevision = spec.Revision
 		}
-		encoded, err := json.Marshal(Fence{Spec: spec, Removed: removed, RevokedRevision: revokedRevision})
+		encoded, err := json.Marshal(Fence{Name: endpoint.Name, ObjectUID: string(endpoint.UID), Spec: spec,
+			Removed: removed, RevokedRevision: revokedRevision})
 		if err != nil {
 			return err
 		}
@@ -85,9 +110,9 @@ func (controller *Controller) fence(ctx context.Context, spec galacticv1alpha1.M
 	})
 }
 
-func GrantRevision(ctx context.Context, reader client.Reader, namespace, endpointUID string) (int64, int64, error) {
+func GrantRevision(ctx context.Context, reader client.Reader, namespace, hostname string) (int64, int64, error) {
 	var config corev1.ConfigMap
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: FenceName(endpointUID)}, &config); err != nil {
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: FenceName(hostname)}, &config); err != nil {
 		return 0, 0, err
 	}
 	var fence Fence
@@ -112,12 +137,9 @@ func (controller *Controller) Sync(ctx context.Context) error {
 	}
 	seen := map[string]bool{}
 	hostnames := map[string]int{}
-	identities := map[string]int{}
+
 	for _, endpoint := range endpoints.Items {
-		if endpoint.Spec.Provider == controller.Provider && endpoint.Spec.Cell == controller.Cell {
-			hostnames[endpoint.Spec.Hostname]++
-			identities[endpoint.Spec.EndpointUID]++
-		}
+		hostnames[endpoint.Spec.Hostname]++
 	}
 	var failures []error
 	for _, endpoint := range endpoints.Items {
@@ -125,18 +147,18 @@ func (controller *Controller) Sync(ctx context.Context) error {
 		if spec.Provider != controller.Provider || spec.Cell != controller.Cell {
 			continue
 		}
-		seen[spec.EndpointUID] = true
+		seen[spec.Hostname] = true
 		applyErr := ValidateSpec(spec)
-		if hostnames[spec.Hostname] > 1 || identities[spec.EndpointUID] > 1 {
+		if hostnames[spec.Hostname] > 1 {
 			applyErr = errors.New("duplicate endpoint identity or hostname")
 		}
 		if applyErr == nil {
-			applyErr = controller.fence(ctx, spec, !endpoint.DeletionTimestamp.IsZero())
+			applyErr = controller.fence(ctx, &endpoint, !endpoint.DeletionTimestamp.IsZero())
 		}
 		if applyErr != nil || !spec.Enabled || !endpoint.DeletionTimestamp.IsZero() {
-			controller.Registry.Remove(spec.EndpointUID)
+			controller.Registry.Remove(spec.Hostname)
 		} else {
-			applyErr = controller.activate(ctx, spec)
+			applyErr = controller.activate(ctx, &endpoint)
 		}
 		if err := controller.report(ctx, &endpoint, applyErr); err != nil {
 			failures = append(failures, err)
@@ -148,9 +170,11 @@ func (controller *Controller) Sync(ctx context.Context) error {
 			failures = append(failures, err)
 			continue
 		}
-		if previous.Spec.Cell == controller.Cell && !seen[previous.Spec.EndpointUID] {
-			controller.Registry.Remove(previous.Spec.EndpointUID)
-			if err := controller.fence(ctx, previous.Spec, true); err != nil {
+		if previous.Spec.Cell == controller.Cell && !seen[previous.Spec.Hostname] {
+			controller.Registry.Remove(previous.Spec.Hostname)
+			if err := controller.fence(ctx, &galacticv1alpha1.MASQUEEndpoint{
+				ObjectMeta: metav1.ObjectMeta{Namespace: controller.Namespace, Name: previous.Name,
+					UID: types.UID(previous.ObjectUID)}, Spec: previous.Spec}, true); err != nil {
 				failures = append(failures, err)
 			}
 		}
@@ -158,32 +182,35 @@ func (controller *Controller) Sync(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-func (controller *Controller) activate(ctx context.Context, spec galacticv1alpha1.MASQUEEndpointSpec) error {
+func (controller *Controller) activate(ctx context.Context, endpoint *galacticv1alpha1.MASQUEEndpoint) error {
+	spec := endpoint.Spec
 	var secret corev1.Secret
 	key := client.ObjectKey{Namespace: controller.Namespace, Name: spec.CertificateRef.Name}
 	err := controller.Client.Get(ctx, key, &secret)
 	if err == nil {
-		err = controller.Registry.Apply(spec, &secret)
+		err = controller.Registry.Apply(endpoint, &secret)
 	}
 	if err == nil {
 		return nil
 	}
-	current, ok := controller.Registry.Current(spec.EndpointUID)
+	current, ok := controller.Registry.Current(spec.Hostname)
 	if !ok {
 		return err
 	}
 	if current == spec || current.CertificateRef.Name == spec.CertificateRef.Name && apierrors.IsNotFound(err) {
 		if apierrors.IsNotFound(err) {
-			controller.Registry.Remove(spec.EndpointUID)
+			controller.Registry.Remove(spec.Hostname)
 		}
 		return err
 	}
 	key.Name = current.CertificateRef.Name
 	var previous corev1.Secret
 	if previousErr := controller.Client.Get(ctx, key, &previous); previousErr == nil {
-		_ = controller.Registry.Apply(current, &previous)
+		old := endpoint.DeepCopy()
+		old.Spec = current
+		_ = controller.Registry.Apply(old, &previous)
 	} else if apierrors.IsNotFound(previousErr) {
-		controller.Registry.Remove(spec.EndpointUID)
+		controller.Registry.Remove(spec.Hostname)
 	}
 	return err
 }
@@ -200,11 +227,21 @@ func (controller *Controller) report(
 	if instance.Spec.PodUID != controller.PodUID || instance.Spec.ProviderRef.Name != controller.Provider {
 		return errors.New("instance identity does not match provider")
 	}
-	status := galacticv1alpha1.MASQUEEndpointInstanceStatus{
-		InstanceName: name, InstanceUID: string(instance.UID), PodUID: controller.PodUID,
-		ObservedRevision: endpoint.Spec.Revision, LastHeartbeatTime: metav1.Now(), State: "Disabled", ForwardingStopped: true,
+	var lease coordinationv1.Lease
+	if err := controller.Client.Get(ctx, key, &lease); err != nil {
+		return err
 	}
-	if current, ok := controller.Registry.Current(endpoint.Spec.EndpointUID); ok {
+	heartbeat := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
+	if !metav1.IsControlledBy(&lease, &instance) || lease.Spec.AcquireTime == nil ||
+		lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity == "" ||
+		!heartbeat.After(instance.CreationTimestamp.Time) || !heartbeat.After(lease.Spec.AcquireTime.Time) {
+		return errors.New("instance lease is missing or acknowledgment predates acquisition")
+	}
+	status := galacticv1alpha1.MASQUEEndpointInstanceStatus{
+		InstanceName:     name,
+		ObservedRevision: endpoint.Spec.Revision, LastHeartbeatTime: heartbeat, State: "Disabled", ForwardingStopped: true,
+	}
+	if current, ok := controller.Registry.Current(endpoint.Spec.Hostname); ok {
 		status.AppliedRevision = current.Revision
 		status.AppliedCertificateRevision = current.CertificateRef.Revision
 		status.State, status.ForwardingStopped = stateApplied, false
@@ -218,6 +255,17 @@ func (controller *Controller) report(
 		status.State, status.Message = stateError, "provider instance is not ready"
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var currentInstance galacticv1alpha1.EdgeInstance
+		var currentLease coordinationv1.Lease
+		if err := controller.Client.Get(ctx, key, &currentInstance); err != nil {
+			return err
+		}
+		if err := controller.Client.Get(ctx, key, &currentLease); err != nil {
+			return err
+		}
+		if currentInstance.UID != instance.UID || !sameLease(&currentLease, &lease) {
+			return errors.New("instance or lease changed before acknowledgment")
+		}
 		var latest galacticv1alpha1.MASQUEEndpoint
 		if err := controller.Client.Get(ctx, client.ObjectKeyFromObject(endpoint), &latest); err != nil {
 			return err
@@ -255,42 +303,49 @@ func (controller *Controller) Run(ctx context.Context) {
 	}
 }
 
-func CheckScope(
-	ctx context.Context, reader client.Reader, namespace, provider string,
-	scope *galacticv1alpha1.MASQUEEndpointScope,
-) error {
-	if scope == nil {
-		return nil
+func Resolve(ctx context.Context, reader client.Reader, namespace, provider string,
+	ref *galacticv1alpha1.MASQUEEndpointReference) (*galacticv1alpha1.MASQUEEndpoint, error) {
+	if ref == nil {
+		return nil, nil
 	}
-	var endpoints galacticv1alpha1.MASQUEEndpointList
-	if err := reader.List(ctx, &endpoints, client.InNamespace(namespace)); err != nil {
-		return err
+	if ref.Namespace != namespace || ref.Name == "" {
+		return nil, errors.New("endpoint reference outside authority namespace")
 	}
-	matches := 0
-	for _, endpoint := range endpoints.Items {
-		if endpoint.Spec.EndpointUID != scope.EndpointUID {
-			continue
-		}
-		matches++
-		if !endpoint.Spec.Enabled || !endpoint.DeletionTimestamp.IsZero() || endpoint.Spec.MASQUEEndpointScope != *scope ||
-			provider != "" && endpoint.Spec.Provider != provider {
-			return errors.New("endpoint scope is disabled or mismatched")
-		}
-		var config corev1.ConfigMap
-		key := client.ObjectKey{Namespace: namespace, Name: FenceName(scope.EndpointUID)}
-		if err := reader.Get(ctx, key, &config); err != nil {
-			return err
-		}
-		var fence Fence
-		if err := json.Unmarshal([]byte(config.Data["fence.json"]), &fence); err != nil {
-			return err
-		}
-		if fence.Removed || fence.Spec != endpoint.Spec {
-			return errors.New("endpoint revision not accepted")
+	var endpoint galacticv1alpha1.MASQUEEndpoint
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: ref.Namespace, Name: ref.Name}, &endpoint); err != nil {
+		return nil, err
+	}
+	if !endpoint.Spec.Enabled || !endpoint.DeletionTimestamp.IsZero() ||
+		provider != "" && endpoint.Spec.Provider != provider {
+		return nil, errors.New("endpoint disabled or provider mismatched")
+	}
+	var registrations galacticv1alpha1.MASQUEEndpointList
+	if err := reader.List(ctx, &registrations, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	for _, other := range registrations.Items {
+		if other.Name != endpoint.Name && other.Spec.Hostname == endpoint.Spec.Hostname {
+			return nil, errors.New("duplicate hostname")
 		}
 	}
-	if matches != 1 {
-		return fmt.Errorf("expected one endpoint registration, got %d", matches)
+	var config corev1.ConfigMap
+	key := client.ObjectKey{Namespace: namespace, Name: FenceName(endpoint.Spec.Hostname)}
+	if err := reader.Get(ctx, key, &config); err != nil {
+		return nil, err
 	}
-	return nil
+	var fence Fence
+	if err := json.Unmarshal([]byte(config.Data["fence.json"]), &fence); err != nil {
+		return nil, err
+	}
+	if fence.Removed || fence.Name != endpoint.Name || fence.ObjectUID != string(endpoint.UID) ||
+		fence.Spec != endpoint.Spec {
+		return nil, errors.New("endpoint revision not accepted")
+	}
+	return &endpoint, nil
+}
+
+func sameLease(current, previous *coordinationv1.Lease) bool {
+	return current.UID == previous.UID && current.Spec.AcquireTime != nil &&
+		current.Spec.AcquireTime.Equal(previous.Spec.AcquireTime) && current.Spec.HolderIdentity != nil &&
+		previous.Spec.HolderIdentity != nil && *current.Spec.HolderIdentity == *previous.Spec.HolderIdentity
 }

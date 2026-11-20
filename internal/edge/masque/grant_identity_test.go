@@ -7,11 +7,10 @@ import (
 )
 
 func TestRefreshedGrantPreservesBindingIdentity(t *testing.T) {
-	original := Grant{NetworkUID: "network-a", BindingUID: "binding-a",
-		Endpoint: &galacticv1alpha1.MASQUEEndpointScope{EndpointUID: "endpoint"}}
+	original := Grant{EndpointRef: &galacticv1alpha1.MASQUEEndpointReference{Namespace: "masque-system", Name: "endpoint"}}
 	for _, mutate := range []func(*Grant){
-		func(grant *Grant) { grant.NetworkUID = "network-b" },
-		func(grant *Grant) { grant.BindingUID = "binding-b" },
+		func(grant *Grant) { grant.EndpointRef = nil },
+		func(grant *Grant) { grant.Service.UID = "recreated-service" },
 		func(grant *Grant) { grant.VPCUID = "recreated-vpc" },
 	} {
 		changed := original

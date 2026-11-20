@@ -129,6 +129,6 @@ func run(parent context.Context, o *options) error {
 		Client: c, Provider: o.provider, Authority: o.authority, Listen: o.listen, ListenTCP: o.listenTCP,
 		HealthListen: o.healthListen,
 		Pod:          pod, GetCertificate: certs.GetCertificate,
-		Authorizer: &authority.Client{URL: o.authorityURL, CAFile: o.authorityCA, TokenFile: o.tokenFile},
+		Authorizer: &authority.Client{Reader: c, URL: o.authorityURL, CAFile: o.authorityCA, TokenFile: o.tokenFile},
 	})
 }

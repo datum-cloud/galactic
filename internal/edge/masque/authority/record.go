@@ -5,11 +5,13 @@
 package authority
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"time"
 
@@ -51,10 +53,9 @@ func (v VPCRef) Selector() string { return v.Namespace + "/" + v.Name }
 
 // Record is one connector's grant, as the operator approved it.
 type Record struct {
-	NetworkUID       string                                `json:"networkUID,omitempty"`
-	BindingUID       string                                `json:"bindingUID,omitempty"`
-	EndpointRevision int64                                 `json:"endpointRevision,omitempty"`
-	Endpoint         *galacticv1alpha1.MASQUEEndpointScope `json:"endpoint,omitempty"`
+	EndpointHostname string                                    `json:"endpointHostname,omitempty"`
+	EndpointRevision int64                                     `json:"endpointRevision,omitempty"`
+	EndpointRef      *galacticv1alpha1.MASQUEEndpointReference `json:"endpointRef,omitempty"`
 	// Connector is the connector's immutable UUID.
 	Connector string `json:"connector"`
 	// Cell is the only cell whose authority honors the record.
@@ -82,10 +83,12 @@ func RecordName(connector string) string { return "masque-grant-" + connector }
 
 // validate reports the first malformed field of r.
 func (r *Record) validate() error {
-	if r.Endpoint != nil && (r.EndpointRevision <= 0 || r.Endpoint.EndpointUID == "" ||
-		r.Endpoint.CustomerProjectUID == "" || r.Endpoint.GatewayUID == "" || r.NetworkUID == "" || r.BindingUID == "" ||
-		r.Endpoint.Hostname == "" || r.Endpoint.Cell != r.Cell) {
-		return errors.New("complete matching endpoint scope is required")
+	if r.EndpointRef == nil && (r.EndpointRevision != 0 || r.EndpointHostname != "") {
+		return errors.New("managed record is missing endpoint reference")
+	}
+	if r.EndpointRef != nil && (r.EndpointRevision <= 0 || r.EndpointRef.Namespace == "" ||
+		r.EndpointRef.Name == "" || r.EndpointHostname == "") {
+		return errors.New("named endpoint and accepted revision are required")
 	}
 	if _, err := uuid.Parse(r.Connector); err != nil || r.Connector != uuid.MustParse(r.Connector).String() {
 		return fmt.Errorf("connector %q is not a lowercase UUID", r.Connector)
@@ -113,8 +116,13 @@ func (r *Record) validate() error {
 // decodeRecord reads the record of a grant Secret.
 func decodeRecord(s *corev1.Secret) (*Record, error) {
 	var r Record
-	if err := json.Unmarshal(s.Data[recordKey], &r); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(s.Data[recordKey]))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&r); err != nil {
 		return nil, fmt.Errorf("decode grant record %s: %w", s.Name, err)
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("grant record %s has trailing content", s.Name)
 	}
 	if err := r.validate(); err != nil {
 		return nil, fmt.Errorf("grant record %s: %w", s.Name, err)

@@ -2,12 +2,9 @@ package v1alpha1
 
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-type MASQUEEndpointScope struct {
-	EndpointUID        string `json:"endpointUID"`
-	CustomerProjectUID string `json:"customerProjectUID"`
-	GatewayUID         string `json:"gatewayUID"`
-	Cell               string `json:"cell"`
-	Hostname           string `json:"hostname"`
+type MASQUEEndpointReference struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
 }
 
 type MASQUEEndpointCertificateReference struct {
@@ -18,12 +15,13 @@ type MASQUEEndpointCertificateReference struct {
 
 // MASQUEEndpointSpec defines the shared endpoint registration and certificate.
 //
-// +kubebuilder:validation:XValidation:rule="self.endpointUID == oldSelf.endpointUID && self.customerProjectUID == oldSelf.customerProjectUID && self.gatewayUID == oldSelf.gatewayUID && self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider",message="endpoint identity is immutable"
+// +kubebuilder:validation:XValidation:rule="self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider",message="endpoint identity is immutable"
 // +kubebuilder:validation:XValidation:rule="self == oldSelf || self.revision > oldSelf.revision",message="changes require a greater revision"
 type MASQUEEndpointSpec struct {
-	MASQUEEndpointScope `json:",inline"`
-	Metro               string `json:"metro"`
-	Provider            string `json:"provider"`
+	Hostname string `json:"hostname"`
+	Cell     string `json:"cell"`
+	Metro    string `json:"metro"`
+	Provider string `json:"provider"`
 	// +kubebuilder:validation:Minimum=1
 	Revision       int64                              `json:"revision"`
 	CertificateRef MASQUEEndpointCertificateReference `json:"certificateRef"`
@@ -32,8 +30,6 @@ type MASQUEEndpointSpec struct {
 
 type MASQUEEndpointInstanceStatus struct {
 	InstanceName               string `json:"instanceName"`
-	InstanceUID                string `json:"instanceUID"`
-	PodUID                     string `json:"podUID"`
 	ObservedRevision           int64  `json:"observedRevision"`
 	AppliedRevision            int64  `json:"appliedRevision"`
 	AppliedCertificateRevision string `json:"appliedCertificateRevision,omitempty"`

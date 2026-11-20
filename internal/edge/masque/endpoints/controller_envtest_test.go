@@ -121,7 +121,7 @@ func TestEndpointSchemaAndPodAcknowledgments(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpoint.Status.Instances = []galacticv1alpha1.MASQUEEndpointInstanceStatus{{
-		InstanceName: "ei-pod-a", InstanceUID: "instance-a", PodUID: "pod-a",
+		InstanceName:     "ei-pod-a",
 		ObservedRevision: 2, AppliedRevision: 2, State: "Disabled",
 		ForwardingStopped: true, LastHeartbeatTime: metav1.Now()}}
 	deadline := time.After(10 * time.Second)
@@ -129,7 +129,7 @@ func TestEndpointSchemaAndPodAcknowledgments(t *testing.T) {
 	defer ticker.Stop()
 	for {
 		probe := endpoint.DeepCopy()
-		probe.Status.Instances[0].PodUID = "pod-b"
+		probe.Status.Instances[0].InstanceName = "ei-pod-b"
 		err = provider.Status().Update(ctx, probe, client.DryRunAll)
 		if err != nil && strings.Contains(err.Error(), "a provider may acknowledge only its own instance") {
 			break
@@ -144,7 +144,6 @@ func TestEndpointSchemaAndPodAcknowledgments(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, mutate := range []func(*galacticv1alpha1.MASQUEEndpoint){
-		func(endpoint *galacticv1alpha1.MASQUEEndpoint) { endpoint.Status.Instances[0].PodUID = "pod-b" },
 		func(endpoint *galacticv1alpha1.MASQUEEndpoint) {
 			endpoint.Status.Instances[0].InstanceName = "ei-pod-b"
 		},

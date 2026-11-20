@@ -18,6 +18,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	"go.datum.net/galactic/internal/edge/connectip"
 	"go.datum.net/galactic/internal/edge/masque"
 )
@@ -77,3 +78,34 @@ func TestRunRequiresExtendedConnectForTCP(t *testing.T) {
 
 // nilAuthorizer is never called: Run must fail before admitting anything.
 type nilAuthorizer struct{ masque.Authorizer }
+
+func TestClientResolvesNamedVPC(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config")
+	config := `apiVersion: v1
+kind: Config
+clusters:
+- name: test
+  cluster:
+    server: http://127.0.0.1:1
+contexts:
+- name: test
+  context:
+    cluster: test
+    user: test
+current-context: test
+users:
+- name: test
+  user: {}
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", path)
+	cell, err := NewClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := cell.Scheme().ObjectKinds(&cloudv1alpha1.VPC{}); err != nil {
+		t.Fatalf("provider cannot resolve a named VPC: %v", err)
+	}
+}

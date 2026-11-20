@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
 	"go.datum.net/galactic/internal/edge/connectip"
@@ -152,9 +153,9 @@ func (c *Config) Validate() error {
 
 // Authorizer is the fixture's masque.Authorizer: the grant authority when
 // one is configured, and the static connectors otherwise.
-func (c *Config) Authorizer() masque.Authorizer {
+func (c *Config) Authorizer(reader client.Reader) masque.Authorizer {
 	if g := c.GrantAuthority; g != nil {
-		return &authority.Client{URL: g.URL, CAFile: g.CAFile, TokenFile: g.TokenFile}
+		return &authority.Client{Reader: reader, URL: g.URL, CAFile: g.CAFile, TokenFile: g.TokenFile}
 	}
 	return c
 }

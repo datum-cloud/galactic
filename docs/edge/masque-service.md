@@ -47,29 +47,29 @@ the root Galactic Kustomization still does not enable MASQUE.
 ### Registration and delivery contract
 
 The [API reference](../api/galactic.md#masqueendpoint) defines the complete
-schema. Immutable identity is `endpointUID`, `customerProjectUID`, `gatewayUID`,
-`metro`, `cell`, `provider` and `hostname`. There is no endpoint `networkUID` or
-`vpcRef`: one gateway endpoint serves separately authorized network bindings.
-`endpointUID` is the service-project ConnectEndpoint UID, not the
-distributed object's UID. The hostname is a lowercase DNS name without a port.
-Every mutable change increments the positive `spec.revision`, including
-certificate replacement, disable and reactivation. Exactly one registration
-may claim an endpoint UID or hostname within this provider and cell.
+schema. The spec contains only `hostname`, `metro`, `cell`, `provider`,
+`revision`, `certificateRef` and `enabled`. Registration name, hostname, metro,
+cell and provider are immutable. No customer project, gateway, endpoint,
+network or binding identifiers are copied into the spec or ownership annotations.
+One gateway endpoint serves separately authorized network bindings. The hostname
+is a lowercase DNS name without a port. Every mutable change increments the
+positive `spec.revision`, including certificate replacement, disable and
+reactivation. Exactly one registration may claim a hostname within the namespace,
+even across different providers or cells.
 
 `certificateRef.name` identifies a same-namespace `kubernetes.io/tls` Secret.
 `certificateRef.revision` is lowercase SHA-256 of the leaf certificate DER,
 matching `TLSCertificate.status.certificateRevision`, never an expiry ordering.
-The Secret contains `tls.crt` and `tls.key` and these annotations:
+The Secret contains `tls.crt` and `tls.key` and this annotation:
 
 ```yaml
-masque.galactic.datumapis.com/endpoint-uid: <service-project-endpoint-uid>
 masque.galactic.datumapis.com/certificate-revision: <leaf-der-sha256>
 ```
 
 Use immutable, versioned Secret names. Issuance infrastructure and selected
 serving cells hold the keys; neither customer nor service-provider Projects
 receive them. Delivery validates issuance ownership upstream; the runtime
-additionally checks endpoint ownership, exact fingerprint, matching private
+checks the named registration certificate reference, exact fingerprint, matching private
 key, SAN hostname and validity. Runtime trusts the authorized delivery writer;
 external probes must verify public WebPKI trust and packet reachability.
 
@@ -93,8 +93,7 @@ admission and drains sessions. Ten seconds without successfully validating the
 active Secret, or certificate expiry, closes admission; a 250 ms sweep cancels
 active requests. API failure is not interpreted as registration deletion.
 
-`status.instances` is keyed by `instanceName` and reports `instanceUID`,
-`podUID`, `observedRevision`, `appliedRevision`, `appliedCertificateRevision`,
+`status.instances` is keyed by `instanceName` and reports `observedRevision`, `appliedRevision`, `appliedCertificateRevision`,
 `state` (`Applied`, `Disabled`, `Error`), `forwardingStopped`,
 `lastHeartbeatTime` and an optional `message`. A failed replacement reports
 the old applied version and `Error`, never the desired certificate revision.
@@ -105,9 +104,12 @@ acknowledgment does not certify that every kernel route has been removed.
 
 Readiness consumers enumerate **all** matching EdgeInstances in the provider
 namespace using `spec.providerRef.name`, not only instances already in the
-acknowledgment list. Match the instance UID and pod UID, require an exact desired
-revision/certificate revision, fresh heartbeat (at most ten seconds), and a live
-same-name Lease owned by that instance. Lease boot-clock annotations are not
+acknowledgment list. Require an exact desired revision/certificate revision, a
+fresh heartbeat (at most ten seconds) strictly after both instance creation and
+Lease `spec.acquireTime`, and a live same-name Lease owned by that instance.
+The provider preserves acquisition time on renewal and changes it on takeover.
+Status does not copy instance or pod UIDs; the runtime privately checks object
+incarnations again before publishing the acknowledgment. Lease boot-clock annotations are not
 wall timestamps; remote readers can use renewal time/duration and released
 state as a liveness check but must not replace the runtime lease gate. New pods
 without acknowledgments block endpoint readiness. Karmada delivery, pod
@@ -116,9 +118,12 @@ both transport paths, or real VPC forwarding readiness.
 
 Disable at a new revision and wait for all relevant instances' stopped
 acknowledgments before deleting registrations and delivered Secrets. The
-provider retains `masque-endpoint-<sha256(endpointUID)>` ConfigMaps labeled
+provider retains `masque-endpoint-<sha256(hostname)>` ConfigMaps labeled
 `masque.galactic.datumapis.com/endpoint-fence=<provider>` without owner references.
-They fence stale revisions, equal-version conflicts, identity reuse, and
+The hash is lowercase hex SHA-256 of canonical hostname bytes only; the
+registration namespace scopes the ConfigMap. The fence privately binds the
+registration name and incarnation, immutable spec identity, and accepted/revoked
+revisions. They fence stale revisions, equal-version conflicts, identity reuse, and
 deletion/recreation. Never delete or roll back these fences during endpoint
 cleanup. A higher revision may reactivate the same live identity; retired
 gateway identities and hostname reservations remain Connect's responsibility.
@@ -128,16 +133,17 @@ Lost-cell cleanup requires explicit operational recovery, not a fabricated ack.
 
 `pkg/masquegrant.New(uncachedCellClient, namespace)` exposes `Create`, `Rotate`,
 `Disable` and `Retire` using the existing authority/ledger implementation.
-`CreateRequest.Endpoint` adds the exact endpoint/project/gateway/cell/hostname
-scope to the existing UID-pinned `VPC` reference. For managed grants,
-`CreateRequest.NetworkUID` and `BindingUID` are required, internal identities
-stored on the grant record and authorization, not the endpoint. Connect's
-trusted issuer resolves customer-facing **names** to these UIDs, verifies
-network-binding authorization and resolves the network to its cell VPC. Galactic
-does not resolve customer Network objects. It independently verifies the
-request's controller-issued VPC selector against the credential, reads the
-live VPC UID on authorization and refresh, and rejects stale-UID rotation.
-Creation and rotation verify the delivered registration and durable fence.
+`CreateRequest.EndpointRef` is `{Namespace, Name}` and `CreateRequest.VPC`
+is the public name-only `VPCRef {Namespace, Name}`. No caller supplies object
+UIDs. Connect authenticates the customer project and caller, resolves authorized
+named bindings/networks, and privately pins their incarnations. Galactic does
+not resolve customer Network objects. Connect checks its pinned VPC before and
+after mint using uncached reads and retires any raced grant before returning it.
+Galactic independently resolves and privately pins the cell VPC at creation,
+verifies each request's controller-issued VPC selector, and rechecks that pin
+on authorization, rotation and refresh. Creation and rotation resolve the named
+endpoint and verify its accepted durable fence. Old managed record schemas are
+rejected rather than silently treated as unscoped legacy credentials.
 Retain a deterministic, binding-specific
 connector UUID across retries: a failed create reuses its allocation, while an
 already-created record requires rotation because plaintext credentials are not
@@ -164,11 +170,20 @@ ServiceAccount. Providers need pod-bound tokens with the Kubernetes pod UID
 authentication extra. Managed listeners disable TLS session tickets so a new
 connection cannot bypass certificate selection through session resumption.
 
-Providers include this trusted scope in `/v1/authorize`; the authority compares
+Providers include the locally resolved named endpoint reference in `/v1/authorize`; the authority compares
 it to the credential record and rechecks registration/fences during refresh.
+The `/v1/authorize` response contains named service/endpoint references, not
+VPC or service UIDs. Its opaque authorization receipt binds the private service
+incarnation. The provider uses an uncached local reader to resolve the service
+and VPC, validate the receipt and hydrate private datapath identity. Bind the
+unbound `masque-provider-tenant` ClusterRole in each authorized VPC namespace:
+it grants only `get` on `edgeservices` and `vpcs`, never tenant Secrets or writes.
+Install these tenant bindings before upgrading authority-backed providers,
+including legacy single-hostname deployments. Upgrade authority and providers
+together for the name-only wire contract; stale incarnation receipts fail closed.
 Legacy credentials are accepted only on the legacy single-authority path, never
 on a managed endpoint. Disabling/removing an endpoint advances a durable
-revocation floor. Reactivation does not revive old credentials; rotate them or
+revocation floor. Reactivation does not revive old credentials; retire them and
 create a new authorized connector. Certificate renewal alone preserves the
 credential epoch. Cell migration needs a new assignment, grant and attachment;
 this feature does not implement transparent roaming or address preservation.

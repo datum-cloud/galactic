@@ -53,14 +53,8 @@ spec:
                     - name
                     - revision
                   type: object
-                customerProjectUID:
-                  type: string
                 enabled:
                   type: boolean
-                endpointUID:
-                  type: string
-                gatewayUID:
-                  type: string
                 hostname:
                   type: string
                 metro:
@@ -74,10 +68,7 @@ spec:
               required:
                 - cell
                 - certificateRef
-                - customerProjectUID
                 - enabled
-                - endpointUID
-                - gatewayUID
                 - hostname
                 - metro
                 - provider
@@ -85,7 +76,7 @@ spec:
               type: object
               x-kubernetes-validations:
                 - message: endpoint identity is immutable
-                  rule: self.endpointUID == oldSelf.endpointUID && self.customerProjectUID == oldSelf.customerProjectUID && self.gatewayUID == oldSelf.gatewayUID && self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider
+                  rule: self.cell == oldSelf.cell && self.hostname == oldSelf.hostname && self.metro == oldSelf.metro && self.provider == oldSelf.provider
                 - message: changes require a greater revision
                   rule: self == oldSelf || self.revision > oldSelf.revision
             status:
@@ -102,8 +93,6 @@ spec:
                         type: boolean
                       instanceName:
                         type: string
-                      instanceUID:
-                        type: string
                       lastHeartbeatTime:
                         format: date-time
                         type: string
@@ -112,8 +101,6 @@ spec:
                       observedRevision:
                         format: int64
                         type: integer
-                      podUID:
-                        type: string
                       state:
                         enum:
                           - Applied
@@ -124,10 +111,8 @@ spec:
                       - appliedRevision
                       - forwardingStopped
                       - instanceName
-                      - instanceUID
                       - lastHeartbeatTime
                       - observedRevision
-                      - podUID
                       - state
                     type: object
                   type: array

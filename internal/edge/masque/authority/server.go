@@ -41,9 +41,9 @@ const (
 
 // AuthorizeRequest is the body of an Authorize call.
 type AuthorizeRequest struct {
-	Endpoint   *galacticv1alpha1.MASQUEEndpointScope `json:"endpoint,omitempty"`
-	Credential string                                `json:"credential"`
-	VPC        string                                `json:"vpc"`
+	EndpointRef *galacticv1alpha1.MASQUEEndpointReference `json:"endpointRef,omitempty"`
+	Credential  string                                    `json:"credential"`
+	VPC         string                                    `json:"vpc"`
 	// Nonce identifies the call: its retries send the same nonce and
 	// issue time.
 	Nonce string `json:"nonce"`

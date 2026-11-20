@@ -101,3 +101,12 @@ rules:
   - apiGroups: [galactic.datumapis.com]
     resources: [vpcs]
     verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: masque-provider-tenant
+rules:
+  - apiGroups: [galactic.datumapis.com]
+    resources: [edgeservices, vpcs]
+    verbs: [get]

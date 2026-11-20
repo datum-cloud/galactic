@@ -88,8 +88,7 @@ type InstanceStore struct {
 	// Duration, when set, is written as the Lease's leaseDurationSeconds
 	// for tools that display it. Nothing reads it back.
 	Duration time.Duration
-	// Now stamps the Lease's renewTime for tools that display it; nothing
-	// reads it back. Nil uses the wall clock.
+	// Now stamps Lease renewal and acquisition times. Nil uses the wall clock.
 	Now func() time.Time
 }
 
@@ -197,9 +196,23 @@ func (s InstanceStore) Update(ctx context.Context, r claim.Record) (claim.Record
 	}
 	// The patch names every field it owns, a null holderIdentity included,
 	// so none keeps a stale value.
+	var previous coordinationv1.Lease
+	if err := s.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: r.Key}, &previous); err != nil {
+		if apierrors.IsNotFound(err) {
+			return claim.Record{}, claim.ErrNotFound
+		}
+		return claim.Record{}, err
+	}
+	if string(previous.UID) != uid || previous.ResourceVersion != rv {
+		return claim.Record{}, claim.ErrConflict
+	}
 	spec := s.spec(r, epoch)
+	if r.Holder == ptr.Deref(previous.Spec.HolderIdentity, "") &&
+		epoch == ptr.Deref(previous.Spec.LeaseTransitions, 0) && previous.Spec.AcquireTime != nil {
+		spec.AcquireTime = previous.Spec.AcquireTime
+	}
 	specPatch := map[string]any{"holderIdentity": spec.HolderIdentity, "leaseTransitions": spec.LeaseTransitions,
-		"renewTime": spec.RenewTime}
+		"renewTime": spec.RenewTime, "acquireTime": spec.AcquireTime}
 	if spec.LeaseDurationSeconds != nil {
 		specPatch["leaseDurationSeconds"] = spec.LeaseDurationSeconds
 	}
@@ -239,6 +252,7 @@ func (s InstanceStore) spec(r claim.Record, epoch int32) coordinationv1.LeaseSpe
 	spec := coordinationv1.LeaseSpec{LeaseTransitions: ptr.To(epoch), RenewTime: ptr.To(metav1.NewMicroTime(now()))}
 	if r.Holder != "" {
 		spec.HolderIdentity = ptr.To(r.Holder)
+		spec.AcquireTime = spec.RenewTime.DeepCopy()
 	}
 	if s.Duration > 0 {
 		spec.LeaseDurationSeconds = ptr.To(int32(math.Ceil(s.Duration.Seconds())))
