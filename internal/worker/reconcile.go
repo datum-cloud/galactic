@@ -504,8 +504,9 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 		// pod reaches its Fabric destinations through its own
 		// encapsulation and receives every reply over the link. So the
 		// Local module gets a pod-bound claim even with no Local
-		// destination.
-		if _, ok := perMode[workerv1alpha1.Mode_MODE_LOCAL]; !ok && podBound(c.spec) {
+		// destination. A connector claim's link is galactic-edge's host
+		// link, which Local only registers once its address is known.
+		if _, ok := perMode[workerv1alpha1.Mode_MODE_LOCAL]; !ok && podBound(c.spec) && c.spec.GetEdgeLink() == nil {
 			capName := workerv1alpha1.HandoffCapability(c.spec.GetHandoff())
 			if slices.Contains(c.rec.Capabilities, capName) && w.d.Modules.Capability(capName).Available {
 				perMode[workerv1alpha1.Mode_MODE_LOCAL] = nil
@@ -823,13 +824,19 @@ func handoffInterface(h module.HandoffInterface) *workerv1alpha1.HandoffInterfac
 }
 
 // wantAdvertisements returns the advertisements of each routed_link and
-// socket claim among claims, the Local claims of a VPC, whose pod runs. A
-// claim whose pod is gone advertises nothing until its owner calls from a new
-// pod, so remote nodes stop returning traffic to a link that no pod holds.
+// socket claim among claims, the Local claims of a VPC, whose pod runs,
+// other than connector claims. A claim whose pod is gone advertises nothing
+// until its owner calls from a new pod, so remote nodes stop returning
+// traffic to a link that no pod holds.
 func (w *Worker) wantAdvertisements(claims []module.Claim) []hostscope.Advertisement {
 	var want []hostscope.Advertisement
 	for _, c := range claims {
 		if c.Handoff != workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK && c.Handoff != workerv1alpha1.Handoff_HANDOFF_SOCKET {
+			continue
+		}
+		// A connector claim's addresses are an edge route's, which
+		// galactic-controller advertises (D37).
+		if c.EdgeLink != nil {
 			continue
 		}
 		if len(c.Addresses) == 0 || c.OwnerPod == "" {
