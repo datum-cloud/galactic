@@ -96,6 +96,9 @@ func TestKernelLocal_AttachesNativePinnedAndPrunes(t *testing.T) {
 	}
 
 	nat, tenant := addVeth(t, "gn0", "gt0")
+	if peer, err := vethPeer(nat, netlink.LinkByIndex); err != nil || peer.Attrs().Index != tenant.Attrs().Index {
+		t.Fatalf("vethPeer(gn0) = %v, %v; want gt0", peer, err)
+	}
 	sid := netip.MustParseAddr("fc00:0:1:1:123::")
 	target := localTarget{VPC: "A", NATName: "gn0", NATIfindex: nat.Attrs().Index, TenantName: "gt0", TenantSID: sid}
 	if err := k.Program(target); err != nil {
@@ -341,3 +344,39 @@ func TestOpenPinnedLocal_NothingPinned(t *testing.T) {
 // xdpAttachedDrv is IFLA_XDP_ATTACHED's value for a native program
 // (XDP_ATTACHED_DRV in linux/if_link.h).
 const xdpAttachedDrv = 1
+
+// TestVethPeer checks that the NAT end's peer is found from its IFLA_LINK,
+// and only when the peer names it back from this namespace.
+func TestVethPeer(t *testing.T) {
+	link := func(idx, peer, netnsid int) netlink.Link {
+		attrs := netlink.NewLinkAttrs()
+		attrs.Name, attrs.Index, attrs.ParentIndex, attrs.NetNsID = "gn0", idx, peer, netnsid
+		return &netlink.Veth{LinkAttrs: attrs}
+	}
+	links := map[int]netlink.Link{10: link(10, 9, -1), 11: link(11, 12, -1)}
+	byIndex := func(i int) (netlink.Link, error) {
+		if l, ok := links[i]; ok {
+			return l, nil
+		}
+		return nil, unix.ENODEV
+	}
+	for _, c := range []struct {
+		name string
+		nat  netlink.Link
+		want int
+	}{
+		{"peer", link(9, 10, -1), 10},
+		{"peer names another link", link(9, 11, -1), 0},
+		{"peer is gone", link(9, 13, -1), 0},
+		{"no peer reported", link(9, 0, -1), 0},
+		{"peer in another namespace", link(9, 10, 2), 0},
+	} {
+		got, err := vethPeer(c.nat, byIndex)
+		switch {
+		case c.want == 0 && err == nil:
+			t.Errorf("%s: vethPeer = %d, want an error", c.name, got.Attrs().Index)
+		case c.want != 0 && (err != nil || got.Attrs().Index != c.want):
+			t.Errorf("%s: vethPeer = %v, %v; want link %d", c.name, got, err, c.want)
+		}
+	}
+}
