@@ -184,6 +184,15 @@ func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string, peerIndex uint32
 	if err != nil {
 		return nil, fmt.Errorf("wait for veth peer %q's own link-local address: %w", peer, err)
 	}
+	// A default route through the same hop stays as it is: configurePodLink
+	// sets its source to the gateway address, and replacing it would drop that.
+	current, err := vrfDefaultRoute(vrfLink.Table)
+	if err != nil {
+		return nil, err
+	}
+	if current != nil && current.LinkIndex == innerLink.Attrs().Index && current.Gw.Equal(peerLinkLocal) {
+		return peerLink, nil
+	}
 	defaultRoute := &netlink.Route{
 		Dst:       &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
 		Table:     int(vrfLink.Table),
@@ -195,6 +204,30 @@ func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string, peerIndex uint32
 	}
 
 	return peerLink, nil
+}
+
+// vrfDefaultRoute returns the IPv6 default route through a gateway in table,
+// the one ensureEgressVeth installs, or nil when there is none. The VRF's
+// unreachable default, which has no gateway, does not count.
+func vrfDefaultRoute(table uint32) (*netlink.Route, error) {
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6,
+		&netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return nil, fmt.Errorf("list routes of VRF table %d: %w", table, err)
+	}
+	for i := range routes {
+		r := routes[i]
+		if r.Gw == nil || r.Type != unix.RTN_UNICAST {
+			continue
+		}
+		if r.Dst == nil {
+			return &r, nil
+		}
+		if ones, bits := r.Dst.Mask.Size(); ones == 0 && bits == 128 {
+			return &r, nil
+		}
+	}
+	return nil, nil
 }
 
 // waitForLinkLocalAddr returns link's kernel-assigned link-local IPv6 address,

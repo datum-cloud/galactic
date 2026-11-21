@@ -67,6 +67,9 @@ func configurePodLink(vrfName, podEnd string, gateway []netip.Addr, hostLL netip
 	if err := removeStaleGateways(pl, gateway); err != nil {
 		return err
 	}
+	if err := setDefaultSource(vrfLink.Table, gateway); err != nil {
+		return err
+	}
 	if pl.Attrs().Flags&net.FlagUp == 0 {
 		if err := netlink.LinkSetUp(pl); err != nil {
 			return fmt.Errorf("set %s up: %w", podEnd, err)
@@ -134,6 +137,35 @@ func hasLocalRoute(table uint32, linkIdx int, a netip.Addr) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// setDefaultSource makes the first IPv6 gateway address the source of the
+// VRF's default route into the encapsulating datapath. That route leaves
+// through the egress veth, which holds only a link-local address, and the
+// kernel picks the outgoing link's link-local over the gateway on the sibling
+// pod end, so connections to a backend on another node would leave with a
+// source that cannot be answered. Without a default route yet, as before the
+// datapath is attached, it does nothing and the next sweep sets it.
+func setDefaultSource(table uint32, gateway []netip.Addr) error {
+	var src net.IP
+	for _, a := range gateway {
+		if a.Is6() && !a.Is4In6() {
+			src = a.AsSlice()
+			break
+		}
+	}
+	if src == nil {
+		return nil
+	}
+	r, err := vrfDefaultRoute(table)
+	if err != nil || r == nil || r.Src.Equal(src) {
+		return err
+	}
+	r.Src = src
+	if err := netlink.RouteReplace(r); err != nil {
+		return fmt.Errorf("set source %s on the default route of table %d: %w", src, table, err)
+	}
+	return nil
 }
 
 // syncLocalRoutes makes the routes podLinkProtocol owns in table exactly a

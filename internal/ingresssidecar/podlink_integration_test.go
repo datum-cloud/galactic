@@ -201,3 +201,66 @@ func checkConfiguredLink(t *testing.T, vrfName, pod string, table uint32, gw, ho
 		t.Errorf("table %d route to %s = %+v, want through %s to %s", table, backend, r, pod, hostLL)
 	}
 }
+
+// TestConfigurePodLink_DefaultRouteSourcesTheGateway checks that connections
+// to a backend on another node, which leave through the encapsulating egress
+// veth, take the gateway as their source rather than the veth's link-local
+// address, and that re-asserting the egress veth keeps that source.
+func TestConfigurePodLink_DefaultRouteSourcesTheGateway(t *testing.T) {
+	requireRoot(t)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	t.Cleanup(func() { _ = nsObj.Close() })
+
+	gw := netip.MustParseAddr("2001:db8:ff::1")
+	hostLL := netip.MustParseAddr("fe80::1")
+	const vrfName, table = "GtestvrfcV", vrf.SidecarTableIDBase + 23
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		if err := netlink.LinkAdd(&netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: vrfName}, Table: table}); err != nil {
+			return err
+		}
+		vl, err := netlink.LinkByName(vrfName)
+		if err != nil {
+			return err
+		}
+		if err := netlink.LinkSetUp(vl); err != nil {
+			return err
+		}
+		if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "podC"}, PeerName: "hostC"}); err != nil {
+			return err
+		}
+		vrfLink := vl.(*netlink.Vrf)
+		if _, err := ensureEgressVeth(vrfLink, "ivsC", "ivpC", 4000); err != nil {
+			return err
+		}
+		if err := configurePodLink(vrfName, "podC", []netip.Addr{gw}, hostLL, nil); err != nil {
+			return err
+		}
+		checkDefaultSource(t, table, gw, "after configure")
+		// The sidecar re-asserts the egress datapath on every reapply.
+		if _, err := ensureEgressVeth(vrfLink, "ivsC", "ivpC", 4000); err != nil {
+			return err
+		}
+		checkDefaultSource(t, table, gw, "after the egress veth is re-asserted")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// checkDefaultSource checks that table's default route has src as its source.
+func checkDefaultSource(t *testing.T, table uint32, src netip.Addr, when string) {
+	t.Helper()
+	r, err := vrfDefaultRoute(table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil || !r.Src.Equal(src.AsSlice()) {
+		t.Errorf("%s: table %d default route = %+v, want source %s", when, table, r, src)
+	}
+}
