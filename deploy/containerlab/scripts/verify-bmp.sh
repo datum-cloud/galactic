@@ -126,7 +126,7 @@ check_session() {
   else
     echo "FAIL ${who}: ${local_ip} -> ${remote_ip} latest Peer Up/Down is '${action:-none}'"
     fail=1
-    [[ -z "${action}" ]] && missing_peerup=1
+    if [[ -z "${action}" ]]; then missing_peerup=1; fi
   fi
 }
 
