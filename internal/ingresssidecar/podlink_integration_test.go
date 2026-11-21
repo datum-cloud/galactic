@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
@@ -167,7 +168,7 @@ func checkLocalRouteHealed(t *testing.T, vrfName, pod string, table uint32, gw, 
 	if err := configurePodLink(vrfName, pod, []netip.Addr{gw}, hostLL, local); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := hasLocalRoute(table, pl.Attrs().Index, gw); err != nil || !ok {
+	if ok, err := waitLocalRoute(table, pl.Attrs().Index, gw); err != nil || !ok {
 		t.Errorf("table %d local route for %s on %s after the heal = %t, %v; want present", table, gw, pod, ok, err)
 	}
 }
@@ -193,7 +194,7 @@ func checkConfiguredLink(t *testing.T, vrfName, pod string, table uint32, gw, ho
 	}
 	// The second configure must not drop the gateway's local route, or the
 	// pod resolves its own gateway as a neighbor.
-	if ok, err := hasLocalRoute(table, pl.Attrs().Index, gw); err != nil || !ok {
+	if ok, err := waitLocalRoute(table, pl.Attrs().Index, gw); err != nil || !ok {
 		t.Errorf("table %d local route for %s on %s = %t, %v; want present", table, gw, pod, ok, err)
 	}
 	r, ok := localRoutes(t, table)[backend]
@@ -262,5 +263,20 @@ func checkDefaultSource(t *testing.T, table uint32, src netip.Addr, when string)
 	}
 	if r == nil || !r.Src.Equal(src.AsSlice()) {
 		t.Errorf("%s: table %d default route = %+v, want source %s", when, table, r, src)
+	}
+}
+
+// waitLocalRoute waits up to 2s for table's local route for a on the link
+// with index linkIdx. The kernel installs the local route of an address
+// added with NODAD from its address configuration work, shortly after the
+// add returns.
+func waitLocalRoute(table uint32, linkIdx int, a netip.Addr) (bool, error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ok, err := hasLocalRoute(table, linkIdx, a)
+		if err != nil || ok || time.Now().After(deadline) {
+			return ok, err
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
