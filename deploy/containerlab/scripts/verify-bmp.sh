@@ -24,6 +24,7 @@ METRICS_PORT=9179
 PEER_STATE_MSG=10
 
 fail=0
+missing_peerup=0
 
 gauge=$(docker exec "${RR_NODE}" curl -sf "localhost:${METRICS_PORT}/metrics" |
   awk -v st="station=\"${STATION}\"" '/^galactic_router_bmp_station_up/ && index($0, st) {print $NF}')
@@ -55,6 +56,10 @@ fi
 # count, then rotation time, with the live file last, puts them in order. Each
 # line carries the CRI prefix "<time> <stream> <P|F> ", and a line the runtime
 # split is a run of P parts ending in an F.
+#
+# GoBMP also writes to the same stream, on stderr, each Peer Up it could not
+# parse and so never published. Those come out as "reject <time> <error>"
+# lines, which name no session, so a missing Peer Up can be traced to one.
 # The running pod that is not being deleted: the collector's Deployment uses
 # Recreate, so a terminating pod can still be listed while its replacement
 # starts.
@@ -95,6 +100,9 @@ for raw in sys.stdin:
         partial += parts[3]
         continue
     line, partial = partial + parts[3], ""
+    if "fail to recover BMP Peer Up" in line:
+        print("reject", parts[0], line[line.find("fail to recover"):])
+        continue
     if not line.startswith("{"):
         continue
     try:
@@ -118,6 +126,7 @@ check_session() {
   else
     echo "FAIL ${who}: ${local_ip} -> ${remote_ip} latest Peer Up/Down is '${action:-none}'"
     fail=1
+    [[ -z "${action}" ]] && missing_peerup=1
   fi
 }
 
@@ -180,5 +189,20 @@ for remote, n in json.load(sys.stdin).items():
     done <<<"${sessions}"
   done
 done
+
+# A session with no Peer Up at all usually means the collector received one
+# and could not parse it. FRR 10.7.1 can lose a session's received OPEN when
+# a connection collision is resolved in favour of its own outgoing
+# connection, and from then on sends a 19-byte placeholder in its place,
+# which GoBMP rejects. See docs/verification.md, "BMP collector".
+if [[ "${missing_peerup}" == 1 ]]; then
+  rejects=$(awk '$1 == "reject"' <<<"${states}")
+  if [[ -n "${rejects}" ]]; then
+    echo "GoBMP rejected these Peer Up messages:"
+    sed 's/^reject /  /' <<<"${rejects}"
+  else
+    echo "GoBMP logged no rejected Peer Up message"
+  fi
+fi
 
 exit "${fail}"
