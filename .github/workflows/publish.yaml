@@ -182,12 +182,7 @@ jobs:
       platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
-  # galactic-vrf, the #855 ingress sidecar, has no entry in
-  # publish-kustomize-bundles below. config/galactic-vrf is a Component for a
-  # consumer's Envoy Deployment, and it ships inside the bundle with the rest
-  # of config/ (bundle-path), but nothing here stamps this image's tag into
-  # it: the Component keeps its `latest` tag until the consumer sets one with
-  # `images:`.
+  # Nothing here stamps this image's tag into the config/galactic-vrf Component.
   publish-galactic-vrf-image:
     needs: platforms
     permissions:
