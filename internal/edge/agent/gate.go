@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -377,7 +378,7 @@ func (a *Agent) ended(rt *galacticv1alpha1.EdgeRoute, inst *galacticv1alpha1.Edg
 
 // commitGate writes one gate verdict in a commit of the link's VPC scope.
 func (a *Agent) commitGate(l *gateLink, prefix netip.Prefix, v verdict) error {
-	err := a.commit(ownership.VPCScope(l.vpc), func() error {
+	err := a.gateCommit(l.vpc, v.set != nil, func() error {
 		if v.set != nil {
 			return a.Gates.Set(l.index, prefix, *v.set)
 		}
@@ -389,12 +390,50 @@ func (a *Agent) commitGate(l *gateLink, prefix netip.Prefix, v verdict) error {
 	return nil
 }
 
-// commit runs mutate in an incremental commit of scope with this process's
-// ticket. A stale ticket means a writer that does not own the scope, such as
-// garbage collection, wrote it since: the scope is still this process's, so
-// the commit runs again from a fresh ticket. Only losing the scope to
-// another owner marks it lost.
-func (a *Agent) commit(scope string, mutate func() error) error {
+// EdgeGateScope is the ownership scope of the forwarding gates of vpc's
+// edge links on the node. Only galactic-edge processes own it, each taking
+// it over from an older one, so a process a newer one fenced cannot reopen a
+// gate the newer one closed. It is separate from the VPC's scope, which
+// Galactic Worker owns once galactic-edge hands its edge links to Worker.
+func EdgeGateScope(vpc string) string {
+	return "edge-gates-" + strings.TrimPrefix(ownership.VPCScope(vpc), "vpc-")
+}
+
+// gateCommit runs mutate in a commit of vpc's edge gate scope. A gate's rows
+// are self-contained, so every commit is a snapshot commit: one that failed
+// part-way leaves nothing a later one must reconcile first. When opening is
+// set, or the mutation only reads, it first checks that no older
+// galactic-edge process still holds vpc's own scope, where gates were
+// committed before the gate scope existed: until this process has taken that
+// scope over or handed it to Worker, an older process could still hold a gate
+// open, so nothing is opened or confirmed closed.
+func (a *Agent) gateCommit(vpc string, opening bool, mutate func() error) error {
+	if opening {
+		rec, err := a.Ownership.Read(ownership.VPCScope(vpc))
+		if err != nil {
+			return err
+		}
+		if olderIncarnation(rec.Owner, a.Owner) {
+			return fmt.Errorf("%w: an older galactic-edge process still owns %s", ownership.ErrTransitioning,
+				ownership.VPCScope(vpc))
+		}
+		if strings.HasPrefix(rec.Owner, ownerPrefix) && rec.Owner != a.Owner {
+			// A newer galactic-edge process holds the VPC: this one was
+			// fenced and never opens a gate again.
+			a.markLost(EdgeGateScope(vpc))
+			return fmt.Errorf("%w: a newer galactic-edge process owns %s", ownership.ErrNotOwner,
+				ownership.VPCScope(vpc))
+		}
+	}
+	return a.commitAs(EdgeGateScope(vpc), true, mutate)
+}
+
+// commitAs runs mutate in a commit of scope with this process's ticket, a
+// snapshot commit when snapshot is set. A stale ticket means a writer that
+// does not own the scope, such as garbage collection, wrote it since: the
+// scope is still this process's, so the commit runs again from a fresh
+// ticket. Only losing the scope to another owner marks it lost.
+func (a *Agent) commitAs(scope string, snapshot bool, mutate func() error) error {
 	var err error
 	for range 2 {
 		var t ownership.Ticket
@@ -402,7 +441,11 @@ func (a *Agent) commit(scope string, mutate func() error) error {
 			return err
 		}
 		var next ownership.Ticket
-		next, err = a.Ownership.Commit(t, mutate)
+		if snapshot {
+			next, err = a.Ownership.CommitSnapshot(t, mutate)
+		} else {
+			next, err = a.Ownership.Commit(t, mutate)
+		}
 		if err == nil {
 			a.tickets[scope] = next
 			return nil
@@ -449,7 +492,7 @@ func (a *Agent) confirmClosed(vpc string, prefix netip.Prefix, epoch int64) (boo
 	if vpc == "" {
 		return closed, check()
 	}
-	if err := a.commit(ownership.VPCScope(vpc), check); err != nil {
+	if err := a.gateCommit(vpc, true, check); err != nil {
 		return false, fmt.Errorf("confirm gate %s closed at epoch %d: %w", prefix, epoch, err)
 	}
 	return closed, nil
