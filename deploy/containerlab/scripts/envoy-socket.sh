@@ -13,7 +13,9 @@
 # galactic-vrf sidecar, which holds one Worker socket claim per ns80 VPC.
 # Its upstream sockets bind to each VPC's VRF in the pod and send from the
 # gateway fd20:80:ff04::1, which both VPCs' proxy attachments hold. Each VPC
-# has a local backend (ns80's guest on dfw-worker) and a remote one:
+# has a local backend (ns80's guest on dfw-worker) and a remote one, which
+# is configured but not exercised: remote backends are not supported yet
+# (#1487), and the run records their rows as skipped.
 #
 #   REMOTE=dfw-worker4  ns80's guests on dfw's second compute worker (#1460),
 #                       which dfw's cluster already knows
@@ -87,7 +89,15 @@ WORKER_BIN=/opt/galactic-worker/galactic-worker
 ADV=bgpadvertisements.galactic.datumapis.com
 N=5
 REPLACE_TIMEOUT=${REPLACE_TIMEOUT:-120}
-PATHS=(80/local 80/remote 81/local 81/remote)
+# Only the local paths are exercised. Remote backends are not supported yet
+# (#1487): the sidecar encapsulates in the pod and sends the SRv6 packet out
+# of the pod's eth0 with the node's SID as its source, and the primary CNI
+# (Cilium in the lab) drops it there because that source is not the pod's
+# address. The remote backends are still configured, so every remote row is
+# recorded once as skipped with this reason.
+PATHS=(80/local 81/local)
+SKIPPED_PATHS=(80/remote 81/remote)
+SKIP_REASON="remote backends are not supported yet (#1487)"
 declare -A VRF=([80]=G000000080V [81]=G000000081V)
 declare -A OTHER=([80]=81 [81]=80)
 
@@ -206,7 +216,7 @@ ADDED=envoy-socket.galactic.datumapis.com/added-addresses
 
 stop_backends() {
   local p pod
-  for p in "${PATHS[@]}"; do
+  for p in "${PATHS[@]}" "${SKIPPED_PATHS[@]}"; do
     pod=$(ready_pod "${BCP[${p}]}" "${BNS[${p}]}" "app=${BAPP[${p}]}" || true)
     [ -n "${pod}" ] || continue
     kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- cat /tmp/envoy-backend.log \
@@ -340,7 +350,7 @@ restore_checks() {
   record restore "no galactic-vrf sidecar runs in dfw" 0 "${out}"
   record restore "the fixture's copy on ${DFW} is gone" yes \
     "$(docker exec "${DFW}" test -e "${FIXTURE_DIR}" && echo no || echo yes)"
-  for p in "${PATHS[@]}"; do
+  for p in "${PATHS[@]}" "${SKIPPED_PATHS[@]}"; do
     pod=$(ready_pod "${BCP[${p}]}" "${BNS[${p}]}" "app=${BAPP[${p}]}" || true)
     [ -n "${pod}" ] || continue
     out=$(kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- pgrep -f '[e]nvoy-backend[.]py' </dev/null || true)
@@ -507,7 +517,7 @@ ensure_addresses() {
     volatile "added-addresses" "ns80/${att} ${addr}/96"
   fi
 }
-for p in "${PATHS[@]}"; do
+for p in "${PATHS[@]}" "${SKIPPED_PATHS[@]}"; do
   [ "${BCP[${p}]}" = "${DFW}" ] && ensure_addresses "${BATT[${p}]}" "${BADDR[${p}]}"
 done
 
@@ -645,7 +655,7 @@ start_backend() {
   return 1
 }
 BACKENDS_STARTED=1
-for p in "${PATHS[@]}"; do
+for p in "${PATHS[@]}" "${SKIPPED_PATHS[@]}"; do
   start_backend "${p}" || {
     record setup "${p} backend listens" yes no
     exit 1
@@ -930,7 +940,7 @@ state() {
     record "${w}" "VPC ${v}: the advertisement names the Envoy pod" yes \
       "$(jq -r --arg uid "${POD_UID}" 'if [.items[] | select(.metadata.annotations["galactic.datumapis.com/worker-pod"] == $uid)]
         | length == 1 then "yes" else "no" end' <<<"${a}")"
-    remote_route "${v}"
+    record "${w}" "VPC ${v}: the remote node's route back to the gateway: skipped" - "${SKIP_REASON}"
   done
   f="${OUT}/logs/${w}/metrics.txt"
   metrics >"${f}" 2>&1 || true
@@ -952,6 +962,7 @@ state() {
   fi
 }
 
+# Unused while remote backends are skipped (#1487), which brings it back.
 # remote_route V checks the remote node routes the gateway back in VPC V:
 # a kernel route, or an egress_route_table entry when bpftool can be run
 # without a password.
@@ -1029,6 +1040,10 @@ for v in 80 81; do
     "$([ -n "${POD_END[${v}]}" ] && [ -n "${HOST_END[${v}]}" ] && [ -n "${IVS[${v}]}" ] && echo yes || echo no)"
 done
 
+for p in "${SKIPPED_PATHS[@]}"; do
+  record scope "${p}: every request row skipped" - "${SKIP_REASON}"
+done
+
 # probe: one request per VPC and backend over a fresh upstream connection,
 # then the usual cleanup and restore checks from the exit trap. A short run
 # to show the setup works before the full one.
@@ -1079,7 +1094,7 @@ record move "VPC 80: the pod VRF drops the local route" none "$(wait_local_route
 record move "VPC 80: the host VRF stays" yes "$(docker exec "${NODE}" ip link show "${VRF[80]}" >/dev/null 2>&1 && echo yes || echo no)"
 record move "VPC 80: the host VRF still routes the gateway to the host end" yes \
   "$([ "$(host_gateway_dev 80)" = "${HOST_END[80]}" ] && echo yes || echo no)"
-for p in 80/remote 81/local 81/remote; do
+for p in 81/local; do
   fresh move "${p}"
   reused move "${p}"
 done

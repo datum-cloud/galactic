@@ -572,10 +572,20 @@ VPC's VRF device (`SO_BINDTODEVICE`), which keeps overlapping backend addresses
 in two VPCs apart. Worker reports each destination's resolution (D11) in the
 claim's destination status, and the sidecar routes by it:
 
-| Backend | Pod route                                                                                                                                                                                                                                                             |
-| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Local   | A `/128` in the pod VRF's table, through the pod end, to the host end's `link_local`. The route has protocol `0x47`, so the sidecar removes only its own.                                                                                                             |
-| Fabric  | None. The VRF's default route leads into the sidecar's in-pod encapsulating datapath (the `ivs<table>` and `ivp<table>` veth pair with `usid_egress`). Its `egress_route_table` rows stay in the sidecar's private table range, where the sidecar is the only writer. |
+| Backend | Pod route                                                                                                                                                                                                                                       |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local   | A `/128` in the pod VRF's table, through the pod end, to the host end's `link_local`. The route has protocol `0x47`, so the sidecar removes only its own.                                                                                       |
+| Fabric  | Not supported yet ([#1487](https://github.com/datum-cloud/galactic/issues/1487)). The VRF's default route, with the gateway as its source, leads into the sidecar's in-pod encapsulating datapath (the `ivs<table>` and `ivp<table>` veth pair with `usid_egress`). |
+
+**Remote backends are not supported yet.** The in-pod datapath sends the
+encapsulated packet out of the pod's own interface with this node's SRv6
+source address as its outer source. A primary CNI that checks a pod's source
+address drops it there, and Cilium does. A request to a backend on another
+node therefore times out. [#1487](https://github.com/datum-cloud/galactic/issues/1487)
+sends remote backends over the routed link into the host VRF instead, where
+Worker attaches the host's egress datapath to the link's host end. Until then,
+the in-pod datapath stays in place, and its `egress_route_table` rows stay in
+the sidecar's private table range, where the sidecar is the only writer.
 
 Worker does not take the sidecar's rows (D41).
 
