@@ -125,18 +125,47 @@ json.dump(d, sys.stdout)' "${STATE}/nat-ds.json" | kci replace -f - >/dev/null
   exit "${rc}"
 }
 
+# nat_local_state_gone checks that galactic-nat, restarted without its Worker
+# socket, removed its pinned NAT-end links and the rows of nat_local_pair,
+# nat_local_return and nat_vlan_egress on its own, within 60 s of its
+# rollout. It reports how many Local pairs still exist at that point: the
+# cleanup must not wait for Worker to withdraw them.
+nat_local_state_gone() {
+  local deadline=$((SECONDS + 60)) pid pins rows m n pairs
+  pid=$(docker inspect -f '{{.State.Pid}}' "${EDGE}")
+  pairs=$(docker exec "${EDGE}" ip -o link show type veth | grep -c 'alias galactic-local:' || true)
+  while :; do
+    pins=$(docker exec "${EDGE}" sh -c 'ls /sys/fs/bpf/galactic-nat/links 2>/dev/null | grep "^local-" || true')
+    rows=""
+    for m in nat_local_pair nat_local_return nat_vlan_egress; do
+      n=$(sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic-nat/${m}" |
+        python3 -c 'import json,sys; print(len(json.load(sys.stdin)))') || return 1
+      [ "${n}" = 0 ] || rows="${rows} ${m}=${n}"
+    done
+    [ -n "${pins}" ] || [ -n "${rows}" ] || break
+    if [ ${SECONDS} -ge ${deadline} ]; then
+      echo "FAIL: galactic-nat left its Local state after restarting without Worker: pins [${pins}] rows [${rows}]" >&2
+      return 1
+    fi
+    sleep 2
+  done
+  echo "   galactic-nat removed its local link pins and pair rows at startup (${pairs} Local pair links still present)"
+}
+
 # teardown_local removes what Worker and galactic-nat's Local integration
 # left on dfw-worker2, in the order that lets each owner remove its own:
 # with galactic-nat no longer renewing its Worker session, Worker withdraws
 # its claims once the session lease expires (120 s), and the Local module
 # removes the pairs, its tc filters and the egress_local_shard rows. Only
-# then is Worker stopped. galactic-nat leaves its pinned NAT-end links and
-# pair rows behind when its Worker integration is switched off, and Worker
-# leaves Local's pinned maps, so those are removed here. Last, the handback
+# then is Worker stopped. galactic-nat, restarted without its Worker socket,
+# removes its own pinned NAT-end links and pair rows at startup, which is
+# checked first, while Local's pairs still exist. Worker leaves Local's
+# pinned maps, so those are removed here. Last, the handback
 # returns the VPC scopes Worker took over (docs/worker/operations.md), and
 # galactic-router on the node restarts to write their tenant routes again.
 teardown_local() {
   local deadline=$((SECONDS + 300)) pid
+  nat_local_state_gone || return 1
   echo "   waiting for Worker to withdraw galactic-nat's claims (session lease 120 s)"
   until [ -z "$(docker exec "${EDGE}" ip -o link show type veth | grep 'alias galactic-local:' || true)" ]; do
     if [ ${SECONDS} -ge ${deadline} ]; then
@@ -147,22 +176,8 @@ teardown_local() {
   done
   echo "   Local's pairs are gone"
   NODES="${EDGE}" "${SCRIPT_DIR}/worker-fabric.sh" stop || return 1
-  pid=$(docker inspect -f '{{.State.Pid}}' "${EDGE}")
-  docker exec "${EDGE}" sh -c 'rm -f /sys/fs/bpf/galactic-nat/links/local-*' || return 1
-  local m keys
-  for m in nat_local_pair nat_local_return nat_vlan_egress; do
-    keys=$(sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic-nat/${m}" 2>/dev/null |
-      python3 -c 'import json,sys
-for e in json.load(sys.stdin):
-    print(" ".join(b[2:] for b in e["key"]))') || return 1
-    while read -r k; do
-      [ -n "${k}" ] || continue
-      # shellcheck disable=SC2086 # the key is space-separated hex bytes
-      sudo -n bpftool map delete pinned "/proc/${pid}/root/sys/fs/bpf/galactic-nat/${m}" key hex ${k} || return 1
-    done <<<"${keys}"
-  done
   docker exec "${EDGE}" rm -rf /sys/fs/bpf/galactic-local || return 1
-  echo "   removed galactic-nat's pinned local links and pair rows, and Local's pin directory"
+  echo "   removed Local's pin directory"
   echo "   handing ${EDGE}'s VPC scopes back"
   docker exec "${EDGE}" /opt/galactic-worker/galactic-worker handback --node-name "${EDGE}" || return 1
   kc -n galactic-system delete pod -l app.kubernetes.io/name=galactic-router \

@@ -267,7 +267,23 @@ func (k *kernelLocal) Prune(keep []localTarget) error {
 			}
 		}
 	}
+	// nat_vlan_egress serves only Local forwards, and syncVLANs is its only
+	// writer, so with no pair to keep none of its rows is needed.
+	if len(keep) == 0 {
+		vlans, err := k.vlans.All()
+		if err != nil {
+			return err
+		}
+		for ifx := range vlans {
+			if err := k.vlans.Delete(ifx); err != nil {
+				return err
+			}
+		}
+	}
 	entries, err := os.ReadDir(k.linkDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("read %s: %w", k.linkDir, err)
 	}
@@ -281,3 +297,57 @@ func (k *kernelLocal) Prune(keep []localTarget) error {
 	}
 	return nil
 }
+
+// openPinnedLocal opens the Local state a previous process pinned under
+// pinDir, for a start that has no datapath loaded to prune it with. A missing
+// map or link directory is read as empty, and nothing is created, so a node
+// that never ran the integration is left as it is. The result only prunes:
+// it holds no program to attach. close releases the opened maps.
+func openPinnedLocal(pinDir string) (plumb *kernelLocal, closeMaps func(), err error) {
+	var opened []*ebpf.Map
+	closeMaps = func() {
+		for _, m := range opened {
+			_ = m.Close()
+		}
+	}
+	open := func(name string) (natmap.Table, error) {
+		m, err := ebpf.LoadPinnedMap(filepath.Join(pinDir, name), nil)
+		if errors.Is(err, os.ErrNotExist) {
+			return emptyTable{}, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("open the pinned map %s: %w", name, err)
+		}
+		opened = append(opened, m)
+		return natmap.KernelTable{Map: m}, nil
+	}
+	tables := make([]natmap.Table, 0, 3)
+	for _, name := range []string{"nat_local_pair", "nat_local_return", "nat_vlan_egress"} {
+		t, err := open(name)
+		if err != nil {
+			closeMaps()
+			return nil, nil, err
+		}
+		tables = append(tables, t)
+	}
+	return &kernelLocal{
+		linkDir: filepath.Join(pinDir, "links"),
+		tables:  natmap.LocalTables{Pair: tables[0], Return: tables[1]},
+		vlans:   natmap.VLANTable{Table: tables[2]},
+	}, closeMaps, nil
+}
+
+// emptyTable is a map that holds nothing: a pinned map that does not exist.
+type emptyTable struct{}
+
+func (emptyTable) Put(any, any) error    { return errors.New("the map is not pinned") }
+func (emptyTable) Lookup(any, any) error { return ebpf.ErrKeyNotExist }
+func (emptyTable) Delete(any) error      { return ebpf.ErrKeyNotExist }
+func (emptyTable) Iterate() natmap.Iterator {
+	return emptyIterator{}
+}
+
+type emptyIterator struct{}
+
+func (emptyIterator) Next(any, any) bool { return false }
+func (emptyIterator) Err() error         { return nil }
