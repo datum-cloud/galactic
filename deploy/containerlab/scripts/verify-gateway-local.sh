@@ -433,6 +433,7 @@ cleanup() {
     kc -n ns80 exec deploy/gwlocal-w2 -c vmm -- rm -f /tmp/hold
   fi
   if [ "${CLEAN_RESPONDERS}" -eq 1 ]; then
+    for j in "${RESPONDER_JOBS[@]}"; do kill "${j}" 2>/dev/null || true; done
     for c in guest-a guest-a2; do
       kc -n ns80 exec "deploy/${c}" -- sh -c 'pkill -f "TCP6-LISTEN:8[01]," ; pkill -f "UDP6-RECVFROM:8[01]," ; true'
     done
@@ -732,16 +733,33 @@ for c in vpc-a vpc-a2; do
     -p '{"spec":{"ingressPolicyRef":{"name":"gateway-local-ingress"},"egressPolicyRef":{"name":"gateway-local-egress"}}}' >/dev/null
 done
 CLEAN_RESPONDERS=1
+# The responder guests.yaml runs, which is ns60's
+# (resources/tenants/ns60/base/backend.yaml). A process started in a
+# kubectl exec dies when the exec ends, setsid or not, so each guest's exec
+# stays open as a background job of this script for the whole run, and
+# cleanup ends it.
+RESPONDER_JOBS=()
 for spec in "guest-a dfw-worker" "guest-a2 dfw-worker4"; do
   read -r c node <<<"${spec}"
-  # The responder guests.yaml runs, which is ns60's (resources/tenants/ns60/base/backend.yaml).
-  kci -n ns80 exec "deploy/${c}" -- env BACKEND="${node}" sh -s <<'EOF'
-reply='echo "$BACKEND $SOCAT_PEERADDR"'
+  # shellcheck disable=SC2016 # expanded inside the guest
+  kc -n ns80 exec "deploy/${c}" -- env BACKEND="${node}" sh -c '
+reply="echo \"\$BACKEND \$SOCAT_PEERADDR\""
 for p in 80 81; do
-  setsid socat TCP6-LISTEN:${p},reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null </dev/null >/dev/null 2>&1 &
-  setsid socat UDP6-RECVFROM:${p},reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null </dev/null >/dev/null 2>&1 &
+  socat TCP6-LISTEN:${p},reuseaddr,fork SYSTEM:"$reply"!!/dev/null </dev/null >/dev/null 2>&1 &
+  socat UDP6-RECVFROM:${p},reuseaddr,fork SYSTEM:"$reply"!!/dev/null </dev/null >/dev/null 2>&1 &
 done
-EOF
+wait' >/dev/null 2>&1 &
+  RESPONDER_JOBS+=($!)
+done
+# Each guest must listen on TCP and UDP ports 80 and 81 before the matrix.
+for c in guest-a guest-a2; do
+  for i in $(seq 30); do
+    n=$(kc -n ns80 exec "deploy/${c}" -- sh -c 'ss -Hlnut 2>/dev/null' | grep -cE '[]:]8[01] ' || true)
+    [ "${n}" -ge 4 ] && break
+    sleep 1
+  done
+  [ "${n}" -ge 4 ] || die "${c}'s responders are not listening on TCP and UDP ports 80 and 81 (${n} of 4 sockets)"
+  record PASS "setup ${c} responders" "listening on TCP and UDP ports 80 and 81"
 done
 CLEAN_SERVICES=1
 kci apply -f - >/dev/null <"${FIXTURE}/networkservices.yaml"
