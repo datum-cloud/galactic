@@ -43,6 +43,14 @@ so the run records the process's effective capabilities and checks that they
 include `NET_ADMIN`, `SYS_PTRACE`, `SYS_ADMIN` and `BPF`, and that the
 sidecar's session reports `local.socket` and `fabric.srv6` available.
 
+The lab runs galactic-controller from the integration branch, which does not
+yet certify a proxy attachment's node from its pod. For the case it builds
+this checkout's galactic-controller, sets it on dfw's Deployment, and puts the
+recorded image back in its cleanup; the restore rows check the Deployment
+matches its deployed spec again. The case records the Envoy pod in the proxy
+attachments' `status.podName`, as NSO does, names a replacement pod on the same
+attachments, and checks that the controller certifies both on `dfw-worker`.
+
 Before it changes anything it checks that the lab runs, that `ns80` passes
 `verify-ns80.sh`, that this checkout has `galactic-worker handback`, and that
 no `ns80-envoy`, Worker, Worker-owned scope, Worker advertisement, Local link
