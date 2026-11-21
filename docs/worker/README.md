@@ -21,6 +21,9 @@ shard ([Local NAT shards](contract.md#local-nat-shards)).
 [#1434](https://github.com/datum-cloud/galactic/issues/1434) makes Worker the
 owner of each node and VPC scope, with CNI writing that state under the fence
 ([ownership](ownership.md#node-and-vpc-scope)).
+[#1440](https://github.com/datum-cloud/galactic/issues/1440) makes
+galactic-edge, run with `--worker-socket`, claim its edge links from Worker
+([connector](connector.md)).
 [#1441](https://github.com/datum-cloud/galactic/issues/1441) packages Worker
 for dedicated and combined placement, adds its operator diagnostics and the
 handback that returns its scopes ([operations](operations.md)).
@@ -29,7 +32,7 @@ handback that returns its scopes ([operations](operations.md)).
 | -------------------------------------- | ----------------------------------------------------------------------------------------- |
 | [Service contract](contract.md)        | Claims, operations, state model, errors, versions, trusted sources and worked transitions |
 | [Host state ownership](ownership.md)   | Writer inventory, one authority per resource class, bootstrap, adoption and transfer      |
-| [Connector decision](connector.md)     | Which component is the provider connector, and its entry point                            |
+| [Connector](connector.md)              | Which component is the provider connector, its claims, transfer step and rollback         |
 | [Branch workflow](branch-workflow.md)  | Base and start SHAs, PR target, CI, artifact tags and how Tasks close                     |
 | [Qualification plan](qualification.md) | Platform, handoffs, workload, comparison method and limits                                |
 | [Operations](operations.md)            | Install, diagnostics, flow tracing, drain, handback, uninstall and rollback               |
@@ -78,3 +81,6 @@ PR. "Confirmed" means the product owner approved the decision on the date given.
 | D34 | `galactic-worker handback` relinquishes a stopped Worker's scopes to a `galactic-handback:` label; only it makes them reclaimable                 | Accepted             | [Ownership](ownership.md#handing-scopes-back)               |
 | D35 | Combined placement is a `node=edge` node with the service opt-ins and pinned guests; no new label                                                 | Accepted             | [Labels](../operations/node-labels.md#combined-placement)   |
 | D36 | Operators read Worker's state with `galactic-worker inspect` through `kubectl exec`, and its gauges; no network endpoint serves it                | Accepted             | [Operations](operations.md#read-the-diagnostics)            |
+| D37 | A connector claim names galactic-edge's host link (`edge_link`); Worker registers it and never creates or deletes the link                        | Proposed             | [Connector](connector.md#connector-claims)                  |
+| D38 | Forwarding gates stay with galactic-edge, committed under an edge gate scope only galactic-edge processes own                                     | Proposed             | [Connector](connector.md#ownership-transfer)                |
+| D39 | galactic-edge claims its live links, then gives its VPC scope to Worker with `Relinquish`; it takes a handed-back scope with `Takeover`           | Proposed             | [Connector](connector.md#rollback)                          |

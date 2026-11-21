@@ -992,6 +992,13 @@ func (m *masque) rowSharedCancel(t *testing.T) {
 // is covered by internal/gc's TestEdgeAttachmentKeepsVRF and
 // TestInUseVRFIsNotRemoved.
 func (m *masque) rowMaintenance(t *testing.T) {
+	if m.l.edgeUsesWorker(t) {
+		// The row waits for galactic-router's GC to remove a canary VRF.
+		// With Worker on the node, Worker owns that VRF's scope, so the
+		// router's GC leaves it to Worker (docs/worker/ownership.md).
+		t.Skip("galactic-edge runs with --worker-socket; the row expects router GC, " +
+			"https://github.com/datum-cloud/galactic/issues/1476")
+	}
 	l, ctx := m.l, context.Background()
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		old := m.client(t, mt.tn, 2)
