@@ -136,16 +136,31 @@ func tenantEndMAC(nat netlink.Link, tenantName string) (net.HardwareAddr, error)
 	if tenantName != "" {
 		tenant, err = netlink.LinkByName(tenantName)
 	} else {
-		var peer int
-		peer, err = netlink.VethPeerIndex(&netlink.Veth{LinkAttrs: *nat.Attrs()})
-		if err == nil {
-			tenant, err = netlink.LinkByIndex(peer)
-		}
+		tenant, err = vethPeer(nat, netlink.LinkByIndex)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("find the tenant end of %s: %w", nat.Attrs().Name, err)
 	}
 	return tenant.Attrs().HardwareAddr, nil
+}
+
+// vethPeer returns veth l's peer in this namespace, looked up by byIndex. A
+// veth's IFLA_LINK is its peer's ifindex, and it carries IFLA_LINK_NETNSID
+// only when the peer is in another namespace; reading them needs no ethtool
+// ioctl, which under load failed intermittently.
+func vethPeer(l netlink.Link, byIndex func(int) (netlink.Link, error)) (netlink.Link, error) {
+	a := l.Attrs()
+	if a.NetNsID >= 0 || a.ParentIndex <= 0 {
+		return nil, fmt.Errorf("%s has no veth peer in this namespace", a.Name)
+	}
+	peer, err := byIndex(a.ParentIndex)
+	if err != nil {
+		return nil, err
+	}
+	if peer.Attrs().ParentIndex != a.Index {
+		return nil, fmt.Errorf("link %d is not %s's veth peer", a.ParentIndex, a.Name)
+	}
+	return peer, nil
 }
 
 // syncVLANs writes a nat_vlan_egress row for every VLAN device on the host and
