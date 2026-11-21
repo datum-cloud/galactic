@@ -344,14 +344,21 @@ type pair struct {
 func (h *host) readPair(p pairWant) (pair, bool) {
 	t, nat := h.byName[p.tenant], h.byName[p.nat]
 	if t == nil || nat == nil || t.Type() != linkVeth || nat.Type() != linkVeth ||
-		t.Attrs().Alias != alias(p.key) || nat.Attrs().Alias != alias(p.key) {
-		return pair{}, false
-	}
-	peer, err := netlink.VethPeerIndex(t.(*netlink.Veth))
-	if err != nil || peer != nat.Attrs().Index {
+		t.Attrs().Alias != alias(p.key) || nat.Attrs().Alias != alias(p.key) || !vethPeers(t, nat) {
 		return pair{}, false
 	}
 	return pair{tenant: t, nat: nat}, true
+}
+
+// vethPeers reports whether veths a and b, both in this namespace, are each
+// other's peer. A veth's IFLA_LINK is its peer's ifindex, and it carries
+// IFLA_LINK_NETNSID only when the peer is in another namespace. Reading
+// both from the link dump, rather than asking ethtool for the peer, keeps
+// the answer to the one snapshot and needs no ioctl, which under load
+// failed intermittently and made an existing pair look missing.
+func vethPeers(a, b netlink.Link) bool {
+	aa, ba := a.Attrs(), b.Attrs()
+	return aa.NetNsID < 0 && ba.NetNsID < 0 && aa.ParentIndex == ba.Index && ba.ParentIndex == aa.Index
 }
 
 // collision returns an error when a link named name belongs to another claim
@@ -524,14 +531,11 @@ func (h *host) readRouted(r routedWant, podNS netns.NsHandle) (routedLink, bool)
 		return routedLink{}, false
 	}
 	want, err := netlink.GetNetNsIdByFd(int(podNS))
-	if err != nil || want < 0 || l.Attrs().NetNsID != want {
+	if err != nil || want < 0 || l.Attrs().NetNsID != want || l.Attrs().ParentIndex <= 0 {
 		return routedLink{}, false
 	}
-	peer, err := netlink.VethPeerIndex(l.(*netlink.Veth))
-	if err != nil {
-		return routedLink{}, false
-	}
-	return routedLink{host: l, podIndex: peer}, true
+	// IFLA_LINK is the pod end's ifindex in the pod's namespace.
+	return routedLink{host: l, podIndex: l.Attrs().ParentIndex}, true
 }
 
 // setUpInPod marks the pod end name in podNS with a and sets it up. The pod
