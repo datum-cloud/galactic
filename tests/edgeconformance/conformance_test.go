@@ -1444,6 +1444,28 @@ func rowGC(t *testing.T, l *lab, a *side) {
 }
 
 // gcInterval reads galactic-router's GC interval from its DaemonSet.
+// edgeAgentDaemonSet is galactic-edge's DaemonSet in systemNS.
+const edgeAgentDaemonSet = "galactic-edge"
+
+// edgeUsesWorker reports whether galactic-edge runs with --worker-socket, so
+// Galactic Worker registers its links and owns the VPC scopes on its nodes.
+func (l *lab) edgeUsesWorker(t *testing.T) bool {
+	t.Helper()
+	var ds appsv1.DaemonSet
+	if err := l.c.Get(context.Background(), client.ObjectKey{Namespace: systemNS, Name: edgeAgentDaemonSet},
+		&ds); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range ds.Spec.Template.Spec.Containers {
+		for _, arg := range c.Args {
+			if strings.HasPrefix(arg, "--worker-socket") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (l *lab) gcInterval(t *testing.T) time.Duration {
 	t.Helper()
 	var ds appsv1.DaemonSet
