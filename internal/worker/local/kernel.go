@@ -111,7 +111,6 @@ type Kernel struct {
 	LinkMTU int
 	// Shards is egress_local_shard, or nil when the uSID datapath has none.
 	Shards LocalShards
-
 	// edge is the edge-link host access; the pinned maps under PinDir when
 	// nil.
 	edge edgeHost

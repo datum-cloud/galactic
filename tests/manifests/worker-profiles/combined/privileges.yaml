@@ -250,6 +250,9 @@ roles:
     - galactic.datumapis.com/edgeattachments:get
     - galactic.datumapis.com/edgeattachments:list
     - galactic.datumapis.com/edgeattachments:watch
+    - galactic.datumapis.com/egressshards:get
+    - galactic.datumapis.com/egressshards:list
+    - galactic.datumapis.com/egressshards:watch
     - galactic.datumapis.com/servicevipbindings:get
     - galactic.datumapis.com/servicevipbindings:list
     - galactic.datumapis.com/servicevipbindings:watch

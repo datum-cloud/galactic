@@ -25,6 +25,12 @@ rules:
   - apiGroups: ["galactic.datumapis.com"]
     resources: ["bgprouters"]
     verbs: ["get", "list", "watch"]
+  # Shard destinations resolve from EgressShards (internal/worker/sources),
+  # the identity galactic-nat reports for its datapath; the cache's informer
+  # is cluster-wide.
+  - apiGroups: ["galactic.datumapis.com"]
+    resources: ["egressshards"]
+    verbs: ["get", "list", "watch"]
   # A backend destination resolves from the Bound ServiceVIPBinding
   # galactic-router writes for it (#1438). Worker reads only those in
   # --gateway-namespace, but the cache's informer is cluster-wide.
