@@ -1060,10 +1060,17 @@ func (m *masque) rowMaintenance(t *testing.T) {
 	interval := l.gcInterval(t)
 	l.record(t, "galactic-router GC interval", interval)
 	// window is how long the canary's collector may take to remove it.
-	worker, window := l.workerOn(t, edgeNode1), interval
-	if worker != "" {
-		window = l.workerHostGrace(t)
+	// worker is the galactic-worker serving the node, packaged or bare.
+	worker, window := workerOnNode(t, edgeNode1), interval
+	if edge := l.edgeUsesWorker(t); (worker != nil) != edge || (worker != nil && !worker.socket) {
+		t.Fatalf("Worker on %s disagrees: process %t, socket %t, galactic-edge --worker-socket %t",
+			edgeNode1, worker != nil, worker != nil && worker.socket, edge)
+	}
+	var workerLogs func() (string, error)
+	if worker != nil {
+		window = worker.hostGrace(t)
 		l.record(t, "galactic-worker host grace", window)
+		workerLogs = m.workerLogs(t, worker)
 	}
 	d := window + 90*time.Second
 	started := time.Now()
@@ -1089,7 +1096,7 @@ func (m *masque) rowMaintenance(t *testing.T) {
 	removed := func(line string) bool {
 		return strings.Contains(line, "GC: removed orphaned VRF") && strings.Contains(line, canary)
 	}
-	if worker == "" {
+	if worker == nil {
 		eventually(t, window+30*time.Second, 2*time.Second, "a collection pass removed canary VRF "+canary,
 			func() (bool, error) {
 				logs, err := l.kubectl("-n", systemNS, "logs", router, "--since-time="+since)
@@ -1099,11 +1106,10 @@ func (m *masque) rowMaintenance(t *testing.T) {
 	} else {
 		eventually(t, window+30*time.Second, 2*time.Second, "galactic-worker removed canary VRF "+canary,
 			func() (bool, error) {
-				logs, err := l.kubectl("-n", systemNS, "logs", worker, "-c", workerDaemonSet,
-					"--since-time="+since)
+				logs, err := workerLogs()
 				return slices.ContainsFunc(strings.Split(logs, "\n"), removed), err
 			})
-		l.record(t, "canary VRF collected by", "galactic-worker "+worker)
+		l.record(t, "canary VRF collected by", "galactic-worker, PID "+worker.pid)
 		if _, err := nodeExec(edgeNode1, "ip", "link", "show", canary); err == nil {
 			t.Errorf("canary VRF %s is still on %s after galactic-worker logged its removal", canary, edgeNode1)
 		}
@@ -1131,6 +1137,29 @@ func (m *masque) rowMaintenance(t *testing.T) {
 	for mt, p := range runs {
 		m.requireAnswered(t, "VPC "+mt.tn.vpc+" across garbage collection", p.wait(l, t), d,
 			m.workload(t, mt.tn, 1).addr)
+	}
+}
+
+// workerLogs returns a reader of what w logs from now on: the tail of its
+// log file when it runs bare, or its pod's log since now.
+func (m *masque) workerLogs(t *testing.T, w *workerProc) func() (string, error) {
+	t.Helper()
+	if w.logFile != "" {
+		size, err := nodeExec(edgeNode1, "stat", "-c", "%s", w.logFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		off, err := strconv.ParseInt(size, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		from := "+" + strconv.FormatInt(off+1, 10)
+		return func() (string, error) { return nodeExec(edgeNode1, "tail", "-c", from, w.logFile) }
+	}
+	pod := m.l.podOn(t, systemNS, workerComm, edgeNode1)
+	since := time.Now().UTC().Format(time.RFC3339)
+	return func() (string, error) {
+		return m.l.kubectl("-n", systemNS, "logs", pod, "-c", workerComm, "--since-time="+since)
 	}
 }
 
