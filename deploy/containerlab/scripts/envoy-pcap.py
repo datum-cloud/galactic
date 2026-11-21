@@ -5,6 +5,7 @@
 """Count the Envoy socket checks' requests and replies in pcap files.
 
 Usage: envoy-pcap.py --gateway ADDR --nonces FILE PCAP...
+       envoy-pcap.py --source ADDR PCAP...
 
 FILE holds one "<nonce>\\t<key>" line per request. A packet carrying a nonce
 counts for the nonce's key, as a request when its innermost IPv6 source is
@@ -15,8 +16,14 @@ encapsulated. Prints one JSON object, summed over every file:
 
     {"<key>": {"req": N, "rep": N, "req_srv6": N, "rep_srv6": N}, ...}
 
-Every key in FILE appears, at zero when nothing carried it. The pcap reading
-is handoff-pcap.py's.
+Every key in FILE appears, at zero when nothing carried it.
+
+With --source it counts instead every packet whose innermost IPv6 source is
+ADDR, and how many of those were encapsulated, and prints
+
+    {"n": N, "srv6": N}
+
+The pcap reading is handoff-pcap.py's.
 """
 
 import argparse
@@ -54,12 +61,35 @@ def innermost(frame, off):
     return off
 
 
+def count_source(src, files):
+    """Print how many packets in files carry src as innermost source."""
+    out = {"n": 0, "srv6": 0}
+    for path in files:
+        for linktype, frame in hp.records(path):
+            off = hp.ipv6_offset(linktype, frame)
+            if off is None:
+                continue
+            inner = innermost(frame, off)
+            if frame[inner + 8 : inner + 24] != src:
+                continue
+            out["n"] += 1
+            out["srv6"] += int(hp.encapsulated(frame, off))
+    json.dump(out, sys.stdout, sort_keys=True)
+    print()
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--gateway", required=True)
-    ap.add_argument("--nonces", required=True)
+    ap.add_argument("--gateway")
+    ap.add_argument("--nonces")
+    ap.add_argument("--source")
     ap.add_argument("files", nargs="*")
     args = ap.parse_args()
+    if args.source:
+        return count_source(ipaddress.IPv6Address(args.source).packed, args.files)
+    if not args.gateway or not args.nonces:
+        ap.error("--gateway and --nonces are required without --source")
     gw = ipaddress.IPv6Address(args.gateway).packed
 
     keys = {}
