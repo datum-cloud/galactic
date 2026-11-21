@@ -208,9 +208,30 @@ mode_is() {
     awk -v m="galactic_cni_egress_mode{mode=\"$1\"}" '$1 == m {print $2}')" = 1 ]
 }
 wait_mode() {
-  kc -n galactic-system rollout status daemonset/galactic-cni --timeout=900s >/dev/null
+  if ! kc -n galactic-system rollout status daemonset/galactic-cni --timeout=600s >/dev/null; then
+    cni_rollout_diagnostics
+    die "galactic-cni did not roll out egress mode $1 within 600s"
+  fi
   wait_true "galactic-cni on ${EDGE} does not report egress mode $1 after 120s" 120 mode_is "$1"
   sleep 5
+}
+
+# cni_rollout_diagnostics prints why galactic-cni's rollout stalled, before
+# the cleanup changes anything: the DaemonSet's status, every pod with its
+# node, and for each pod that is not Ready its conditions, events and logs.
+cni_rollout_diagnostics() {
+  echo "== galactic-cni rollout stalled"
+  kc -n galactic-system get ds galactic-cni -o wide 2>&1 || true
+  kc -n galactic-system get pods -l app.kubernetes.io/name=galactic-cni -o wide 2>&1 || true
+  local p
+  for p in $(kc -n galactic-system get pods -l app.kubernetes.io/name=galactic-cni \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' |
+    awk '$2 != "True" {print $1}'); do
+    echo "-- ${p}"
+    kc -n galactic-system describe pod "${p}" 2>&1 | sed -n '/^Conditions:/,$p' | head -40
+    kc -n galactic-system logs "${p}" --all-containers --tail=60 2>&1 | grep -v '"level":"debug"' | tail -40
+  done
+  kc -n galactic-system get events --sort-by=.lastTimestamp 2>&1 | grep -i 'galactic-cni' | tail -15 || true
 }
 
 # handoffs_ready reports whether galactic-nat says Worker reports VPC 80's and
