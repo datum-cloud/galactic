@@ -189,6 +189,9 @@ roles:
     - galactic.datumapis.com/edgeservices:get
     - galactic.datumapis.com/edgeservices:list
     - galactic.datumapis.com/edgeservices:watch
+    - galactic.datumapis.com/networkgateways:get
+    - galactic.datumapis.com/networkgateways:list
+    - galactic.datumapis.com/networkgateways:watch
     - galactic.datumapis.com/networkserviceaddresses:get
     - galactic.datumapis.com/networkserviceaddresses:list
     - galactic.datumapis.com/networkserviceaddresses:watch
@@ -248,6 +251,9 @@ roles:
     - galactic.datumapis.com/edgeattachments:get
     - galactic.datumapis.com/edgeattachments:list
     - galactic.datumapis.com/edgeattachments:watch
+    - galactic.datumapis.com/servicevipbindings:get
+    - galactic.datumapis.com/servicevipbindings:list
+    - galactic.datumapis.com/servicevipbindings:watch
     - galactic.datumapis.com/vpcattachments:get
     - galactic.datumapis.com/vpcattachments:list
     - galactic.datumapis.com/vpcattachments:watch
@@ -311,6 +317,7 @@ workloads:
         dropsAll: true
         hostPaths:
           - /proc/sys/net:rw
+          - /run/galactic-worker:rw
           - /sys/fs/bpf:rw
         runAsGroup: image
         runAsUser: "0"

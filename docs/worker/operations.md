@@ -14,10 +14,10 @@ nodes both need one.
 
 Pick a placement profile:
 
-| Profile   | Nodes                                                                                        | Manifests                                                                                   |
-| --------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Dedicated | Services on `node=edge` with their opt-ins; tenant workloads on `node=compute`               | `config/galactic-worker/base` as shipped; each NAT node keeps its own XDP attach mode       |
-| Combined  | As dedicated, and TAP-backed guests pinned to `node=edge` nodes that run the gateway and NAT | Adds `config/galactic-worker/profiles/combined`, which runs `galactic-nat` in dispatch mode |
+| Profile   | Nodes                                                                                        | Manifests                                                                                                                                                                           |
+| --------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dedicated | Services on `node=edge` with their opt-ins; tenant workloads on `node=compute`               | `config/galactic-worker/base` as shipped; each NAT node keeps its own XDP attach mode                                                                                               |
+| Combined  | As dedicated, and TAP-backed guests pinned to `node=edge` nodes that run the gateway and NAT | Adds `config/galactic-worker/profiles/combined`, which runs `galactic-nat` in dispatch mode and gives `galactic-gateway` the Worker socket and backend health for its Local handoff |
 
 [Node labels](../operations/node-labels.md#combined-placement) defines both
 placements. The allowlist is the same in both: `galactic-router` may use
