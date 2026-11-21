@@ -2,9 +2,10 @@
 # envoy-socket.sh: prove a real Envoy reaches ns80's guests through the
 # galactic-vrf sidecar's Worker socket claims (docs/envoy-socket.md, #1439).
 #
-# Usage: envoy-socket.sh [up|down] OUTDIR
+# Usage: envoy-socket.sh [up|down|probe] OUTDIR
 #
-# With no mode it sets up, runs every window and cleans up. up only sets up
+# With no mode it sets up, runs every window and cleans up. probe sets up,
+# sends one request per VPC and backend, and cleans up. up only sets up
 # and leaves the fixture, Worker and the backends running (task
 # deploy:ns80-envoy); down only cleans up (task delete:ns80-envoy).
 #
@@ -49,12 +50,12 @@ source "${SCRIPT_DIR}/lib.sh"
 
 MODE=run
 case "${1:-}" in
-  up | down)
+  up | down | probe)
     MODE=$1
     shift
     ;;
 esac
-OUT=${1:?usage: envoy-socket.sh [up|down] OUTDIR}
+OUT=${1:?usage: envoy-socket.sh [up|down|probe] OUTDIR}
 mkdir -p "${OUT}/logs" "${OUT}/configs"
 OUT=$(cd "${OUT}" && pwd)
 : >"${OUT}/results.tsv"
@@ -910,6 +911,18 @@ for v in 80 81; do
   record setup "VPC ${v}: routed link ends found" yes \
     "$([ -n "${POD_END[${v}]}" ] && [ -n "${HOST_END[${v}]}" ] && [ -n "${IVS[${v}]}" ] && echo yes || echo no)"
 done
+
+# probe: one request per VPC and backend over a fresh upstream connection,
+# then the usual cleanup and restore checks from the exit trap. A short run
+# to show the setup works before the full one.
+if [ "${MODE}" = probe ]; then
+  window probe
+  N=1
+  for p in "${PATHS[@]}"; do
+    fresh probe "${p}"
+  done
+  exit 0
+fi
 
 # Warm every path's neighbors outside the capture windows.
 for p in "${PATHS[@]}"; do
