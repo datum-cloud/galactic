@@ -1,0 +1,246 @@
+# Envoy's configuration for the socket fixture (docs/envoy-socket.md).
+#
+# The HTTPS listener on [::]:8443 routes /<vpc>/<site>/<pool> to one of
+# eight static clusters: VPC 80 or 81, the local backend (ns80's guest on
+# dfw-worker) or the remote one, and a pooled upstream connection or a
+# fresh one per request (max_requests_per_connection: 1).
+#
+# Every cluster's upstream socket is bound to its VPC's VRF in the pod with
+# SO_BINDTODEVICE (SOL_SOCKET 1, SO_BINDTODEVICE 25) before bind, and binds
+# to [::]:0, so the kernel picks the VRF's only global address, the gateway
+# fd20:80:ff04::1, as the source. buf_value is the base64 of the VRF's name.
+#
+# The remote backend is dfw-worker4's ns80 guest, fd20:80:ff01::2:0:0;
+# scripts/envoy-socket.sh rewrites it to sjc-worker's, fd20:80:ff02::1:0:0,
+# when REMOTE=sjc.
+admin:
+  address:
+    socket_address: {address: "::1", port_value: 9901}
+static_resources:
+  listeners:
+    - name: https
+      address:
+        socket_address: {address: "::", port_value: 8443}
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain: {filename: /etc/envoy/tls/tls.crt}
+                    private_key: {filename: /etc/envoy/tls/tls.key}
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress
+                codec_type: AUTO
+                # One line per request: the nonce, the cluster, and the
+                # upstream socket's local address, to match against ss.
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        text_format_source:
+                          inline_string: "nonce=%REQ(X-NONCE)% path=%REQ(:PATH)% cluster=%UPSTREAM_CLUSTER% code=%RESPONSE_CODE% upstream=%UPSTREAM_HOST% local=%UPSTREAM_LOCAL_ADDRESS% flags=%RESPONSE_FLAGS%\n"
+                route_config:
+                  name: backends
+                  virtual_hosts:
+                    - name: backends
+                      domains: ["*"]
+                      routes:
+                        - match: {path: "/80/local/pooled"}
+                          route: {cluster: vpc80-local-pooled}
+                        - match: {path: "/80/local/fresh"}
+                          route: {cluster: vpc80-local-fresh}
+                        - match: {path: "/80/remote/pooled"}
+                          route: {cluster: vpc80-remote-pooled}
+                        - match: {path: "/80/remote/fresh"}
+                          route: {cluster: vpc80-remote-fresh}
+                        - match: {path: "/81/local/pooled"}
+                          route: {cluster: vpc81-local-pooled}
+                        - match: {path: "/81/local/fresh"}
+                          route: {cluster: vpc81-local-fresh}
+                        - match: {path: "/81/remote/pooled"}
+                          route: {cluster: vpc81-remote-pooled}
+                        - match: {path: "/81/remote/fresh"}
+                          route: {cluster: vpc81-remote-fresh}
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: vpc80-local-pooled
+      type: STATIC
+      connect_timeout: 2s
+      upstream_bind_config:
+        source_address: {address: "::", port_value: 0}
+        socket_options:
+          # SO_BINDTODEVICE G000000080V
+          - level: 1
+            name: 25
+            buf_value: RzAwMDAwMDA4MFY=
+            state: STATE_PREBIND
+      load_assignment:
+        cluster_name: vpc80-local-pooled
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: "fd20:80:ff01::1:0:0", port_value: 8080}
+    - name: vpc80-local-fresh
+      type: STATIC
+      connect_timeout: 2s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          common_http_protocol_options:
+            max_requests_per_connection: 1
+          explicit_http_config:
+            http_protocol_options: {}
+      upstream_bind_config:
+        source_address: {address: "::", port_value: 0}
+        socket_options:
+          # SO_BINDTODEVICE G000000080V
+          - level: 1
+            name: 25
+            buf_value: RzAwMDAwMDA4MFY=
+            state: STATE_PREBIND
+      load_assignment:
+        cluster_name: vpc80-local-fresh
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: "fd20:80:ff01::1:0:0", port_value: 8080}
+    - name: vpc80-remote-pooled
+      type: STATIC
+      connect_timeout: 2s
+      upstream_bind_config:
+        source_address: {address: "::", port_value: 0}
+        socket_options:
+          # SO_BINDTODEVICE G000000080V
+          - level: 1
+            name: 25
+            buf_value: RzAwMDAwMDA4MFY=
+            state: STATE_PREBIND
+      load_assignment:
+        cluster_name: vpc80-remote-pooled
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: "fd20:80:ff01::2:0:0", port_value: 8080}
+    - name: vpc80-remote-fresh
+      type: STATIC
+      connect_timeout: 2s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          common_http_protocol_options:
+            max_requests_per_connection: 1
+          explicit_http_config:
+            http_protocol_options: {}
+      upstream_bind_config:
+        source_address: {address: "::", port_value: 0}
+        socket_options:
+          # SO_BINDTODEVICE G000000080V
+          - level: 1
+            name: 25
+            buf_value: RzAwMDAwMDA4MFY=
+            state: STATE_PREBIND
+      load_assignment:
+        cluster_name: vpc80-remote-fresh
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: "fd20:80:ff01::2:0:0", port_value: 8080}
+    - name: vpc81-local-pooled
+      type: STATIC
+      connect_timeout: 2s
+      upstream_bind_config:
+        source_address: {address: "::", port_value: 0}
+        socket_options:
+          # SO_BINDTODEVICE G000000081V
+          - level: 1
+            name: 25
+            buf_value: RzAwMDAwMDA4MVY=
+            state: STATE_PREBIND
+      load_assignment:
+        cluster_name: vpc81-local-pooled
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: "fd20:80:ff01::1:0:0", port_value: 8080}
+    - name: vpc81-local-fresh
+      type: STATIC
+      connect_timeout: 2s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          common_http_protocol_options:
+            max_requests_per_connection: 1
+          explicit_http_config:
+            http_protocol_options: {}
+      upstream_bind_config:
+        source_address: {address: "::", port_value: 0}
+        socket_options:
+          # SO_BINDTODEVICE G000000081V
+          - level: 1
+            name: 25
+            buf_value: RzAwMDAwMDA4MVY=
+            state: STATE_PREBIND
+      load_assignment:
+        cluster_name: vpc81-local-fresh
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: "fd20:80:ff01::1:0:0", port_value: 8080}
+    - name: vpc81-remote-pooled
+      type: STATIC
+      connect_timeout: 2s
+      upstream_bind_config:
+        source_address: {address: "::", port_value: 0}
+        socket_options:
+          # SO_BINDTODEVICE G000000081V
+          - level: 1
+            name: 25
+            buf_value: RzAwMDAwMDA4MVY=
+            state: STATE_PREBIND
+      load_assignment:
+        cluster_name: vpc81-remote-pooled
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: "fd20:80:ff01::2:0:0", port_value: 8080}
+    - name: vpc81-remote-fresh
+      type: STATIC
+      connect_timeout: 2s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          common_http_protocol_options:
+            max_requests_per_connection: 1
+          explicit_http_config:
+            http_protocol_options: {}
+      upstream_bind_config:
+        source_address: {address: "::", port_value: 0}
+        socket_options:
+          # SO_BINDTODEVICE G000000081V
+          - level: 1
+            name: 25
+            buf_value: RzAwMDAwMDA4MVY=
+            state: STATE_PREBIND
+      load_assignment:
+        cluster_name: vpc81-remote-fresh
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: "fd20:80:ff01::2:0:0", port_value: 8080}

@@ -1730,7 +1730,11 @@ type HandoffInterface struct {
 	// program keys the VPC's sessions by it, as it keys a remote tenant's by
 	// the outer source, and returns a reply for it into the pair. Empty until
 	// Worker has read the VPC's Argument.
-	TenantSid     string `protobuf:"bytes,4,opt,name=tenant_sid,json=tenantSid,proto3" json:"tenant_sid,omitempty"`
+	TenantSid string `protobuf:"bytes,4,opt,name=tenant_sid,json=tenantSid,proto3" json:"tenant_sid,omitempty"`
+	// link_local is the interface's IPv6 link-local address, set for a routed
+	// link's host end once the kernel has assigned it. The pod routes the
+	// destinations it reaches through the link to this address.
+	LinkLocal     string `protobuf:"bytes,5,opt,name=link_local,json=linkLocal,proto3" json:"link_local,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1789,6 +1793,13 @@ func (x *HandoffInterface) GetIfindex() int32 {
 func (x *HandoffInterface) GetTenantSid() string {
 	if x != nil {
 		return x.TenantSid
+	}
+	return ""
+}
+
+func (x *HandoffInterface) GetLinkLocal() string {
+	if x != nil {
+		return x.LinkLocal
 	}
 	return ""
 }
@@ -1901,13 +1912,15 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"\x10withdrawal_scope\x18\x06 \x01(\x0e2).galactic.worker.v1alpha1.WithdrawalScopeR\x0fwithdrawalScope\x12\x1a\n" +
 	"\breleased\x18\a \x01(\bR\breleased\x12\x1a\n" +
 	"\brevision\x18\b \x01(\x04R\brevision\x12Y\n" +
-	"\x12handoff_interfaces\x18\t \x03(\v2*.galactic.worker.v1alpha1.HandoffInterfaceR\x11handoffInterfaces\"s\n" +
+	"\x12handoff_interfaces\x18\t \x03(\v2*.galactic.worker.v1alpha1.HandoffInterfaceR\x11handoffInterfaces\"\x92\x01\n" +
 	"\x10HandoffInterface\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
 	"\aifindex\x18\x03 \x01(\x05R\aifindex\x12\x1d\n" +
 	"\n" +
-	"tenant_sid\x18\x04 \x01(\tR\ttenantSid*u\n" +
+	"tenant_sid\x18\x04 \x01(\tR\ttenantSid\x12\x1d\n" +
+	"\n" +
+	"link_local\x18\x05 \x01(\tR\tlinkLocal*u\n" +
 	"\x0fCapabilityState\x12 \n" +
 	"\x1cCAPABILITY_STATE_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aCAPABILITY_STATE_AVAILABLE\x10\x01\x12 \n" +

@@ -195,8 +195,8 @@ func (c *NATConfig) BindFlags(flags *pflag.FlagSet) {
 		{"nat-datapath-enabled", "datapath_enabled"},
 		{"nat-echo-responder", "echo_responder"},
 		{"nat-proc-sys-path", "proc_sys_path"},
-		{"worker-socket", keyWorkerSocket},
-		{"worker-token-file", keyWorkerTokenFile},
+		{flagWorkerSocket, keyWorkerSocket},
+		{flagWorkerTokenFile, keyWorkerTokenFile},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {

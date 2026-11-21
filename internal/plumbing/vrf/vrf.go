@@ -35,9 +35,10 @@ import (
 const SidecarTableIDBase = uint32(0x10000)
 
 // HostTableIDMin and HostTableIDMax bound the routing table IDs Add allocates.
-// HostTableIDMax stops short of SidecarTableIDBase: the host's installer keeps
-// its sidecar return-path tables in the host namespace in the IDs between the
-// two (internal/installer/sidecarreturn.go).
+// HostTableIDMax stops short of SidecarTableIDBase. The IDs between the two
+// held the retired sidecar return path's tables in the host namespace; the
+// installer removes what is left of them once at start
+// (internal/installer/sidecarreturnprune.go), and nothing allocates there.
 const (
 	HostTableIDMin = uint32(1)
 	HostTableIDMax = uint32(0xEFFF)

@@ -213,8 +213,8 @@ Every sweep reads the shared eBPF datapath's generation and, when it has not
 changed, reads this sidecar's rows back from the two registration maps
 (`vrf_table`, `ifindex_vrf_table`). A changed generation, missing rows, or a
 pass that left something unapplied makes it reapply every tracked VRF and
-route. These checks do not cover every route, the TC attachment, the
-gateway's local route or the host return path, so `ok` here is not full
+route. These checks do not cover every route, the TC attachment or the
+routed link of a Worker claim, so `ok` here is not full
 datapath health.
 
 | Metric                                                                     | Type    | Labels             | Meaning                                                                                                                                   |
@@ -249,53 +249,6 @@ galactic_ingress_sidecar_datapath_check_status{status=~"missing|error"} == 1
 
 # Reapply churn by reason
 sum by (namespace, pod, reason) (increase(galactic_ingress_sidecar_datapath_reapply_total[10m]))
-```
-
-### Return-path gateway
-
-With a node name configured, the sidecar publishes one return-path gateway
-advertisement per VPC, so a backend's replies have a route back to this
-node: it resolves the VPC's gateway address, then writes a
-`BGPAdvertisement`. Either step can fail without failing the route that
-triggered it.
-
-| Metric                                                              | Type    | Labels                | Meaning                                                                                          |
-| ------------------------------------------------------------------- | ------- | --------------------- | ------------------------------------------------------------------------------------------------ |
-| `galactic_ingress_sidecar_gateway_publication_enabled`              | gauge   | none                  | 1 when the sidecar publishes return-path advertisements                                          |
-| `galactic_ingress_sidecar_gateway_address_assignment_enabled`       | gauge   | none                  | 1 when the sidecar assigns each VPC's gateway address from its own gateway prefix                |
-| `galactic_ingress_sidecar_gateway_vrfs`                             | gauge   | `state`               | Installed, non-draining VRFs by `state`: `awaiting_address`, `awaiting_publication`, `published` |
-| `galactic_ingress_sidecar_gateway_oldest_pending_timestamp_seconds` | gauge   | none                  | Unix time the longest-unpublished VRF started waiting; 0 when none waits                         |
-| `galactic_ingress_sidecar_gateway_operations_total`                 | counter | `operation`, `result` | `resolve` (`success`, `error`, `not_provisioned`), `publish` and `withdraw` (`success`, `error`) |
-
-- `published` is local publication only: the advertisement was written.
-  It does not show the route reached any BGP peer, or that the
-  advertisement still exists; nothing re-checks it after publication.
-- With publication disabled every `gateway_vrfs` series is 0, so check
-  `gateway_publication_enabled` before reading 0 as healthy. Disabled,
-  idle (enabled with no VRFs), waiting and published are all distinct.
-- With publication enabled but address assignment off, the sidecar only
-  finds an address something else provisioned, so VRFs waiting in
-  `awaiting_address` and `resolve{result="not_provisioned"}` counting up on
-  every attempt are expected there.
-- A successful withdrawal clears a VRF's published state, so a VRF
-  withdrawn for teardown that then survives, because its removal failed,
-  and whose VPC comes back is published again, like any VRF waiting.
-- A VRF waits from when it is first counted unpublished, through retries,
-  until it is published or starts draining. A failed withdrawal is counted
-  and teardown carries on; garbage collection removes the advertisement it
-  leaves. These add 13 fixed series per sidecar.
-
-```promql
-# Gateway publication pending for more than a minute, only where the sidecar
-# both publishes and assigns the address itself
-(time() - galactic_ingress_sidecar_gateway_oldest_pending_timestamp_seconds > 60)
-  and (galactic_ingress_sidecar_gateway_oldest_pending_timestamp_seconds > 0)
-  and on (namespace, pod) (galactic_ingress_sidecar_gateway_publication_enabled == 1)
-  and on (namespace, pod) (galactic_ingress_sidecar_gateway_address_assignment_enabled == 1)
-
-# Resolve and publish failures, as opposed to waiting for an address
-sum by (namespace, pod, operation) (
-  rate(galactic_ingress_sidecar_gateway_operations_total{result="error"}[10m]))
 ```
 
 ### Node source address
@@ -334,51 +287,45 @@ back.
 max_over_time(galactic_ingress_sidecar_node_source_address_status{status=~"unresolved|error"}[10m]) == 1
 ```
 
-### Host return path — `galactic_sidecar_return_*`
+### Worker claims
 
-`galactic-cni` installs the host side of each sidecar's return path: for every
-gateway address a sidecar on the node advertises, a traffic policy `infra` row
-for the pod's host interface, then a route, a permanent neighbor and a
-`vrf_table` entry that point a decapsulated reply at the sidecar's pod. It
-runs one pass each tick, and these series report it. A
-published advertisement only shows the sidecar's half; these show whether
-replies can reach the pod.
+The sidecar holds one `socket` claim per VPC with Galactic Worker on its node.
+A VPC has a claim when the proxy has an attachment in it and the VPC has at
+least one backend. These series show whether Worker serves each claim and how
+it resolved the backends. See the
+[contract](../worker/contract.md#envoy-and-the-galactic-vrf-sidecar).
 
-| Metric                                                     | Type    | Labels                | Meaning                                                                                   |
-| ---------------------------------------------------------- | ------- | --------------------- | ----------------------------------------------------------------------------------------- |
-| `galactic_sidecar_return_endpoints`                        | gauge   | `state`               | `desired` (advertised), `applied` (installed by the last pass), `pending` (not installed) |
-| `galactic_sidecar_return_reconcile_total`                  | counter | `result`              | Passes: `success`, `partial`, `waiting_identity`, `error`                                 |
-| `galactic_sidecar_return_last_completed_timestamp_seconds` | gauge   | none                  | Unix time of the last pass that listed the advertisements; 0 before the first             |
-| `galactic_sidecar_return_operations_total`                 | counter | `operation`, `result` | `install` (per endpoint), `register`, `prune`, `reap`, each `success` or `error`          |
+| Metric                                                   | Type    | Labels                          | Meaning                                                                                                                                                      |
+| -------------------------------------------------------- | ------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `galactic_ingress_sidecar_worker_connected`              | gauge   | none                            | 1 while a Worker session is open, else 0                                                                                                                     |
+| `galactic_ingress_sidecar_worker_capability`             | gauge   | `capability`, `state`, `reason` | 1 for each capability Worker reported at the start of the session. `state` is `available` or `unavailable`; `reason` is Worker's, such as `ModuleNotRunning` |
+| `galactic_ingress_sidecar_worker_claims`                 | gauge   | `state`, `reason`               | Claims by `state`: `ready`, `pending`, `refused` or `unconfigured`, with Worker's `reason`                                                                   |
+| `galactic_ingress_sidecar_worker_destinations`           | gauge   | `mode`                          | Backends by how Worker resolved them: `local`, `fabric` or `unresolved`                                                                                      |
+| `galactic_ingress_sidecar_worker_claim_operations_total` | counter | `operation`, `outcome`          | Claim calls by `operation` (`request`, `update`, `release`) and `outcome`: `success`, or the reason Worker gave for refusing the call                        |
 
-- `applied` and `pending` partition `desired`; do not add all three. A
-  scrape reads the three counts and the timestamp from one pass.
-- `partial` means an endpoint failed to install or the prune failed. The
-  prune removes stale return routes and the `infra` rows of host interfaces
-  no advertised gateway uses.
-  `waiting_identity` means endpoints are advertised but this node's
-  `BGPRouter` has no SRv6 locator yet, so all are pending. `error` means
-  nothing could be installed: listing the advertisements, reading the node's
-  identity, or registering the node in the maps failed. A failed prune on a
-  `waiting_identity` or `error` pass shows only in `operations_total`.
-- A pass that cannot list the advertisements leaves the counts and the
-  timestamp as they were. An ageing timestamp, not a zero count, is how a
-  failing or stalled pass shows. A node with no sidecar reports a fresh
-  timestamp and 0 desired. A node without a Kubernetes client or node name
-  never runs a pass, and its timestamp stays 0.
-- `install` success means the `infra` row, route, neighbor and map entry were
-  written. It does not prove a reply reached the pod. An `install` fails,
-  before any route is written, when the annotated interface already holds a
-  tenant traffic policy row, which a stale annotation on a reused ifindex can
-  cause. These add 16 fixed series per node.
+- `refused` with `ClaimHeldByAnotherPod` is expected while the proxy's
+  previous pod runs. The old sidecar releases its claims on `SIGTERM`, so it
+  clears at once on a normal replacement; otherwise it clears when the old pod
+  is gone. The sidecar retries each sweep and reports not ready meanwhile.
+- `unconfigured` with `PodEndNotConfigured` means Worker created the routed
+  link but the sidecar has not configured its pod end yet. `VRFMissing` means
+  the VPC's VRF is not there.
+- The sidecar needs `local.socket`, and `fabric.srv6` for backends on other
+  nodes. Check `worker_capability` for an `unavailable` state first.
+- `unresolved` backends get no route until Worker resolves them. The sidecar
+  is ready once every VPC's claim is held by this pod and its pod end is
+  configured (`/readyz`, port 9183).
 
 ```promql
-# Return path not installed for some endpoint for 10 minutes; a fresh node
-# waiting for its SRv6 locator is pending briefly
-min_over_time(galactic_sidecar_return_endpoints{state="pending"}[10m]) > 0
+# A claim refused or not yet configured for more than 5 minutes
+sum by (namespace, pod, state, reason) (
+  min_over_time(galactic_ingress_sidecar_worker_claims{state=~"refused|unconfigured"}[5m])) > 0
 
-# Return path pass stalled (passes run every 30s)
-time() - galactic_sidecar_return_last_completed_timestamp_seconds > 300
+# No Worker session
+galactic_ingress_sidecar_worker_connected == 0
+
+# Backends Worker could not resolve
+galactic_ingress_sidecar_worker_destinations{mode="unresolved"} > 0
 ```
 
 ### Backend EndpointSlice repair — `galactic_endpointslice_repair_*`

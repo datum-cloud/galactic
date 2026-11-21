@@ -234,6 +234,11 @@ func SetupCloud(mgr ctrl.Manager) error {
 			}
 			return reconciler.SetupWithManager(mgr)
 		},
+		"ProxyAttachmentNode": func() error {
+			return (&cloudcontroller.ProxyNodeReconciler{
+				Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(),
+			}).SetupWithManager(mgr)
+		},
 	} {
 		if err := setup(); err != nil {
 			return fmt.Errorf("set up %s controller: %w", name, err)

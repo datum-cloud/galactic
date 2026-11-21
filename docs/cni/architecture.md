@@ -43,14 +43,14 @@ encoding. Other pages and the API field descriptions link here.
 defined in `internal/plumbing/ebpf/uformat`. Block and Node-ID together are the
 node's /64 locator.
 
-| Bits   | Field    | Width | Value                                                                  |
-| ------ | -------- | ----- | ---------------------------------------------------------------------- |
-| 1-48   | Block    | 48    | The /48 `BGPRouter.spec.srv6Locator`                                   |
-| 49-64  | Node-ID  | 16    | `BGPRouter.spec.nodeID`, 0x0001-0xDFFF                                 |
-| 65-68  | Function | 4     | 0xE for End.DT46; 0xF is reserved for a future End.DT2                 |
-| 69-80  | Argument | 12    | The VRF handle: the VPC's `BGPVRFInstance.spec.vrfID`, 0x001-0xFFF     |
-| 81-96  | Slot     | 16    | Zero, except on a gateway-to-backend SID                               |
-| 97-128 | Padding  | 32    | Zero                                                                   |
+| Bits   | Field    | Width | Value                                                              |
+| ------ | -------- | ----- | ------------------------------------------------------------------ |
+| 1-48   | Block    | 48    | The /48 `BGPRouter.spec.srv6Locator`                               |
+| 49-64  | Node-ID  | 16    | `BGPRouter.spec.nodeID`, 0x0001-0xDFFF                             |
+| 65-68  | Function | 4     | 0xE for End.DT46; 0xF is reserved for a future End.DT2             |
+| 69-80  | Argument | 12    | The VRF handle: the VPC's `BGPVRFInstance.spec.vrfID`, 0x001-0xFFF |
+| 81-96  | Slot     | 16    | Zero, except on a gateway-to-backend SID                           |
+| 97-128 | Padding  | 32    | Zero                                                               |
 
 **Headend.** In RFC 8986 terms the headend behavior is H.Encaps.Red with a
 one-segment list. The encapsulating node prepends one outer IPv6 header whose
@@ -123,9 +123,9 @@ gateways from its own addresses, and the Block and Argument from the
 master plugin routes a family's guest prefix only when that family has a
 gateway, while ADD registers it either way (#806). It only writes a
 row that is missing, and never one under the ingress sidecar's Block. The
-sidecar return path's tables are excluded by their reserved table ID range,
-since the sidecar's own `vrf_table` rows that also mark them may be among the
-rows lost. A VPC's shared `vrf_table` and `vpc_attribution_table` rows are
+retired sidecar return path's tables, which an older node may still hold until
+its start-up prune, are excluded by their reserved table ID range, since the
+sidecar's own `vrf_table` rows that also mark them may be among the rows lost. A VPC's shared `vrf_table` and `vpc_attribution_table` rows are
 rebuilt from its lowest-ifindex attachment, while ADD leaves whichever
 attachment registered last, so those two may differ from before the loss;
 delivery reads the per-interface `ifindex_egress_kind_table` row, which is
@@ -141,25 +141,23 @@ veth peers, at the same ifindexes as their `ifindex_vrf_table` rows. It leaves
 them in place when it exits, so a restarted container keeps serving, and the
 host's GC, repair and traffic policy startup passes never touch them. Its
 periodic sweep reads its rows back, the traffic policy row included, and
-rewrites them when one is missing. Two things remove a deleted pod's rows
-(`internal/plumbing/ebpf/sidecarmap`, #773). A new sidecar removes, at startup,
-every sidecar row its own VRFs do not account for. The installer's sidecar
-return sweep (`internal/installer/sidecarreap.go`) treats a sidecar gateway
-advertisement whose recorded host-side interface no longer exists, or is no
-longer a veth, as the advertisement of a deleted pod, and deletes it. When every
-sidecar advertisement on the node is in that state on two sweeps in a row, it
-first removes every sidecar row from the maps. The second sweep covers a
-replacement pod that has written its rows but not yet republished its
-advertisements. A node whose sidecar publishes no advertisements gives the
-installer no evidence, so it keeps that node's rows. Either path can still take
-a live sidecar's rows for a deleted pod's: the startup prune when two sidecar
-pods overlap on a node, and the installer when a replacement pod fails to
-publish for two sweeps. So every sidecar reads its own `vrf_table` and
+rewrites them when one is missing. A new sidecar removes, at startup, every
+sidecar row its own VRFs do not account for
+(`internal/plumbing/ebpf/sidecarmap`, #773), which is how a deleted pod's rows
+go. `galactic-cni` no longer reaps them: its sidecar return path, with the
+sweep and the reaper, is retired (#1439). Galactic Worker programs the return
+path of a sidecar's `socket` claim instead
+([contract](../worker/contract.md#envoy-and-the-galactic-vrf-sidecar)). At
+start, `galactic-cni` runs one prune that removes what earlier versions left:
+routes in tables `0xF000` to `0xFFFF`, their permanent neighbors and
+`tp_iface_table` infra rows, and `vrf_table` rows that point at `0xF000` plus
+the Argument with `EgressKindVeth`, under `vpcfence.Write`
+(`internal/installer/sidecarreturnprune.go`). Until the next sidecar on the
+node starts, a deleted pod's rows stay in the shared maps. They are inert
+meanwhile. Because the startup prune can take a live sidecar's rows when two
+sidecar pods overlap on a node, every sidecar reads its own `vrf_table` and
 `ifindex_vrf_table` rows back on each sweep and reapplies its VRFs and routes
 when any are missing, the same reapply a datapath reload triggers.
-A sidecar also retries a failed gateway publication on each sweep, at most
-four VPCs a sweep, so a publish that failed once does not wait for the VPC's
-next EndpointSlice change.
 While any VRF is installed, each sweep also reads `node_src_addr_table` and
 restores this node's source address when it is unset or wrong, since only a
 new VRF otherwise writes it.

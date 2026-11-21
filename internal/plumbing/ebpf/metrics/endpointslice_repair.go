@@ -29,13 +29,13 @@ type EndpointSliceRepair struct {
 func NewEndpointSliceRepair() *EndpointSliceRepair {
 	r := &EndpointSliceRepair{
 		restored: instmetrics.NewCounter(prometheus.CounterOpts{
-			Namespace: sidecarReturnNamespace,
+			Namespace: galacticNamespace,
 			Subsystem: endpointSliceRepairSubsystem,
 			Name:      "restored_total",
 			Help:      "Per-pod EndpointSlices the repair pass recreated after finding them missing.",
 		}),
 		superseded: instmetrics.NewGauge(prometheus.GaugeOpts{
-			Namespace: sidecarReturnNamespace,
+			Namespace: galacticNamespace,
 			Subsystem: endpointSliceRepairSubsystem,
 			Name:      "superseded_pods",
 			Help: "Running pods on this node whose NetworkAttachmentDefinition names a VPC attachment " +
@@ -43,7 +43,7 @@ func NewEndpointSliceRepair() *EndpointSliceRepair {
 				"That attachment stays unprogrammed until the pod is recreated.",
 		}),
 		failures: instmetrics.NewCounter(prometheus.CounterOpts{
-			Namespace: sidecarReturnNamespace,
+			Namespace: galacticNamespace,
 			Subsystem: endpointSliceRepairSubsystem,
 			Name:      "failures_total",
 			Help:      "EndpointSlice repair passes that could not list this node's pods or write a slice.",

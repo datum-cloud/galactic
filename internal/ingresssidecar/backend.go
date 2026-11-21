@@ -104,19 +104,14 @@ func (kernelBackend) EnsureVRF(vpc string) (uint32, error) {
 		return 0, fmt.Errorf("resolve VRF table ID for vpc %s: %w", vpc, err)
 	}
 	// Without this, the egress route entries below have nothing attached in
-	// this pod's namespace to read them. vpc is threaded through, not just
-	// tableID, so this can also derive and assign the VPC's return-path gateway
-	// address when one is configured.
-	if err := ensureEgressDatapath(vpc, tableID); err != nil {
+	// this pod's namespace to read them.
+	if err := ensureEgressDatapath(tableID); err != nil {
 		return 0, fmt.Errorf("attach eBPF egress datapath for vpc %s: %w", vpc, err)
 	}
 	return tableID, nil
 }
 
 func (kernelBackend) RemoveVRF(vpc string) error {
-	if err := removeGatewayReplyRedirect(vpc); err != nil {
-		return fmt.Errorf("remove gateway reply redirect for vpc %s: %w", vpc, err)
-	}
 	tableID, err := vrf.TableID(vpc)
 	switch {
 	case errors.Is(err, vrf.ErrNotFound):
@@ -153,7 +148,7 @@ func (kernelBackend) EnsureRoute(prefix *net.IPNet, sid net.IP, tableID uint32) 
 }
 
 func (kernelBackend) RemoveRoute(prefix *net.IPNet, tableID uint32) error {
-	if err := removeRedirectRoute(prefix); err != nil {
+	if err := removeRedirectRoute(prefix, tableID); err != nil {
 		return fmt.Errorf("remove main-table redirect route for %s: %w", prefix, err)
 	}
 	if err := srv6.RouteEgressDel(prefix, tableID); err != nil {

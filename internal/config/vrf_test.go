@@ -8,13 +8,27 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 )
 
+// validVRFEnv sets the variables the sidecar requires.
+func validVRFEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv(EnvVRFNodeName, "node-a")
+	t.Setenv(EnvVRFPodNamespace, "envoy")
+	t.Setenv(EnvVRFAttachmentSelector, "galactic.datumapis.com/proxy=envoy")
+}
+
 func TestVRFConfigDefaults(t *testing.T) {
+	t.Setenv(EnvNodeNameLegacy, "")
 	cfg := NewVRFConfig()
 
 	if cfg.MetricsPort != DefaultVRFMetricsPort {
 		t.Errorf("MetricsPort = %d, want %d", cfg.MetricsPort, DefaultVRFMetricsPort)
+	}
+	if cfg.HealthPort != DefaultVRFHealthPort {
+		t.Errorf("HealthPort = %d, want %d", cfg.HealthPort, DefaultVRFHealthPort)
 	}
 	if cfg.TeardownGracePeriod != DefaultVRFTeardownGracePeriod {
 		t.Errorf("TeardownGracePeriod = %v, want %v", cfg.TeardownGracePeriod, DefaultVRFTeardownGracePeriod)
@@ -25,8 +39,8 @@ func TestVRFConfigDefaults(t *testing.T) {
 	if cfg.NodeName != "" {
 		t.Errorf("NodeName = %q, want empty (no generic default)", cfg.NodeName)
 	}
-	if cfg.GatewayPrefix != "" {
-		t.Errorf("GatewayPrefix = %q, want empty (no generic default)", cfg.GatewayPrefix)
+	if cfg.WorkerSocket != workerv1alpha1.DefaultSocketPath || cfg.WorkerTokenFile != DefaultVRFWorkerTokenFile {
+		t.Errorf("Worker socket and token = %q, %q; want the defaults", cfg.WorkerSocket, cfg.WorkerTokenFile)
 	}
 }
 
@@ -34,7 +48,8 @@ func TestVRFConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvVRFMetricsPort, "9999")
 	t.Setenv(EnvVRFTeardownGracePeriod, "45s")
 	t.Setenv(EnvVRFSweepInterval, "10s")
-	t.Setenv(EnvVRFGatewayPrefix, "fd00:6741:7761::/48")
+	t.Setenv(EnvVRFWorkerSocket, "/run/w.sock")
+	validVRFEnv(t)
 
 	cfg := NewVRFConfig()
 
@@ -47,8 +62,9 @@ func TestVRFConfigEnvOverride(t *testing.T) {
 	if cfg.SweepInterval != 10*time.Second {
 		t.Errorf("SweepInterval = %v, want 10s", cfg.SweepInterval)
 	}
-	if cfg.GatewayPrefix != "fd00:6741:7761::/48" {
-		t.Errorf("GatewayPrefix = %q, want fd00:6741:7761::/48", cfg.GatewayPrefix)
+	if cfg.WorkerSocket != "/run/w.sock" || cfg.PodNamespace != "envoy" ||
+		cfg.AttachmentSelector != "galactic.datumapis.com/proxy=envoy" || cfg.NodeName != "node-a" {
+		t.Errorf("config = %+v, want the environment's values", cfg)
 	}
 }
 
@@ -62,6 +78,11 @@ func TestVRFConfigValidate(t *testing.T) {
 			name:    testCaseInvalidMetricsPort,
 			envVars: map[string]string{EnvVRFMetricsPort: "0"},
 			wantErr: testErrMetricsPortRange,
+		},
+		{
+			name:    "health port equals metrics port",
+			envVars: map[string]string{EnvVRFHealthPort: "9182"},
+			wantErr: "health port",
 		},
 		{
 			name:    "non-positive grace period",
@@ -82,24 +103,24 @@ func TestVRFConfigValidate(t *testing.T) {
 			wantErr: "sweep interval must not be greater than",
 		},
 		{
-			name:    "invalid gateway prefix",
-			envVars: map[string]string{EnvVRFGatewayPrefix: "not-a-cidr"},
-			wantErr: "gateway prefix",
+			name:    "no node name",
+			envVars: map[string]string{EnvVRFNodeName: "", EnvNodeNameLegacy: ""},
+			wantErr: "node name is required",
 		},
 		{
-			name:    "gateway prefix must be IPv6",
-			envVars: map[string]string{EnvVRFGatewayPrefix: "10.0.0.0/24"},
-			wantErr: "must be an IPv6 CIDR",
+			name:    "no pod namespace",
+			envVars: map[string]string{EnvVRFPodNamespace: ""},
+			wantErr: "pod namespace is required",
 		},
 		{
-			name:    "gateway prefix must be byte-aligned",
-			envVars: map[string]string{EnvVRFGatewayPrefix: "fd00:6741:7761::/50"},
-			wantErr: "byte-aligned",
+			name:    "no attachment selector",
+			envVars: map[string]string{EnvVRFAttachmentSelector: ""},
+			wantErr: "attachment selector is required",
 		},
 		{
-			name:    "valid gateway prefix",
-			envVars: map[string]string{EnvVRFGatewayPrefix: "fd00:6741:7761::/48"},
-			wantErr: "",
+			name:    "malformed attachment selector",
+			envVars: map[string]string{EnvVRFAttachmentSelector: "a=b=c"},
+			wantErr: "attachment selector",
 		},
 		{
 			name:    testCaseValidConfig,
@@ -110,6 +131,7 @@ func TestVRFConfigValidate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			validVRFEnv(t)
 			for k, v := range tc.envVars {
 				t.Setenv(k, v)
 			}
