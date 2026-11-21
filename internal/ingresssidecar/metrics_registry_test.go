@@ -36,6 +36,6 @@ func (m *NodeSourceMetrics) collectors() []prometheus.Collector {
 	return []prometheus.Collector{m.check, m.repairs}
 }
 
-func (m *GatewayMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.publicationEnabled, m.addressAssignmentEnabled, m.vrfs, m.oldest, m.operations}
+func (m *ClaimMetrics) collectors() []prometheus.Collector {
+	return []prometheus.Collector{m.connected, m.capabilities, m.claims, m.destinations, m.operations}
 }

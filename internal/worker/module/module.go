@@ -117,6 +117,9 @@ type Claim struct {
 	// Addresses are the addresses of the claim's own attachment, from its
 	// trusted source: for a routed link, the sources its pod end may use.
 	Addresses []netip.Addr
+	// AttachmentID is the claim attachment's base62 identifier, empty when
+	// its trusted source records none.
+	AttachmentID string
 	// Destinations are the claim's resolved destinations for the module's
 	// mode, each with an available capability.
 	Destinations []Destination
@@ -224,6 +227,10 @@ type HandoffInterface struct {
 	// TenantSID is, for the NAT end of a pair serving a Local shard, the
 	// SID that names the claim's VPC on this node.
 	TenantSID string
+	// LinkLocal is a routed link host end's IPv6 link-local address, the
+	// pod's next hop through the link. It is invalid for other roles and
+	// until the kernel assigns it.
+	LinkLocal netip.Addr
 }
 
 // HandoffReporter is implemented by a module that creates interfaces for a

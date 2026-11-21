@@ -1,0 +1,31 @@
+# Read-only. The sidecar lists the EndpointSlices behind the proxy's
+# VPCAttachments and reads its node's BGPRouter. It writes no
+# bgpvrfinstances or bgpadvertisements: the Worker owns those, reached
+# through its socket (see README.md).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: galactic-vrf
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["galactic.datumapis.com"]
+    resources:
+      - vpcattachments
+      - bgprouters
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: galactic-vrf
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: galactic-vrf
+subjects:
+  - kind: ServiceAccount
+    name: galactic-vrf
+    namespace: envoy-gateway-system

@@ -226,7 +226,18 @@ func (r *BGPAdvertisementReconciler) clearWithdrawnAdvertisement(ctx context.Con
 		if attachment.Status.Node == "" || key.Name != identity+"-"+attachment.Status.Node {
 			continue
 		}
-		attachment.Status.Node = ""
+		// An attachment that names its pod keeps the node that pod is
+		// scheduled to (PodCertifiedNode), such as a proxy's attachment
+		// whose Worker advertisement went with its claim.
+		reader := r.APIReader
+		if reader == nil {
+			reader = r.Client
+		}
+		node, err := PodCertifiedNode(ctx, reader, attachment)
+		if err != nil {
+			return err
+		}
+		attachment.Status.Node = node
 		attachment.Status.HostInterface = ""
 		attachment.Status.VRFInterface = ""
 		attachment.Status.PodSubnet = ""

@@ -1,0 +1,47 @@
+# Privileges the rendered manifests beside this file grant, checked by
+# hack/check-privileges in task test:manifests. Review every change.
+# Regenerate with check-privileges -write, then task lint-fix.
+#
+# The galactic-vrf sidecar, added to a stand-in Envoy by config/galactic-vrf:
+# NET_ADMIN for its VRFs, routes and tc attachments in the pod's network
+# namespace; BPF to open and update the node's pinned uSID maps; SYS_ADMIN
+# because attaching usid_egress first opens the programs already on the hook
+# by ID. Kubernetes refuses allowPrivilegeEscalation: false beside SYS_ADMIN.
+# It runs as root to write the hostPath bpffs and to reach Worker's
+# root-owned socket. Its API access is read-only. The stand-in envoy
+# container is the fixture's, not the Component's.
+bindings:
+  ClusterRoleBinding/galactic-vrf:
+  - ServiceAccount/envoy-gateway-system/galactic-vrf -> ClusterRole/galactic-vrf
+roles:
+  ClusterRole/galactic-vrf:
+  - discovery.k8s.io/endpointslices:get
+  - discovery.k8s.io/endpointslices:list
+  - discovery.k8s.io/endpointslices:watch
+  - galactic.datumapis.com/bgprouters:get
+  - galactic.datumapis.com/bgprouters:list
+  - galactic.datumapis.com/bgprouters:watch
+  - galactic.datumapis.com/vpcattachments:get
+  - galactic.datumapis.com/vpcattachments:list
+  - galactic.datumapis.com/vpcattachments:watch
+workloads:
+  Deployment/envoy-gateway-system/envoy:
+    containers:
+      envoy:
+        allowPrivilegeEscalation: true
+        dropsAll: false
+        runAsGroup: image
+        runAsUser: image
+        writableRootFilesystem: true
+      galactic-vrf:
+        allowPrivilegeEscalation: true
+        capabilities:
+        - BPF
+        - NET_ADMIN
+        - SYS_ADMIN
+        dropsAll: true
+        hostPaths:
+        - /run/galactic-worker:rw
+        - /sys/fs/bpf:rw
+        runAsGroup: image
+        runAsUser: "0"
