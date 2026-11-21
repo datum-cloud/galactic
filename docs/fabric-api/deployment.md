@@ -28,7 +28,8 @@ None of these are created by this repository's manifests.
 2. **An `Issuer` named `fabric-api`** in `galactic-system`, backed by a dedicated
    per-cell fabric-api CA. Not a general cluster CA: trust is per cell. Infra owns
    it in production; the lab's stand-in is
-   `deploy/containerlab/resources/fabric-api/pki/pki.yaml`.
+   `deploy/containerlab/resources/fabric-api/pki/pki.yaml`, with a CA Secret that
+   `deploy/containerlab/scripts/deploy-fabric-api.sh` creates once per cell.
 3. **The `FabricQuery` CRD** (`fabricqueries.galactic.datumapis.com`). Infra owns
    its lifecycle in every cell. `config/fabric-api/crd/` is a copy for the lab and
    tests only; do not apply it where infra manages the CRD.
