@@ -21,6 +21,10 @@ const vethType = "veth"
 
 func ownerAlias(id string) string { return aliasPrefix + id }
 
+// Alias is the interface alias that stamps a host link with id, as List
+// reads it back.
+func Alias(id string) string { return ownerAlias(id) }
+
 // LinkID is the ID galactic-edge stamps on an attachment's links: the VPC
 // identifier and the EdgeAttachment's UID. The UID makes a recreated
 // attachment a different owner; the VPC names the ownership scope a link

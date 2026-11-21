@@ -36,35 +36,40 @@ type PinnedDatapath struct{ PinDir string }
 // carries only its own address from the moment usid_egress and tp_deliver
 // are attached to it, then its traffic policy row and programs
 // (attachreg.RegisterHostLink).
-func (d PinnedDatapath) Register(vrfTable, ifindex uint32, ifname string, addr netip.Addr) error {
+func (d PinnedDatapath) Register(l Link) error {
 	gates, err := forwardgatemap.OpenPinned(d.PinDir)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = gates.Close() }()
-	if err := gates.SetLink(ifindex, addr); err != nil {
+	if err := gates.SetLink(l.Index, l.Addr); err != nil {
 		return err
 	}
-	return attachreg.RegisterHostLink(d.PinDir, vrfTable, ifindex, ifname, addr)
+	return attachreg.RegisterHostLink(d.PinDir, l.Table, l.Index, l.Name, l.Addr)
 }
 
 // Unregister implements Datapath: the link's gates first, then its rows. The
 // link row stays until Forget, so the link stays gated while it exists. A
 // datapath whose gate maps are not pinned holds no gate.
-func (d PinnedDatapath) Unregister(ifindex uint32) error {
-	gates, err := forwardgatemap.OpenPinned(d.PinDir)
+func (d PinnedDatapath) Unregister(l Link) error {
+	if err := deleteGates(d.PinDir, l.Index); err != nil {
+		return err
+	}
+	return attachreg.UnregisterHostLink(d.PinDir, l.Index)
+}
+
+// deleteGates closes every gate of ifindex. A datapath whose gate maps are
+// not pinned holds no gate.
+func deleteGates(pinDir string, ifindex uint32) error {
+	gates, err := forwardgatemap.OpenPinned(pinDir)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
+		return nil
 	case err != nil:
 		return err
-	default:
-		err = gates.DeleteGates(ifindex)
-		_ = gates.Close()
-		if err != nil {
-			return err
-		}
 	}
-	return attachreg.UnregisterHostLink(d.PinDir, ifindex)
+	defer func() { _ = gates.Close() }()
+	return gates.DeleteGates(ifindex)
 }
 
 // Forget implements Datapath.
@@ -81,8 +86,8 @@ func (d PinnedDatapath) Forget(ifindex uint32) error {
 }
 
 // SyncRoutes implements Datapath (attachreg.SyncHostLinkRoutes).
-func (d PinnedDatapath) SyncRoutes(vrfTable uint32, want []netip.Prefix) error {
-	return attachreg.SyncHostLinkRoutes(d.PinDir, vrfTable, want)
+func (d PinnedDatapath) SyncRoutes(vrfTable uint32, links []LinkRoutes) error {
+	return attachreg.SyncHostLinkRoutes(d.PinDir, vrfTable, Want(links))
 }
 
 // EncapMTU returns encap_mtu_table's limit, opening the map for every call

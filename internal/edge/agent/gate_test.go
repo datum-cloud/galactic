@@ -751,11 +751,11 @@ func TestClosedIsRecordedOnlyUnderTheFence(t *testing.T) {
 	}
 }
 
-// TestGateSharesTheVPCFence: gates commit in the same write-fence scope GC
-// and the attachment pass use, and a write by GC, which does not own the
-// scope, between two gate commits neither loses the scope nor stops the
-// gate from being extended.
-func TestGateSharesTheVPCFence(t *testing.T) {
+// TestGateCommitsInTheEdgeGateScope: gates commit in the VPC's edge gate
+// scope, which only galactic-edge processes own, not in the VPC's own scope
+// GC and Worker write; a write by GC to the VPC's scope between two gate
+// commits neither loses a scope nor stops the gate from being extended.
+func TestGateCommitsInTheEdgeGateScope(t *testing.T) {
 	f := newFixture(t)
 	f.grant()
 	a := f.agent()
@@ -763,22 +763,26 @@ func TestGateSharesTheVPCFence(t *testing.T) {
 	f.reconcile(a)
 	f.lease(h, f.boot)
 	f.accept(h, 1)
-	scope := ownership.VPCScope(vpcA)
-	before, err := a.Ownership.Read(scope)
-	if err != nil {
-		t.Fatal(err)
+	vpcScope, gateScope := ownership.VPCScope(vpcA), EdgeGateScope(vpcA)
+	read := func(scope string) ownership.Record {
+		t.Helper()
+		r, err := a.Ownership.Read(scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
 	}
+	vpcBefore, gateBefore := read(vpcScope), read(gateScope)
 	f.gate(a)
-	after, err := a.Ownership.Read(scope)
-	if err != nil {
-		t.Fatal(err)
+	if got := read(gateScope); got.Revision <= gateBefore.Revision || got.Owner != a.Owner {
+		t.Fatalf("opening a gate left scope %s at %+v", gateScope, got)
 	}
-	if after.Revision <= before.Revision {
-		t.Fatalf("opening a gate left scope %s at revision %d", scope, after.Revision)
+	if got := read(vpcScope); got.Revision != vpcBefore.Revision {
+		t.Fatalf("opening a gate wrote scope %s: revision %d, was %d", vpcScope, got.Revision, vpcBefore.Revision)
 	}
 
-	// GC writes the scope under its lock without owning it.
-	if err := a.Ownership.Exclusive(scope, func() error { return nil }, func() error { return nil }); err != nil {
+	// GC writes the VPC's scope under its lock without owning it.
+	if err := a.Ownership.Exclusive(vpcScope, func() error { return nil }, func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	f.boot += time.Second
