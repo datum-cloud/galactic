@@ -344,13 +344,13 @@ pinned. Its own maps (`lt_*`) are pinned under `/sys/fs/bpf/galactic-local`
 (`--local-pin-dir`), so a restarted Worker keeps the rows the running programs
 read.
 
-| Program            | Hook                                                                               | Does                                                                                                                                                                                                          |
-| ------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local_rx`         | tc ingress of each public receiving device: its bond, or its VLANs when it has any | Delivers a packet whose metadata (`localprog/local_meta.h`) names a TAP a `local.tap` claim authorizes, on the PublicService path, and records the flow. A packet without the metadata goes on to the kernel. |
-| `local_link_rx`    | tc ingress of each destination's tenant interface, after galactic-cni's filters    | Sends a recorded flow's reply out of the device the flow arrived on, on the PublicService path, and a flow whose destination has a `PassThroughLocalNAT` entry into the VPC's pair, on the PublicNAT path.    |
-| `local_pair_rx`    | tc ingress of a pair's tenant end                                                  | Delivers the NAT end's return to the destination address it names in the pair's VPC, on the PublicNAT path.                                                                                                   |
-| `local_link_guard` | tc ingress of a routed link's host end                                             | Drops any source the link was not given.                                                                                                                                                                      |
-| `local_pair_napi`  | XDP, native, of a pair's tenant end                                                | Passes everything, so the tenant end receives what the NAT end's return redirects into the pair.                                                                                                              |
+| Program            | Hook                                                                                          | Does                                                                                                                                                                                                          |
+| ------------------ | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local_rx`         | tc ingress of each public receiving device: its bond, or its VLANs when it has any            | Delivers a packet whose metadata (`localprog/local_meta.h`) names a TAP a `local.tap` claim authorizes, on the PublicService path, and records the flow. A packet without the metadata goes on to the kernel. |
+| `local_link_rx`    | tc ingress of each destination's tenant interface, after galactic-cni's filters               | Sends a recorded flow's reply out of the device the flow arrived on, on the PublicService path, and a flow whose destination has a `PassThroughLocalNAT` entry into the VPC's pair, on the PublicNAT path.    |
+| `local_pair_rx`    | tc ingress of a pair's tenant end                                                             | Delivers the NAT end's return to the destination address it names in the pair's VPC, on the PublicNAT path.                                                                                                   |
+| `local_link_guard` | tcx ingress of a routed link's host end, at the head (clsact ingress on a kernel without tcx) | Drops any source the link was not given.                                                                                                                                                                      |
+| `local_pair_napi`  | XDP, native, of a pair's tenant end                                                           | Passes everything, so the tenant end receives what the NAT end's return redirects into the pair.                                                                                                              |
 
 The module keeps link lifecycle apart from program ownership. CNI creates and
 deletes tenant TAPs and veths; the module attaches only its own filters and
@@ -565,27 +565,67 @@ reports `local.socket` unavailable with `RoutedLinkUnavailable` and programs
 none of the sidecar's claims ([operations](operations.md#install)).
 
 **Sidecar side.** The sidecar owns everything inside the pod: the per-VPC pod
-VRF (a table from the sidecar range, starting at `0x10000`), the pod end's
-enslavement into it, the gateway `/128` address on the pod end (`NODAD`), and
-the per-backend routes. Envoy binds each upstream cluster's sockets to the
-VPC's VRF device (`SO_BINDTODEVICE`), which keeps overlapping backend addresses
-in two VPCs apart. Worker reports each destination's resolution (D11) in the
-claim's destination status, and the sidecar routes by it:
+VRF (a table from the sidecar range, starting at `0x10000`), which it creates
+itself, the pod end's enslavement into it, the gateway `/128` address on the
+pod end (`NODAD`), and the VRF's default route. Envoy binds each upstream
+cluster's sockets to the VPC's VRF device (`SO_BINDTODEVICE`), which keeps
+overlapping backend addresses in two VPCs apart.
 
-| Backend | Pod route                                                                                                                                                                                                                                       |
-| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Local   | A `/128` in the pod VRF's table, through the pod end, to the host end's `link_local`. The route has protocol `0x47`, so the sidecar removes only its own.                                                                                       |
-| Fabric  | Not supported yet ([#1487](https://github.com/datum-cloud/galactic/issues/1487)). The VRF's default route, with the gateway as its source, leads into the sidecar's in-pod encapsulating datapath (the `ivs<table>` and `ivp<table>` veth pair with `usid_egress`). |
+The pod VRF has one route of its own: a default route through the pod end to
+the host end's `link_local`, with the gateway as its source and protocol
+`0x47`, so the sidecar removes only its own (D43). Every backend, local or
+remote, is reached over the routed link, and the host VPC VRF decides. Worker
+still reports each destination's resolution (D11) in the claim's destination
+status, and the sidecar exports it as a metric, but routes by none of it.
 
-**Remote backends are not supported yet.** The in-pod datapath sends the
-encapsulated packet out of the pod's own interface with this node's SRv6
-source address as its outer source. A primary CNI that checks a pod's source
-address drops it there, and Cilium does. A request to a backend on another
-node therefore times out. [#1487](https://github.com/datum-cloud/galactic/issues/1487)
-sends remote backends over the routed link into the host VRF instead, where
-Worker attaches the host's egress datapath to the link's host end. Until then,
-the in-pod datapath stays in place, and its `egress_route_table` rows stay in
-the sidecar's private table range, where the sidecar is the only writer.
+**Host egress on the routed link.** Worker's Local module registers the
+routed link's host end with the host egress datapath, as galactic-cni does a
+tenant's interface: its `ifindex_vrf_table` and egress-kind rows (from the
+VPC's lowest-Argument `vrf_table` entry), `usid_service_egress` and
+`usid_egress` on tc ingress, and `tp_deliver` on tc egress. A local backend's
+traffic passes through to the host VRF, as a tenant's does. A remote
+backend's is SRv6-encapsulated toward the `egress_route_table` entries Worker's
+Fabric module writes for the claim's Fabric destinations, and leaves through
+the host's fabric path, so it never crosses the pod's own interface or its
+primary CNI. Replies return to the advertised gateway address, which Local's
+`/128` delivers over the link. Worker also registers the node's SRv6 source
+address, so a node with no tenant can encapsulate. It removes all of this
+with the link.
+
+The host end is registered as an infrastructure interface in the traffic
+policy maps, so the proxy's egress is not subject to proxy-side traffic
+policy, as with the local path before; each backend's own interface still
+enforces its policy. Policy for the proxy's own egress is not implemented.
+
+**Guard first (D44).** The guard (`local_link_guard`) runs at the head of the
+host end's tcx ingress chain, which the kernel runs before every clsact
+filter, so it checks the source before `usid_egress` can encapsulate. It
+stays there however galactic-cni, GC or the installer re-chain the clsact
+filters. A tcx program attached at the head later would run first, so Worker
+checks the order on every pass and moves the guard back to the head; after
+one failed move it waits for a different program to take the head before it
+tries again, so the link does not flap. When the guard cannot be first, or
+the kernel has no tcx (the guard then stays a clsact filter), Worker
+detaches the egress datapath from the host end and reports the claim's
+programmed Fabric destinations not forward-ready with
+`RoutedLinkEgressUnavailable`; Local destinations stay ready. A new Worker
+attaches its guard at the head before it detaches the earlier one, so a
+restart leaves no unguarded moment.
+
+A claim's Fabric destinations are forward-ready only once its routed link
+exists and carries the egress datapath. Until then they report the link's
+own reason, such as `Pending` or `HandoffInterfaceMissing`.
+
+**In-pod encapsulation.** The sidecar's earlier in-pod datapath (the
+`ivs<table>` and `ivp<table>` veth pair with `usid_egress`, fed from
+EndpointSlice SIDs) runs only with `--in-pod-encapsulation`, off by default.
+It sends encapsulated packets out of the pod's own interface with the node's
+SRv6 address as the outer source, which a primary CNI that checks a pod's
+source address, such as Cilium, drops. With the flag off, the sidecar removes
+what an earlier sidecar left in the pod: the pair, its main-table redirect
+routes and its rows in the sidecar's private table range. Its
+`egress_route_table` rows stay in that range, where the sidecar is the only
+writer.
 
 Worker does not take the sidecar's rows (D41).
 
