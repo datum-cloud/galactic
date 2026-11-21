@@ -205,8 +205,9 @@ stop_backends() {
     [ -n "${pod}" ] || continue
     kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- cat /tmp/envoy-backend.log \
       </dev/null >"${OUT}/logs/backend-${p//\//-}.log" 2>&1 || true
-    kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- sh -c \
-      'pkill -f "[e]nvoy-backend.py"; rm -f /tmp/envoy-backend.py /tmp/envoy-backend.log' </dev/null >/dev/null 2>&1 || true
+    kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- pkill -f '[e]nvoy-backend[.]py' </dev/null >/dev/null 2>&1 || true
+    kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- rm -f /tmp/envoy-backend.py /tmp/envoy-backend.log \
+      </dev/null >/dev/null 2>&1 || true
   done
 }
 
@@ -321,7 +322,7 @@ restore_checks() {
   for p in "${PATHS[@]}"; do
     pod=$(ready_pod "${BCP[${p}]}" "${BNS[${p}]}" "app=${BAPP[${p}]}" || true)
     [ -n "${pod}" ] || continue
-    out=$(kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- sh -c "pgrep -f '[e]nvoy-backend.py' || true" </dev/null)
+    out=$(kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- pgrep -f '[e]nvoy-backend[.]py' </dev/null || true)
     record restore "no backend server left in ${p}'s guest" "" "$(oneline "${out}")"
   done
   record restore "the rig container is gone" yes "$(docker inspect "${RIG}" >/dev/null 2>&1 && echo no || echo yes)"
@@ -554,9 +555,12 @@ start_backend() {
   [ -n "${pod}" ] || return 1
   kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec -i "${pod}" -- sh -c 'cat >/tmp/envoy-backend.py' \
     <"${SCRIPT_DIR}/envoy-backend.py"
-  kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- sh -c "pkill -f '[e]nvoy-backend.py'; \
-    setsid nohup python3 /tmp/envoy-backend.py ${p#*/} ${p%%/*} ${BNODE[${p}]} 8080 \
-    >/tmp/envoy-backend.log 2>&1 </dev/null & exit 0" </dev/null
+  # pkill runs on its own, with no shell: a shell's command line would hold
+  # the server's path and match the pattern, and pkill would end the shell
+  # before it starts the server.
+  kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- pkill -f '[e]nvoy-backend[.]py' </dev/null || true
+  kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- sh -c "setsid nohup python3 /tmp/envoy-backend.py \
+    ${p#*/} ${p%%/*} ${BNODE[${p}]} 8080 >/tmp/envoy-backend.log 2>&1 </dev/null & exit 0" </dev/null
   for i in $(seq 1 25); do
     out=$(kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- ss -Hltn 'sport = :8080' </dev/null || true)
     [ -n "${out}" ] && return 0
