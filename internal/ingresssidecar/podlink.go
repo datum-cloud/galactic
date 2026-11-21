@@ -56,16 +56,12 @@ func configurePodLink(vrfName, podEnd string, gateway []netip.Addr, hostLL netip
 			return fmt.Errorf("enslave %s to %s: %w", podEnd, vrfName, err)
 		}
 	}
-	// The gateway addresses are this pod's own: no other host on the link
-	// can hold them, so duplicate address detection would only delay them.
 	for _, a := range gateway {
 		if !a.Is6() || a.Is4In6() {
 			continue
 		}
-		addr := &netlink.Addr{IPNet: &net.IPNet{IP: a.AsSlice(), Mask: net.CIDRMask(128, 128)},
-			Flags: unix.IFA_F_NODAD}
-		if err := netlink.AddrReplace(pl, addr); err != nil {
-			return fmt.Errorf("assign gateway %s to %s: %w", a, podEnd, err)
+		if err := ensureGateway(pl, vrfLink.Table, a); err != nil {
+			return err
 		}
 	}
 	if err := removeStaleGateways(pl, gateway); err != nil {
@@ -77,6 +73,67 @@ func configurePodLink(vrfName, podEnd string, gateway []netip.Addr, hostLL netip
 		}
 	}
 	return syncLocalRoutes(vrfLink.Table, pl.Attrs().Index, hostLL, local)
+}
+
+// ensureGateway assigns the gateway address a to the pod end l and makes
+// sure the kernel's local route for it exists in the VRF's table. Without
+// that route the pod treats the gateway as an on-link neighbor instead of
+// its own address, and answers nothing sent to it. Replacing an address that
+// is already assigned removes that local route, so ensureGateway adds a only
+// when it is missing, and deletes and re-adds it when its local route is gone.
+// The gateway addresses are this pod's own: no other host on the link can hold
+// them, so duplicate address detection would only delay them.
+func ensureGateway(l netlink.Link, table uint32, a netip.Addr) error {
+	addr := &netlink.Addr{IPNet: &net.IPNet{IP: a.AsSlice(), Mask: net.CIDRMask(128, 128)},
+		Flags: unix.IFA_F_NODAD}
+	assigned, err := hasAddr(l, a)
+	if err != nil {
+		return err
+	}
+	if assigned {
+		ok, err := hasLocalRoute(table, l.Attrs().Index, a)
+		if err != nil || ok {
+			return err
+		}
+		if err := netlink.AddrDel(l, addr); err != nil && !errors.Is(err, unix.EADDRNOTAVAIL) {
+			return fmt.Errorf("remove gateway %s from %s to restore its local route: %w", a, l.Attrs().Name, err)
+		}
+	}
+	if err := netlink.AddrAdd(l, addr); err != nil && !errors.Is(err, unix.EEXIST) {
+		return fmt.Errorf("assign gateway %s to %s: %w", a, l.Attrs().Name, err)
+	}
+	return nil
+}
+
+// hasAddr reports whether a is assigned to l.
+func hasAddr(l netlink.Link, a netip.Addr) (bool, error) {
+	addrs, err := netlink.AddrList(l, netlink.FAMILY_V6)
+	if err != nil {
+		return false, fmt.Errorf("list addresses of %s: %w", l.Attrs().Name, err)
+	}
+	for _, x := range addrs {
+		if ip, ok := netip.AddrFromSlice(x.IP); ok && ip.Unmap() == a {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// hasLocalRoute reports whether table holds the kernel's local route for a
+// on the link with index linkIdx.
+func hasLocalRoute(table uint32, linkIdx int, a netip.Addr) (bool, error) {
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6,
+		&netlink.Route{Table: int(table), Type: unix.RTN_LOCAL},
+		netlink.RT_FILTER_TABLE|netlink.RT_FILTER_TYPE)
+	if err != nil {
+		return false, fmt.Errorf("list local routes of table %d: %w", table, err)
+	}
+	for _, r := range routes {
+		if dst, ok := routeDst(r); ok && dst == a && r.LinkIndex == linkIdx {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // syncLocalRoutes makes the routes podLinkProtocol owns in table exactly a
