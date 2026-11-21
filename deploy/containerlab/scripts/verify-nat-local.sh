@@ -363,7 +363,9 @@ hairpin_start() {
   done
 }
 hairpin_check() {
-  docker exec "${EDGE}" sh -c 'pkill -INT -f nat-local-hairpin- || true'
+  # The bracket keeps the pattern from matching this shell's own command
+  # line, which pkill would otherwise interrupt along with the captures.
+  docker exec "${EDGE}" sh -c 'pkill -INT -f "[n]at-local-hairpin-" || true'
   sleep 2
   local b n total=0
   for b in "${BONDS[@]}"; do

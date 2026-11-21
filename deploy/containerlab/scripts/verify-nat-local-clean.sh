@@ -80,8 +80,12 @@ esac
   die "galactic-nat's pod template differs from the deployed one"
 kc -n galactic-system rollout status daemonset/galactic-nat --timeout=300s >/dev/null ||
   die "galactic-nat is not rolled out"
-read -r desired ready updated < <(kc -n galactic-system get ds galactic-nat \
-  -o jsonpath='{.status.desiredNumberScheduled} {.status.numberReady} {.status.updatedNumberScheduled}')
+# jsonpath ends without a newline, which read reports as a failure, so the
+# counts are captured first and read from a here-string.
+counts=$(kc -n galactic-system get ds galactic-nat \
+  -o jsonpath='{.status.desiredNumberScheduled} {.status.numberReady} {.status.updatedNumberScheduled}') ||
+  die "cannot read galactic-nat's rollout counts"
+read -r desired ready updated <<<"${counts}"
 [ "${ready}" = "${desired}" ] && [ "${updated}" = "${desired}" ] ||
   die "galactic-nat has ${ready}/${desired} Ready and ${updated}/${desired} updated"
 echo "ok   galactic-nat runs its deployed template, ${ready}/${desired} Ready"
