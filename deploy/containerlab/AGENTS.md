@@ -47,3 +47,4 @@ Verification commands are in [docs/verification.md](docs/verification.md).
 Deploying the five test VPCs and verifying cross-site/same-node connectivity is documented in [docs/tenants.md](docs/tenants.md).
 The dedicated-placement baseline (`ns80`, `task baseline:twice`) is documented in [docs/baseline.md](docs/baseline.md).
 The Local handoff checks (`ns80-tap`, `task handoff:twice`) are documented in [docs/handoffs.md](docs/handoffs.md).
+The Galactic Worker install and diagnostics checks (`task worker:verify`) are documented in [docs/worker.md](docs/worker.md).

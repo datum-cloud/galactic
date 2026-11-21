@@ -445,6 +445,9 @@ func TestRoutedLinkRoot(t *testing.T) {
 	wantState(t, st, claims[0], false, false, false, workerv1alpha1.ReasonHandoffInterfaceMissing)
 }
 
+// localMaps are the Local module's pinned maps that hold per-claim rows.
+var localMaps = []string{"lt_tap", "lt_link", "lt_guest", "lt_pair", "lt_guard"}
+
 // TestWithdrawalRoot checks that releasing every claim removes everything
 // Local programmed, that a claim's links are reported until they are gone,
 // and that CNI's state stays.
@@ -497,7 +500,7 @@ func TestWithdrawalRoot(t *testing.T) {
 		}
 		return nil
 	})
-	for _, name := range []string{"lt_tap", "lt_link", "lt_guest", "lt_pair", "lt_guard"} {
+	for _, name := range localMaps {
 		m, err := ebpf.LoadPinnedMap(filepath.Join(r.pin, "local", name), nil)
 		if err != nil {
 			t.Fatal(err)

@@ -128,8 +128,16 @@ func canonical(vpc string) string {
 // galactic-worker incarnation owns vpc's scope, since that Worker reclaims
 // the VPC's state itself. The write makes every ticket galactic-edge holds for vpc stale,
 // so a change it prepared before the reclaim is refused and prepared again.
+//
+// A scope a Worker handback left (ownership.HandedBack) is reclaimed like any
+// scope no Worker owns, and once the reclaim succeeds its handback label is
+// released, leaving the scope unowned: nothing else adopts a scope whose VPC
+// the node no longer serves. The release runs only while the label Reclaim
+// saw still owns the scope, so a Worker that took it back meanwhile keeps it.
 func (g *Guard) Reclaim(ctx context.Context, vpc string, reclaim func() error) error {
-	return g.Ownership.ExclusiveIf(ownership.VPCScope(vpc), func(r ownership.Record) error {
+	scope := ownership.VPCScope(vpc)
+	var handedBack string
+	err := g.Ownership.ExclusiveIf(scope, func(r ownership.Record) error {
 		if err := ownership.RefuseWorkerOwned(r); err != nil {
 			return err
 		}
@@ -142,6 +150,19 @@ func (g *Guard) Reclaim(ctx context.Context, vpc string, reclaim func() error) e
 		if _, inUse := vpcs[canonical(vpc)]; inUse {
 			return fmt.Errorf("%w: VPC %s", ErrInUse, vpc)
 		}
+		if ownership.HandedBack(r.Owner) {
+			handedBack = r.Owner
+		}
 		return nil
 	}, reclaim)
+	if err != nil || handedBack == "" {
+		return err
+	}
+	_, err = g.Ownership.Relinquish(scope, func(r ownership.Record) bool {
+		return r.Owner == handedBack && !r.Transitioning
+	}, "")
+	if err != nil && !errors.Is(err, ownership.ErrNotOwner) {
+		return fmt.Errorf("release the handed-back scope of VPC %s: %w", vpc, err)
+	}
+	return nil
 }

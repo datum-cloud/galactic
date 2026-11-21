@@ -175,6 +175,16 @@ type Change interface {
 	Empty() bool
 }
 
+// DriftDescriber is implemented by a Change that can tell drift from a
+// retry. Worker reports a non-empty change of such a module, planned while the
+// scope's desired state is the one it last committed, as drift: host state
+// that changed under Worker, such as a hook another process removed. Drift
+// returns the first difference and false when the change instead retries
+// work the module's last Apply left undone.
+type DriftDescriber interface {
+	Drift() (detail string, ok bool)
+}
+
 // Capability is the state of one capability a module serves.
 type Capability struct {
 	Name      string
