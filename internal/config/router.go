@@ -203,8 +203,8 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"bmp-policy", "bmp_policy"},
 		{"bmp-statistics-interval", "bmp_statistics_interval"},
 		{"gobgp-api-dir", "gobgp_api_dir"},
-		{"worker-socket", keyWorkerSocket},
-		{"worker-token-file", keyWorkerTokenFile},
+		{flagWorkerSocket, keyWorkerSocket},
+		{flagWorkerTokenFile, keyWorkerTokenFile},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {

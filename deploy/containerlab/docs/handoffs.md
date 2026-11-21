@@ -14,6 +14,9 @@ The checks run on `dfw-worker`, the compute node of the
 [dedicated-placement baseline](baseline.md), against both of `ns80`'s VPCs.
 Their results and what they changed in the Worker contract are in
 [contract amendments](../../../docs/worker/contract.md#local-handoffs).
+The same `local.socket` handoff, made by Worker for the `galactic-vrf`
+sidecar and used by a real Envoy, is checked by
+[the Envoy socket checks](envoy-socket.md).
 
 ## Running
 

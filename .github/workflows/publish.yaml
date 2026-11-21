@@ -182,10 +182,7 @@ jobs:
       platforms: ${{ needs.platforms.outputs.platforms }}
     secrets: inherit
 
-  # galactic-vrf, the #855 ingress sidecar, deliberately has no entry in
-  # publish-kustomize-bundles below: it has no config/galactic-vrf base to
-  # stamp an image into yet (the #856 deployment contract is still open).
-  # Publishing the image is what unblocks that work.
+  # Nothing here stamps this image's tag into the config/galactic-vrf Component.
   publish-galactic-vrf-image:
     needs: platforms
     permissions:

@@ -13,17 +13,17 @@ import (
 	"go.datum.net/galactic/internal/metadata"
 )
 
-// testCmd creates a cobra command with the same flags as newRootCommand.
+// testCmd returns the root command, whose flags BindFlags reads.
 func testCmd(t *testing.T) *cobra.Command {
 	t.Helper()
-	cmd := &cobra.Command{Use: "test"}
-	cmd.Flags().IntP("metrics-port", "", config.DefaultVRFMetricsPort, "Metrics listen port")
-	cmd.Flags().DurationP("teardown-grace-period", "", config.DefaultVRFTeardownGracePeriod, "Teardown grace period")
-	cmd.Flags().DurationP("sweep-interval", "", config.DefaultVRFSweepInterval, "Sweep interval")
-	return cmd
+	return newRootCommand()
 }
 
 func TestFlagDefaults(t *testing.T) {
+	// The settings that have no default.
+	t.Setenv(config.EnvVRFNodeName, "node-a")
+	t.Setenv(config.EnvVRFPodNamespace, "envoy")
+	t.Setenv(config.EnvVRFAttachmentSelector, "galactic.datumapis.com/proxy=envoy")
 	cfg := config.NewVRFConfig()
 	cmd := testCmd(t)
 	cfg.BindFlags(cmd.Flags())
@@ -36,6 +36,12 @@ func TestFlagDefaults(t *testing.T) {
 	}
 	if cfg.SweepInterval != config.DefaultVRFSweepInterval {
 		t.Errorf("SweepInterval = %v, want %v", cfg.SweepInterval, config.DefaultVRFSweepInterval)
+	}
+	if cfg.WorkerSocket == "" || cfg.WorkerTokenFile != config.DefaultVRFWorkerTokenFile {
+		t.Errorf("Worker socket and token = %q, %q; want the defaults", cfg.WorkerSocket, cfg.WorkerTokenFile)
+	}
+	if cfg.HealthPort != config.DefaultVRFHealthPort {
+		t.Errorf("HealthPort = %d, want %d", cfg.HealthPort, config.DefaultVRFHealthPort)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate() with defaults: %v", err)

@@ -152,13 +152,6 @@ const (
 // keyGatewayNamespace is EnvGatewayNamespace's key.
 const keyGatewayNamespace = "namespace"
 
-// Viper keys of a service's galactic-worker socket and token file, shared
-// by every service that is a Worker client.
-const (
-	keyWorkerSocket    = "worker_socket"
-	keyWorkerTokenFile = "worker_token_file"
-)
-
 // EnvGatewayXDPAttach's values.
 const (
 	GatewayXDPAttachDispatch = "dispatch"
