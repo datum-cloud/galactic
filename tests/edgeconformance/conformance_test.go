@@ -1443,26 +1443,46 @@ func rowGC(t *testing.T, l *lab, a *side) {
 	l.reachable(t, a, computeNode)
 }
 
-// edgeAgentDaemonSet is galactic-edge's DaemonSet in systemNS.
-const edgeAgentDaemonSet = "galactic-edge"
+// workerDaemonSet is galactic-worker's DaemonSet in systemNS.
+const workerDaemonSet = "galactic-worker"
 
-// edgeUsesWorker reports whether galactic-edge runs with --worker-socket, so
-// Galactic Worker registers its links and owns the VPC scopes on its nodes.
-func (l *lab) edgeUsesWorker(t *testing.T) bool {
+// workerOn returns the running galactic-worker pod on node, or "" when none
+// runs there. A running Worker owns every VPC scope on its node that no
+// other writer owns (docs/worker/ownership.md).
+func (l *lab) workerOn(t *testing.T, node string) string {
+	t.Helper()
+	var pods corev1.PodList
+	if err := l.c.List(context.Background(), &pods, client.InNamespace(systemNS),
+		client.MatchingLabels{nameLabel: workerDaemonSet}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pods.Items {
+		if p.Spec.NodeName == node && p.Status.Phase == corev1.PodRunning && p.DeletionTimestamp == nil {
+			return p.Name
+		}
+	}
+	return ""
+}
+
+// workerHostGrace reads galactic-worker's --host-grace from its DaemonSet,
+// defaulting to the binary's 60 s.
+func (l *lab) workerHostGrace(t *testing.T) time.Duration {
 	t.Helper()
 	var ds appsv1.DaemonSet
-	if err := l.c.Get(context.Background(), client.ObjectKey{Namespace: systemNS, Name: edgeAgentDaemonSet},
+	if err := l.c.Get(context.Background(), client.ObjectKey{Namespace: systemNS, Name: workerDaemonSet},
 		&ds); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range ds.Spec.Template.Spec.Containers {
 		for _, arg := range c.Args {
-			if strings.HasPrefix(arg, "--worker-socket") {
-				return true
+			if v, ok := strings.CutPrefix(arg, "--host-grace="); ok {
+				if d, err := time.ParseDuration(v); err == nil {
+					return d
+				}
 			}
 		}
 	}
-	return false
+	return time.Minute
 }
 
 // gcInterval reads galactic-router's GC interval from its DaemonSet.
