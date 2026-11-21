@@ -102,6 +102,11 @@ spec:
             # lock is the pod's own, writable under a read-only root.
             - name: vrf-lock
               mountPath: /var/lib/cni/galactic-vrf
+            # The per-interface tc attach locks (internal/plumbing/ebpf/attach)
+            # for the sidecar's own interfaces, which live in the pod's network
+            # namespace, so the locks are the pod's own too.
+            - name: tc-lock
+              mountPath: /run/galactic
       volumes:
         - name: galactic-worker-socket
           hostPath:
@@ -119,4 +124,6 @@ spec:
                   expirationSeconds: 3600
                   path: token
         - name: vrf-lock
+          emptyDir: {}
+        - name: tc-lock
           emptyDir: {}
