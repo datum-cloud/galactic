@@ -92,6 +92,11 @@ spec:
             - name: galactic-worker-token
               mountPath: /var/run/secrets/galactic-worker
               readOnly: true
+            # The VRF table lock and reservations (internal/plumbing/vrf).
+            # The sidecar's VRFs live in the pod's network namespace, so the
+            # lock is the pod's own, writable under a read-only root.
+            - name: vrf-lock
+              mountPath: /var/lib/cni/galactic-vrf
       volumes:
         - name: galactic-worker-socket
           hostPath:
@@ -108,3 +113,5 @@ spec:
                   audience: galactic-worker
                   expirationSeconds: 3600
                   path: token
+        - name: vrf-lock
+          emptyDir: {}
