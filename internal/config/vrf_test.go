@@ -42,6 +42,35 @@ func TestVRFConfigDefaults(t *testing.T) {
 	if cfg.WorkerSocket != workerv1alpha1.DefaultSocketPath || cfg.WorkerTokenFile != DefaultVRFWorkerTokenFile {
 		t.Errorf("Worker socket and token = %q, %q; want the defaults", cfg.WorkerSocket, cfg.WorkerTokenFile)
 	}
+	if cfg.InPodEncapsulation {
+		t.Error("InPodEncapsulation = true, want false by default")
+	}
+}
+
+func TestVRFConfigInPodEncapsulationEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"Unset", "", false},
+		{"True", "true", true},
+		{"False", "false", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			validVRFEnv(t)
+			t.Setenv(EnvVRFInPodEncapsulation, tt.value)
+			cfg := NewVRFConfig()
+			if cfg.InPodEncapsulation != tt.want {
+				t.Errorf("InPodEncapsulation with %s=%q = %t, want %t",
+					EnvVRFInPodEncapsulation, tt.value, cfg.InPodEncapsulation, tt.want)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() = %v, want nil", err)
+			}
+		})
+	}
 }
 
 func TestVRFConfigEnvOverride(t *testing.T) {

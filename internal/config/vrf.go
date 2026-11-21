@@ -44,6 +44,12 @@ const (
 	// DefaultVRFWorkerTokenFile is where the pod mounts its projected
 	// Galactic Worker token.
 	DefaultVRFWorkerTokenFile = "/var/run/secrets/galactic-worker/token"
+
+	// DefaultVRFInPodEncapsulation leaves SRv6 encapsulation to the host:
+	// every proxy connection goes over Worker's routed link into the VPC's
+	// host VRF. A primary CNI that checks a pod's source address drops a
+	// packet the pod encapsulated itself.
+	DefaultVRFInPodEncapsulation = false
 )
 
 // --- VRF sidecar environment variable keys -----------------------------
@@ -68,6 +74,16 @@ const (
 	// EnvVRFWorkerSocket and EnvVRFWorkerTokenFile reach Galactic Worker.
 	EnvVRFWorkerSocket    = "GALACTIC_VRF_WORKER_SOCKET"
 	EnvVRFWorkerTokenFile = "GALACTIC_VRF_WORKER_TOKEN_FILE"
+
+	// EnvVRFInPodEncapsulation selects the in-pod SRv6 encapsulation.
+	EnvVRFInPodEncapsulation = "GALACTIC_VRF_IN_POD_ENCAPSULATION"
+)
+
+// FlagVRFInPodEncapsulation and keyVRFInPodEncapsulation configure
+// VRFConfig.InPodEncapsulation.
+const (
+	FlagVRFInPodEncapsulation = "in-pod-encapsulation"
+	keyVRFInPodEncapsulation  = "in_pod_encapsulation"
 )
 
 // --- VRFConfig -----------------------------------------------------------
@@ -104,6 +120,12 @@ type VRFConfig struct {
 	WorkerSocket string
 	// WorkerTokenFile is the pod's projected token for Worker.
 	WorkerTokenFile string
+	// InPodEncapsulation selects the in-pod SRv6 datapath: the sidecar
+	// watches EndpointSlices, encapsulates traffic to a backend on another
+	// node inside the pod, and routes only Local backends over Worker's
+	// routed link. When false, the sidecar creates each VPC's pod VRF itself
+	// and routes all of its traffic over the routed link into the host VRF.
+	InPodEncapsulation bool
 }
 
 // NewVRFConfig creates a config resolver reading the GALACTIC_VRF environment
@@ -121,6 +143,7 @@ func NewVRFConfig() *VRFConfig {
 	v.SetDefault("namespace", DefaultNamespace)
 	v.SetDefault(keyWorkerSocket, workerv1alpha1.DefaultSocketPath)
 	v.SetDefault(keyWorkerTokenFile, DefaultVRFWorkerTokenFile)
+	v.SetDefault(keyVRFInPodEncapsulation, DefaultVRFInPodEncapsulation)
 
 	cfg := &VRFConfig{
 		v:      v,
@@ -147,6 +170,7 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 		{"attachment-selector", "attachment_selector"},
 		{flagWorkerSocket, keyWorkerSocket},
 		{flagWorkerTokenFile, keyWorkerTokenFile},
+		{FlagVRFInPodEncapsulation, keyVRFInPodEncapsulation},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -170,6 +194,7 @@ func (c *VRFConfig) readFields() {
 	c.AttachmentSelector = c.v.GetString("attachment_selector")
 	c.WorkerSocket = c.v.GetString(keyWorkerSocket)
 	c.WorkerTokenFile = c.v.GetString(keyWorkerTokenFile)
+	c.InPodEncapsulation = c.v.GetBool(keyVRFInPodEncapsulation)
 
 	c.NodeName = c.v.GetString("node_name")
 	if c.NodeName == "" {
