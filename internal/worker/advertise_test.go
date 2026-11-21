@@ -175,3 +175,18 @@ func TestAdvertisementOfAVPCWithoutVRFIsWithdrawn(t *testing.T) {
 		return !ok
 	})
 }
+
+// TestConnectorClaimsAreNotAdvertised leaves a connector claim's addresses to
+// the edge route's own advertisement (D37).
+func TestConnectorClaimsAreNotAdvertised(t *testing.T) {
+	w := &Worker{}
+	addr := []netip.Addr{netip.MustParseAddr("2001:db8:ff::1")}
+	got := w.wantAdvertisements([]module.Claim{
+		{Key: mkey(vpcA, svcA), Handoff: workerv1alpha1.Handoff_HANDOFF_SOCKET, OwnerPod: podOne, Addresses: addr},
+		{Key: mkey(vpcA, "edge-1"), Handoff: workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK, OwnerPod: podOne,
+			Addresses: addr, EdgeLink: &module.EdgeLink{Name: "edge0", Address: addr[0]}},
+	})
+	if len(got) != 1 || got[0].AttachmentUID != svcA {
+		t.Fatalf("advertisements = %+v, want only the socket claim's", got)
+	}
+}
