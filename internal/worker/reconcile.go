@@ -19,6 +19,7 @@ import (
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
+	"go.datum.net/galactic/internal/worker/hostscope"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/sources"
 	"go.datum.net/galactic/internal/worker/store"
@@ -107,12 +108,7 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 
 	t, err := w.acquire(scope)
 	if err != nil {
-		reason := workerv1alpha1.ReasonProgrammingFailed
-		if errors.Is(err, errOwnedElsewhere) || errors.Is(err, ownership.ErrTransitioning) ||
-			errors.Is(err, ownership.ErrNotOwner) {
-			reason = workerv1alpha1.ReasonScopeOwnedElsewhere
-		}
-		w.reportFailure(evals, reason, err)
+		w.reportFailure(evals, acquireFailureReason(err), err)
 		return err
 	}
 
@@ -122,7 +118,12 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 		return err
 	}
 	digest, drifts := w.checkDrift(vpc, desired, t.Resync, mods, changes)
-	if !empty || ensure || t.Resync {
+	wantAdv := w.wantAdvertisements(desired[workerv1alpha1.Mode_MODE_LOCAL])
+	advCurrent, err := w.advertisementsCurrentOrReport(ctx, vpc, wantAdv, evals)
+	if err != nil {
+		return err
+	}
+	if !empty || ensure || t.Resync || !advCurrent {
 		mutate := func() error {
 			// A snapshot reconciles the complete state, including the host
 			// state; Ensure changes nothing already in place.
@@ -131,7 +132,10 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 					return fmt.Errorf("ensure host state: %w", err)
 				}
 			}
-			return applyModules(ctx, scope, mods, changes)
+			if err := applyModules(ctx, scope, mods, changes); err != nil {
+				return err
+			}
+			return w.advertise(ctx, vpc, wantAdv)
 		}
 		// Every change carries the complete desired state of the scope, so
 		// a snapshot commit is always correct; an incremental commit is used
@@ -213,6 +217,11 @@ func (w *Worker) reconcileHost(ctx context.Context, vpc string) error {
 		if err := w.completeTransfer(vpc); err != nil {
 			return err
 		}
+		// A VPC whose VRF is gone has no claims to advertise for; nothing
+		// requeues it once forgotten, so its advertisements go now.
+		if err := w.withdrawAdvertisements(ctx, vpc); err != nil {
+			return err
+		}
 		w.forgetScope(vpc)
 		return nil
 	}
@@ -234,12 +243,21 @@ func (w *Worker) reconcileHost(ctx context.Context, vpc string) error {
 	if err != nil {
 		return err
 	}
-	if !reclaim && !t.Resync && empty {
+	advCurrent, err := w.advertisementsCurrent(ctx, vpc, nil)
+	if err != nil {
+		return err
+	}
+	if !reclaim && !t.Resync && empty && advCurrent {
 		return nil
 	}
 	gone := false
 	mutate := func() error {
 		if err := applyModules(ctx, scope, mods, changes); err != nil {
+			return err
+		}
+		// A VPC with no claims advertises nothing; this runs before
+		// Reclaim, which keeps a VPC that still has an advertisement.
+		if err := w.advertise(ctx, vpc, nil); err != nil {
 			return err
 		}
 		// A claim accepted since the plan keeps the state; its own
@@ -483,10 +501,22 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 			}
 			e.dests = append(e.dests, de)
 		}
+		// A routed link is the claim's handoff, not a destination's: the
+		// pod reaches its Fabric destinations through its own
+		// encapsulation and receives every reply over the link. So the
+		// Local module gets a pod-bound claim even with no Local
+		// destination. A connector claim's link is galactic-edge's host
+		// link, which Local only registers once its address is known.
+		if _, ok := perMode[workerv1alpha1.Mode_MODE_LOCAL]; !ok && podBound(c.spec) && c.spec.GetEdgeLink() == nil {
+			capName := workerv1alpha1.HandoffCapability(c.spec.GetHandoff())
+			if slices.Contains(c.rec.Capabilities, capName) && w.d.Modules.Capability(capName).Available {
+				perMode[workerv1alpha1.Mode_MODE_LOCAL] = nil
+			}
+		}
 		for mode, dests := range perMode {
 			mc := module.Claim{Key: e.key, Owner: e.owner, Generation: e.gen,
 				Handoff: c.spec.GetHandoff(), OwnerPod: c.rec.PodUID, Addresses: slices.Clone(att.Addresses),
-				Destinations: dests}
+				AttachmentID: att.ID, Destinations: dests}
 			if mode == workerv1alpha1.Mode_MODE_LOCAL {
 				mc.EdgeLink = edgeLink
 			}
@@ -744,8 +774,7 @@ func (w *Worker) report(evals []*claimEval, state map[workerv1alpha1.Mode]module
 		c.status.HandoffInterfaces = nil
 		for _, h := range handoffs[e.key] {
 			c.status.HandoffInterfaces = append(c.status.HandoffInterfaces,
-				&workerv1alpha1.HandoffInterface{Role: h.Role, Name: h.Name, Ifindex: h.Ifindex,
-					TenantSid: h.TenantSID})
+				handoffInterface(h))
 		}
 		w.publish(c)
 	}
@@ -866,5 +895,129 @@ func (w *Worker) forget(k module.ClaimKey, gen uint64) error {
 	w.mu.Unlock()
 	updateClaimGauge(w)
 	w.log.Info("claim released", "owner", c.rec.Owner, "vpc", k.VPC, "attachment", k.AttachmentUID, "generation", gen)
+	return nil
+}
+
+// handoffInterface is the API form of h.
+func handoffInterface(h module.HandoffInterface) *workerv1alpha1.HandoffInterface {
+	out := &workerv1alpha1.HandoffInterface{Role: h.Role, Name: h.Name, Ifindex: h.Ifindex, TenantSid: h.TenantSID}
+	if h.LinkLocal.IsValid() {
+		out.LinkLocal = h.LinkLocal.String()
+	}
+	return out
+}
+
+// wantAdvertisements returns the advertisements of each routed_link and
+// socket claim among claims, the Local claims of a VPC, whose pod runs,
+// other than connector claims. A claim whose pod is gone advertises nothing
+// until its owner calls from a new pod, so remote nodes stop returning
+// traffic to a link that no pod holds.
+func (w *Worker) wantAdvertisements(claims []module.Claim) []hostscope.Advertisement {
+	var want []hostscope.Advertisement
+	for _, c := range claims {
+		if c.Handoff != workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK && c.Handoff != workerv1alpha1.Handoff_HANDOFF_SOCKET {
+			continue
+		}
+		// A connector claim's addresses are an edge route's, which
+		// galactic-controller advertises (D37).
+		if c.EdgeLink != nil {
+			continue
+		}
+		if len(c.Addresses) == 0 || c.OwnerPod == "" {
+			continue
+		}
+		if w.d.PodAlive != nil && !w.d.PodAlive(c.OwnerPod) {
+			continue
+		}
+		want = append(want, hostscope.Advertisement{AttachmentUID: c.Key.AttachmentUID, AttachmentID: c.AttachmentID,
+			PodUID: c.OwnerPod, Addresses: slices.Clone(c.Addresses)})
+	}
+	return want
+}
+
+// advertise makes Worker's advertisements for vpc on this node exactly want.
+// It runs inside the scope's commit.
+func (w *Worker) advertise(ctx context.Context, vpc string, want []hostscope.Advertisement) error {
+	adv, ok := w.d.Host.(hostscope.Advertiser)
+	if !ok {
+		return nil
+	}
+	if err := adv.Advertise(ctx, vpc, want); err != nil {
+		return fmt.Errorf("advertise claim addresses: %w", err)
+	}
+	return nil
+}
+
+// advertisementsCurrentOrReport is advertisementsCurrent, reporting a failure
+// on every claim of evals.
+func (w *Worker) advertisementsCurrentOrReport(ctx context.Context, vpc string, want []hostscope.Advertisement,
+	evals []*claimEval) (bool, error) {
+	ok, err := w.advertisementsCurrent(ctx, vpc, want)
+	if err != nil {
+		w.reportFailure(evals, workerv1alpha1.ReasonProgrammingFailed, err)
+	}
+	return ok, err
+}
+
+// advertisementsCurrent reports whether Worker's advertisements for vpc on
+// this node are exactly want. Without an Advertiser there is nothing to
+// publish.
+func (w *Worker) advertisementsCurrent(ctx context.Context, vpc string, want []hostscope.Advertisement) (bool, error) {
+	adv, ok := w.d.Host.(hostscope.Advertiser)
+	if !ok {
+		return true, nil
+	}
+	ok, err := adv.Current(ctx, vpc, want)
+	if err != nil {
+		return false, fmt.Errorf("read advertisements of VPC %s: %w", vpc, err)
+	}
+	return ok, nil
+}
+
+// acquireFailureReason is the reason a claim reports when Worker cannot take
+// its scope's ticket.
+func acquireFailureReason(err error) string {
+	if errors.Is(err, errOwnedElsewhere) || errors.Is(err, ownership.ErrTransitioning) ||
+		errors.Is(err, ownership.ErrNotOwner) {
+		return workerv1alpha1.ReasonScopeOwnedElsewhere
+	}
+	return workerv1alpha1.ReasonProgrammingFailed
+}
+
+// withdrawAdvertisements removes Worker's advertisements for vpc, a VPC with
+// no claims, inside a commit of its scope. A scope another writer owns is
+// left alone.
+func (w *Worker) withdrawAdvertisements(ctx context.Context, vpc string) error {
+	current, err := w.advertisementsCurrent(ctx, vpc, nil)
+	if err != nil || current {
+		return err
+	}
+	scope := module.Scope{VPC: vpc}
+	t, err := w.acquire(scope)
+	if errors.Is(err, errOwnedElsewhere) || errors.Is(err, ownership.ErrTransitioning) ||
+		errors.Is(err, ownership.ErrNotOwner) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// The commit carries the scope's complete state with no claims, so it
+	// also serves a scope that needs a snapshot.
+	mods, changes, _, err := w.planModules(ctx, scope, nil)
+	if err != nil {
+		return err
+	}
+	commit := w.d.Fence.Commit
+	if t.Resync {
+		commit = w.d.Fence.CommitSnapshot
+	}
+	if _, err := commit(t, func() error {
+		if err := applyModules(ctx, scope, mods, changes); err != nil {
+			return err
+		}
+		return w.advertise(ctx, vpc, nil)
+	}); err != nil {
+		return fmt.Errorf("commit %s: %w", scope.Name(), err)
+	}
 	return nil
 }

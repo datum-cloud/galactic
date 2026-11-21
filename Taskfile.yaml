@@ -260,8 +260,9 @@ tasks:
     # rendered here; their source YAML, inline patches included, is checked
     # instead.
     #
-    # Each Worker placement profile under tests/manifests/worker-profiles is
-    # also checked by hack/check-privileges against the privileges.yaml
+    # Each Worker placement profile under tests/manifests/worker-profiles,
+    # and the galactic-vrf sidecar fixture, is also checked by
+    # hack/check-privileges against the privileges.yaml
     # beside it: every capability, host namespace, hostPath, RBAC rule and
     # Worker allowlist grant the profile renders must be recorded there, and
     # nothing more.
@@ -285,7 +286,7 @@ tasks:
         if ! find config deploy tests/manifests -name '*.yaml' -print0 | xargs -0 {{.LOCALBIN}}/check-log-settings; then
           echo "FAIL: source YAML sets an unsupported log setting"; status=1
         fi
-        for dir in tests/manifests/worker-profiles/*/; do
+        for dir in tests/manifests/worker-profiles/*/ tests/manifests/galactic-vrf/; do
           if ! {{.KUSTOMIZE}} build "$dir" | {{.LOCALBIN}}/check-privileges -expect "${dir}privileges.yaml"; then
             echo "FAIL: $dir grants other privileges than ${dir}privileges.yaml records"; status=1
           fi

@@ -18,8 +18,6 @@ type Metrics struct {
 	Events *EventCounters
 	// Egress is galactic-cni's egress shard group control-loop state.
 	Egress *EgressControl
-	// SidecarReturn is the ingress sidecar's host-side return path.
-	SidecarReturn *SidecarReturn
 	// EndpointSliceRepair counts the per-pod EndpointSlices galactic-cni's
 	// repair pass recreated and the passes that failed.
 	EndpointSliceRepair *EndpointSliceRepair
@@ -33,7 +31,7 @@ type Metrics struct {
 // state. A process calls New once.
 func New() *Metrics {
 	return &Metrics{
-		Events: NewEventCounters(), Egress: NewEgressControl(), SidecarReturn: NewSidecarReturn(),
+		Events: NewEventCounters(), Egress: NewEgressControl(),
 		EndpointSliceRepair: NewEndpointSliceRepair(), HostLinks: NewHostLinks(),
 	}
 }
@@ -49,3 +47,7 @@ func (m *Metrics) RegisterDatapathCollector(objs *prog.UsidObjects) {
 func (m *Metrics) RegisterAttachmentCollector() {
 	instmetrics.MustRegister(NewAttachmentCollector(nldump.LinkList))
 }
+
+// galacticNamespace is the metric namespace of galactic-cni's series that
+// are not named for an eBPF program.
+const galacticNamespace = "galactic"

@@ -1,0 +1,70 @@
+# Envoy with the galactic-vrf sidecar (the Component adds it), on dfw-worker
+# and the cluster's primary network. Envoy's upstream sockets bind to each
+# VPC's VRF in the pod (envoy-config.yaml); the sidecar makes those VRFs and
+# the routed link Worker gives each VPC's claim.
+#
+# The Component's rollout strategy stops the old pod first; its sidecar
+# releases the claims on SIGTERM within terminationGracePeriodSeconds.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+  labels:
+    app: envoy
+    galactic.datumapis.com/galactic-vrf: enabled
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy
+  template:
+    metadata:
+      labels:
+        app: envoy
+      annotations:
+        kubectl.kubernetes.io/default-container: client
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: envoy
+          # v1.32.3, pinned by digest.
+          image: envoyproxy/envoy@sha256:127e33c48c60be9a148cf9256d52e734ceda28aa344145023933116c7e524beb
+          imagePullPolicy: IfNotPresent
+          # One worker thread, so one client connection's requests share one
+          # upstream pool and the pooled clusters' connection counts are exact.
+          args: ["-c", "/etc/envoy/config/envoy-config.yaml", "--concurrency", "1", "--log-level", "info"]
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 2
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy/config
+              readOnly: true
+            - name: tls
+              mountPath: /etc/envoy/tls
+              readOnly: true
+        # The test client: curl to Envoy's listener and admin interface on
+        # the pod's loopback, and tcpdump and ss in the pod's namespace.
+        - name: client
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN", "NET_RAW"]
+      volumes:
+        - name: config
+          configMap:
+            name: envoy-config
+        # Made by scripts/envoy-socket.sh with a key generated for the run;
+        # no key is committed.
+        - name: tls
+          secret:
+            secretName: envoy-tls

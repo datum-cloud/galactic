@@ -1,0 +1,16 @@
+# The lab's settings for the Component's galactic-vrf container: the image
+# built from this checkout and loaded into dfw-worker (no registry has it),
+# and the selector of the proxy's own VPCAttachments (attachments.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy
+spec:
+  template:
+    spec:
+      containers:
+        - name: galactic-vrf
+          imagePullPolicy: Never
+          env:
+            - name: GALACTIC_VRF_ATTACHMENT_SELECTOR
+              value: galactic.datumapis.com/proxy=envoy

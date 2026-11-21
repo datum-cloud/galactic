@@ -58,17 +58,13 @@ See [EndpointSlice inputs](observability/vpc-ingress.md#endpointslice-inputs).
 
 See [Datapath checks](observability/vpc-ingress.md#datapath-checks).
 
-<a id="return-path-gateway"></a>
+<a id="worker-claims"></a>
 
-See [Return-path gateway](observability/vpc-ingress.md#return-path-gateway).
+See [Worker claims](observability/vpc-ingress.md#worker-claims).
 
 <a id="node-source-address"></a>
 
 See [Node source address](observability/vpc-ingress.md#node-source-address).
-
-<a id="host-return-path--galactic_sidecar_return_"></a>
-
-See [Host return path — `galactic_sidecar_return_*`](observability/vpc-ingress.md#host-return-path--galactic_sidecar_return_).
 
 <a id="backend-endpointslice-repair--galactic_endpointslice_repair_"></a>
 

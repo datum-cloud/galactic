@@ -411,7 +411,8 @@ func (k *Kernel) routedCheck(h *host, m *model, c module.Claim, vrfIdx int, objs
 	}
 	if present {
 		out.handoffs[c.Key] = append(out.handoffs[c.Key],
-			module.HandoffInterface{Role: workerv1alpha1.HandoffRoleHost, Name: r.host, Ifindex: int32(l.Attrs().Index)},
+			module.HandoffInterface{Role: workerv1alpha1.HandoffRoleHost, Name: r.host, Ifindex: int32(l.Attrs().Index),
+				LinkLocal: linkLocal(l)},
 			module.HandoffInterface{Role: workerv1alpha1.HandoffRolePod, Name: r.pod, Ifindex: int32(got.podIndex)})
 	}
 	return func(ck *check, _ netlink.Link) {
@@ -450,4 +451,20 @@ func (k *Kernel) routedCheck(h *host, m *model, c module.Claim, vrfIdx int, objs
 				fmt.Sprintf("the routed link %s has no carrier: the pod has not brought its end up", r.host))
 		}
 	}
+}
+
+// linkLocal returns l's IPv6 link-local address once the kernel has assigned
+// it and duplicate address detection has finished, or the invalid address.
+func linkLocal(l netlink.Link) netip.Addr {
+	addrs, err := netlink.AddrList(l, netlink.FAMILY_V6)
+	if err != nil {
+		return netip.Addr{}
+	}
+	for _, a := range addrs {
+		ip, ok := netip.AddrFromSlice(a.IP)
+		if ok && ip.IsLinkLocalUnicast() && a.Flags&unix.IFA_F_TENTATIVE == 0 {
+			return ip.Unmap()
+		}
+	}
+	return netip.Addr{}
 }

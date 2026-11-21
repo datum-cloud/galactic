@@ -32,7 +32,7 @@ const (
 // identity, which the resolver must skip rather than derive a SID from.
 func newNodeSrcTestRouter(name, node, locator string, nodeID int32) *bgpv1alpha1.BGPRouter {
 	return &bgpv1alpha1.BGPRouter{
-		ObjectMeta: metav1.ObjectMeta{Namespace: gatewayTestNamespace, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: bgpTestNamespace, Name: name},
 		Spec: bgpv1alpha1.BGPRouterSpec{
 			TargetRef:   bgpv1alpha1.TargetRef{Kind: "Node", Name: node},
 			LocalASN:    65000,
@@ -44,11 +44,11 @@ func newNodeSrcTestRouter(name, node, locator string, nodeID int32) *bgpv1alpha1
 }
 
 func TestResolveNodeSourceAddress_ReturnsNodeSIDBase(t *testing.T) {
-	scheme := gatewayTestScheme(t)
+	scheme := bgpTestScheme(t)
 	router := newNodeSrcTestRouter(nodeSrcTestNode, nodeSrcTestNode, nodeSrcTestLocator, nodeSrcTestNodeID)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router).Build()
 
-	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
+	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, bgpTestNamespace)
 	addr, err := r.ResolveNodeSourceAddress()
 	if err != nil {
 		t.Fatalf("ResolveNodeSourceAddress: %v", err)
@@ -64,11 +64,11 @@ func TestResolveNodeSourceAddress_ReturnsNodeSIDBase(t *testing.T) {
 // fabric and matches no node's locator_table, so an egress shard's reply to it
 // is dropped. Assert the answer sits inside the locator this node advertises.
 func TestResolveNodeSourceAddress_IsNotAnInterfaceAddress(t *testing.T) {
-	scheme := gatewayTestScheme(t)
+	scheme := bgpTestScheme(t)
 	router := newNodeSrcTestRouter(nodeSrcTestNode, nodeSrcTestNode, nodeSrcTestLocator, nodeSrcTestNodeID)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(router).Build()
 
-	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
+	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, bgpTestNamespace)
 	addr, err := r.ResolveNodeSourceAddress()
 	if err != nil {
 		t.Fatalf("ResolveNodeSourceAddress: %v", err)
@@ -83,23 +83,23 @@ func TestResolveNodeSourceAddress_IsNotAnInterfaceAddress(t *testing.T) {
 }
 
 func TestResolveNodeSourceAddress_IgnoresOtherNodesRouters(t *testing.T) {
-	scheme := gatewayTestScheme(t)
+	scheme := bgpTestScheme(t)
 	other := newNodeSrcTestRouter("psi-puborr", "psi-puborr", "2001:db8:ff02::/48", 3)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(other).Build()
 
-	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
+	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, bgpTestNamespace)
 	if _, err := r.ResolveNodeSourceAddress(); err == nil {
 		t.Fatal("expected an error when no BGPRouter targets this node, got nil")
 	}
 }
 
 func TestResolveNodeSourceAddress_SkipsRouterWithNoSRv6Identity(t *testing.T) {
-	scheme := gatewayTestScheme(t)
+	scheme := bgpTestScheme(t)
 	noIdentity := newNodeSrcTestRouter("worker-1-underlay", nodeSrcTestNode, "", 0)
 	withIdentity := newNodeSrcTestRouter(nodeSrcTestNode, nodeSrcTestNode, nodeSrcTestLocator, nodeSrcTestNodeID)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(noIdentity, withIdentity).Build()
 
-	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
+	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, bgpTestNamespace)
 	addr, err := r.ResolveNodeSourceAddress()
 	if err != nil {
 		t.Fatalf("ResolveNodeSourceAddress: %v", err)
@@ -115,21 +115,21 @@ func TestResolveNodeSourceAddress_SkipsRouterWithNoSRv6Identity(t *testing.T) {
 // than an error would let node_src_addr_table's "all-zero means not
 // configured" convention read a garbage answer as a legitimate one.
 func TestResolveNodeSourceAddress_UnusableLocatorFailsLoudly(t *testing.T) {
-	scheme := gatewayTestScheme(t)
+	scheme := bgpTestScheme(t)
 	bad := newNodeSrcTestRouter(nodeSrcTestNode, nodeSrcTestNode, "2001:db8:ff01::/64", nodeSrcTestNodeID)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(bad).Build()
 
-	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
+	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, bgpTestNamespace)
 	if _, err := r.ResolveNodeSourceAddress(); err == nil {
 		t.Fatal("expected an error when the matching router's locator is not a /48, got nil")
 	}
 }
 
 func TestResolveNodeSourceAddress_NoRoutersAtAll(t *testing.T) {
-	scheme := gatewayTestScheme(t)
+	scheme := bgpTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
+	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, bgpTestNamespace)
 	if _, err := r.ResolveNodeSourceAddress(); err == nil {
 		t.Fatal("expected an error with no BGPRouters at all, got nil")
 	}
@@ -144,9 +144,9 @@ func TestNodeSourceAddressResolver_DefaultDisabled(t *testing.T) {
 func TestSetNodeSourceAddressResolver_RoundTrips(t *testing.T) {
 	t.Cleanup(func() { SetNodeSourceAddressResolver(nil) })
 
-	scheme := gatewayTestScheme(t)
+	scheme := bgpTestScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, gatewayTestNamespace)
+	r := NewK8sNodeSourceAddressResolver(fakeClient, nodeSrcTestNode, bgpTestNamespace)
 
 	SetNodeSourceAddressResolver(r)
 	if got := getNodeSourceAddressResolver(); got != r {
