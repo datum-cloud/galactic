@@ -103,37 +103,9 @@ func TestConfigurePodLink_TwoVPCsShareABackendAddress(t *testing.T) {
 			}
 		}
 		for _, l := range links {
-			pl, err := netlink.LinkByName(l.pod)
-			if err != nil {
-				return err
-			}
-			vl, err := netlink.LinkByName(l.vrf)
-			if err != nil {
-				return err
-			}
-			if pl.Attrs().MasterIndex != vl.Attrs().Index || pl.Attrs().Flags&net.FlagUp == 0 {
-				t.Errorf("%s: master %d up %t, want %s and up", l.pod, pl.Attrs().MasterIndex,
-					pl.Attrs().Flags&net.FlagUp != 0, l.vrf)
-			}
-			addrs, err := netlink.AddrList(pl, netlink.FAMILY_V6)
-			if err != nil {
-				return err
-			}
-			found := false
-			for _, a := range addrs {
-				if a.IP.Equal(gw.AsSlice()) {
-					found = true
-				}
-			}
-			if !found {
-				t.Errorf("%s has no gateway address %s", l.pod, gw)
-			}
-			routes := localRoutes(t, l.table)
-			r, ok := routes[backend]
-			if !ok || r.LinkIndex != pl.Attrs().Index || !r.Gw.Equal(hostLL.AsSlice()) {
-				t.Errorf("table %d route to %s = %+v, want through %s to %s", l.table, backend, r, l.pod, hostLL)
-			}
+			checkConfiguredLink(t, l.vrf, l.pod, l.table, gw, hostLL, backend)
 		}
+		checkLocalRouteHealed(t, links[1].vrf, links[1].pod, links[1].table, gw, hostLL, []netip.Addr{backend, other})
 
 		// VPC A's second backend moves off-node: only its route goes, and
 		// VPC B keeps both.
@@ -176,5 +148,56 @@ func checkGatewayChange(t *testing.T, vrfName, pod string, gw, hostLL, backend n
 		if a.IP.Equal(gw.AsSlice()) {
 			t.Errorf("%s keeps the old gateway %s", pod, gw)
 		}
+	}
+}
+
+// checkLocalRouteHealed replaces the gateway address on pod, which removes
+// its local route from table as an older sidecar's every sweep did, and
+// checks that the next configure restores the route.
+func checkLocalRouteHealed(t *testing.T, vrfName, pod string, table uint32, gw, hostLL netip.Addr, local []netip.Addr) {
+	t.Helper()
+	pl, err := netlink.LinkByName(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := &netlink.Addr{IPNet: &net.IPNet{IP: gw.AsSlice(), Mask: net.CIDRMask(128, 128)}}
+	if err := netlink.AddrReplace(pl, addr); err != nil {
+		t.Fatal(err)
+	}
+	if err := configurePodLink(vrfName, pod, []netip.Addr{gw}, hostLL, local); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := hasLocalRoute(table, pl.Attrs().Index, gw); err != nil || !ok {
+		t.Errorf("table %d local route for %s on %s after the heal = %t, %v; want present", table, gw, pod, ok, err)
+	}
+}
+
+// checkConfiguredLink checks that pod is up in vrfName, holds the gateway gw
+// with its local route in table, and routes backend through pod to hostLL.
+func checkConfiguredLink(t *testing.T, vrfName, pod string, table uint32, gw, hostLL, backend netip.Addr) {
+	t.Helper()
+	pl, err := netlink.LinkByName(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vl, err := netlink.LinkByName(vrfName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pl.Attrs().MasterIndex != vl.Attrs().Index || pl.Attrs().Flags&net.FlagUp == 0 {
+		t.Errorf("%s: master %d up %t, want %s and up", pod, pl.Attrs().MasterIndex,
+			pl.Attrs().Flags&net.FlagUp != 0, vrfName)
+	}
+	if ok, err := hasAddr(pl, gw); err != nil || !ok {
+		t.Errorf("%s has no gateway address %s (%v)", pod, gw, err)
+	}
+	// The second configure must not drop the gateway's local route, or the
+	// pod resolves its own gateway as a neighbor.
+	if ok, err := hasLocalRoute(table, pl.Attrs().Index, gw); err != nil || !ok {
+		t.Errorf("table %d local route for %s on %s = %t, %v; want present", table, gw, pod, ok, err)
+	}
+	r, ok := localRoutes(t, table)[backend]
+	if !ok || r.LinkIndex != pl.Attrs().Index || !r.Gw.Equal(hostLL.AsSlice()) {
+		t.Errorf("table %d route to %s = %+v, want through %s to %s", table, backend, r, pod, hostLL)
 	}
 }
