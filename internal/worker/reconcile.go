@@ -444,6 +444,34 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 			continue
 		}
 		perMode := map[workerv1alpha1.Mode][]module.Destination{}
+		// usable checks a resolved destination's capability, and keeps it
+		// for its mode's module when the owner may use it and it runs.
+		usable := func(de *destEval, dst module.Destination) {
+			capName := module.RequiredCapability(c.spec.GetHandoff(), de.mode)
+			if !slices.Contains(c.rec.Capabilities, capName) {
+				// The destination resolved to a mode the owner was not
+				// allowed when it was admitted, for example once a locator
+				// became known.
+				de.capReason = workerv1alpha1.ReasonCapabilityNotAllowed
+				de.capMsg = c.rec.Owner + " may not use " + capName
+			} else if cp := w.d.Modules.Capability(capName); !cp.Available {
+				de.capReason, de.capMsg = cp.Reason, cp.Message
+				if de.capMsg == "" {
+					de.capMsg = capName + " is unavailable"
+				}
+			} else {
+				perMode[de.mode] = append(perMode[de.mode], dst)
+			}
+		}
+		var edgeLink *module.EdgeLink
+		if el := c.spec.GetEdgeLink(); el != nil {
+			de, dst, link := edgeLinkDestination(e.key, own, att, el)
+			if de.resolved && de.capReason == "" {
+				usable(&de, dst)
+			}
+			edgeLink = link
+			e.dests = append(e.dests, de)
+		}
 		for _, d := range c.spec.GetDestinations() {
 			de := destEval{ref: d, id: module.DestinationID(d)}
 			dst, err := w.resolveDestination(ctx, vpc, own, c.spec.GetMode(), d, locator, &de)
@@ -451,31 +479,47 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 				return nil, nil, err
 			}
 			if de.resolved {
-				capName := module.RequiredCapability(c.spec.GetHandoff(), de.mode)
-				if !slices.Contains(c.rec.Capabilities, capName) {
-					// The destination resolved to a mode the owner was
-					// not allowed when it was admitted, for example once a
-					// locator became known.
-					de.capReason = workerv1alpha1.ReasonCapabilityNotAllowed
-					de.capMsg = c.rec.Owner + " may not use " + capName
-				} else if cp := w.d.Modules.Capability(capName); !cp.Available {
-					de.capReason, de.capMsg = cp.Reason, cp.Message
-					if de.capMsg == "" {
-						de.capMsg = capName + " is unavailable"
-					}
-				} else {
-					perMode[de.mode] = append(perMode[de.mode], dst)
-				}
+				usable(&de, dst)
 			}
 			e.dests = append(e.dests, de)
 		}
 		for mode, dests := range perMode {
-			desired[mode] = append(desired[mode], module.Claim{Key: e.key, Owner: e.owner, Generation: e.gen,
+			mc := module.Claim{Key: e.key, Owner: e.owner, Generation: e.gen,
 				Handoff: c.spec.GetHandoff(), OwnerPod: c.rec.PodUID, Addresses: slices.Clone(att.Addresses),
-				Destinations: dests})
+				Destinations: dests}
+			if mode == workerv1alpha1.Mode_MODE_LOCAL {
+				mc.EdgeLink = edgeLink
+			}
+			desired[mode] = append(desired[mode], mc)
 		}
 	}
 	return evals, desired, nil
+}
+
+// edgeLinkDestination resolves a connector claim's one destination: its own
+// EdgeAttachment, delivered Local through the host link galactic-edge
+// created (D37). The link's address is the attachment's, from its trusted
+// source; an attachment with none yet programs nothing.
+func edgeLinkDestination(k module.ClaimKey, own netip.Prefix, att sources.Attachment,
+	el *workerv1alpha1.EdgeLink) (destEval, module.Destination, *module.EdgeLink) {
+	ref := &workerv1alpha1.Destination{Target: &workerv1alpha1.Destination_Attachment{
+		Attachment: &workerv1alpha1.AttachmentRef{Uid: k.AttachmentUID}}}
+	de := destEval{ref: ref, id: module.DestinationID(ref), mode: workerv1alpha1.Mode_MODE_LOCAL, resolved: true}
+	if len(att.Addresses) == 0 {
+		de.capReason, de.capMsg = workerv1alpha1.ReasonDestinationAddressUnknown,
+			"the EdgeAttachment has no address allocated yet"
+		return de, module.Destination{}, nil
+	}
+	link := &module.EdgeLink{Name: el.GetName(), Address: att.Addresses[0]}
+	for _, p := range el.GetPrefixes() {
+		// validateEdgeLink parsed every prefix when the spec was accepted.
+		if pfx, err := netip.ParsePrefix(p); err == nil {
+			link.Prefixes = append(link.Prefixes, pfx.Masked())
+		}
+	}
+	dst := module.Destination{ID: de.id, Ref: ref, Mode: de.mode, VPC: att.VPC, Node: att.Node, Locator: own,
+		Addresses: slices.Clone(att.Addresses), HostInterface: el.GetName()}
+	return de, dst, link
 }
 
 // resolveDestination resolves one destination to Local or Fabric. A

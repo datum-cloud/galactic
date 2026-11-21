@@ -143,6 +143,10 @@ func desire(vpc string, claims []module.Claim) *model {
 		return t
 	}
 	for _, c := range sorted {
+		if c.EdgeLink != nil {
+			// A connector claim's link is galactic-edge's (edgelinks.go).
+			continue
+		}
 		switch c.Handoff {
 		case workerv1alpha1.Handoff_HANDOFF_TAP:
 			m.tap = true

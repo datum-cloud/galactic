@@ -98,7 +98,7 @@ type Module struct {
 	planGate    chan struct{}
 	planEntered chan struct{}
 	ready       func(module.ClaimKey, string) (bool, string)
-	// desired is the desired state of each scope's last Plan.
+	// desired is each scope's desired claims from its last Plan.
 	desired map[string][]module.Claim
 
 	PlanCalls  atomic.Int64
@@ -120,6 +120,14 @@ func New(name string, mode workerv1alpha1.Mode, host *Host) *Module {
 		}
 	}
 	return m
+}
+
+// Desired returns the desired claims of vpc's scope from the module's last
+// Plan of it.
+func (m *Module) Desired(vpc string) []module.Claim {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.desired[vpc])
 }
 
 // SetCapability sets one capability's state.
@@ -230,10 +238,6 @@ func (c change) Drift() (string, bool) { return "rows differ", true }
 func (m *Module) Plan(ctx context.Context, scope module.Scope, desired []module.Claim) (module.Change, error) {
 	m.PlanCalls.Add(1)
 	m.mu.Lock()
-	if m.desired == nil {
-		m.desired = map[string][]module.Claim{}
-	}
-	m.desired[scope.VPC] = slices.Clone(desired)
 	gate, entered := m.planGate, m.planEntered
 	m.mu.Unlock()
 	if gate != nil {
@@ -252,6 +256,12 @@ func (m *Module) Plan(ctx context.Context, scope module.Scope, desired []module.
 			return nil, err
 		}
 	}
+	m.mu.Lock()
+	if m.desired == nil {
+		m.desired = map[string][]module.Claim{}
+	}
+	m.desired[scope.VPC] = slices.Clone(desired)
+	m.mu.Unlock()
 	want := map[module.ClaimKey]map[string]uint64{}
 	for _, c := range desired {
 		for _, d := range c.Destinations {
@@ -398,11 +408,4 @@ func sortedIDs(m map[string]uint64) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// Desired returns the desired state the last Plan of vpc's scope received.
-func (m *Module) Desired(vpc string) []module.Claim {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return slices.Clone(m.desired[vpc])
 }

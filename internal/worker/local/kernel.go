@@ -111,6 +111,9 @@ type Kernel struct {
 	LinkMTU int
 	// Shards is egress_local_shard, or nil when the uSID datapath has none.
 	Shards LocalShards
+	// edge is the edge-link host access; the pinned maps under PinDir when
+	// nil.
+	edge edgeHost
 
 	mu      sync.Mutex
 	objs    *localprog.Objects
@@ -148,6 +151,14 @@ func (k *Kernel) Close() error {
 	}
 	k.ifindexVRF, k.nodeSrc = nil, nil
 	return errors.Join(errs...)
+}
+
+// edgeHost returns the edge-link host access.
+func (k *Kernel) edgeHost() edgeHost {
+	if k.edge != nil {
+		return k.edge
+	}
+	return pinnedEdgeHost{pinDir: k.PinDir}
 }
 
 func (k *Kernel) mtu() int {

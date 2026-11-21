@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
@@ -50,6 +51,7 @@ import (
 	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/sysctl"
+	"go.datum.net/galactic/pkg/workerclient"
 )
 
 type options struct {
@@ -64,6 +66,11 @@ type options struct {
 	maxSkew        time.Duration
 	bootIDPath     string
 	bgpNamespace   string
+	// workerSocket, when set, makes Galactic Worker register the node's edge
+	// links (docs/worker/connector.md).
+	workerSocket    string
+	workerTokenFile string
+	workerWait      time.Duration
 }
 
 func main() {
@@ -106,6 +113,13 @@ func newRootCommand() *cobra.Command {
 		"Namespace of this node's BGPRouter and BGPVRFInstances, where the agent claims a VPC's "+
 			"BGPVRFInstance on a node where the VPC has no workload")
 	f.StringVar(&o.bootIDPath, "boot-id-path", "/proc/sys/kernel/random/boot_id", "File holding this boot's ID")
+	f.StringVar(&o.workerSocket, "worker-socket", "",
+		"Galactic Worker's socket. When set, galactic-edge claims each edge link from Worker, which registers it "+
+			"with the datapath, and hands Worker every VPC scope it owns. Empty writes the pinned maps itself")
+	f.StringVar(&o.workerTokenFile, "worker-token-file", workerclient.DefaultTokenFile,
+		"Projected ServiceAccount token with audience galactic-worker, used with --worker-socket")
+	f.DurationVar(&o.workerWait, "worker-wait", agent.DefaultWorkerWait,
+		"How long a pass waits for Worker to program or release one edge link, with --worker-socket")
 	f.StringVar(&o.metricsAddress, "metrics-bind-address", ":9186", "Address serving /metrics")
 	f.StringVar(&o.healthAddress, "health-probe-bind-address", ":9187", "Address serving /healthz and /readyz")
 	logOpts.BindFlags(cmd.PersistentFlags())
@@ -187,6 +201,24 @@ func run(parent context.Context, o *options) error {
 	if err != nil {
 		return fmt.Errorf("create API client: %w", err)
 	}
+	var datapath agent.Datapath = agent.PinnedDatapath{PinDir: o.pinDir}
+	vpcState := agent.HostVPCState(host, nodevpc.Config{
+		K8s: direct, Namespace: o.bgpNamespace, Node: o.nodeName, PinDir: o.pinDir,
+	}, vpcStateTimeout)
+	var workerDP *agent.WorkerDatapath
+	if o.workerSocket != "" {
+		// Connected on first use: galactic-edge keeps running, and renewing
+		// the gates of links Worker registered, while Worker is down.
+		wc := &agent.WorkerConn{Dial: func(ctx context.Context) (*workerclient.Client, error) {
+			return workerclient.Dial(ctx, workerclient.Options{SocketPath: o.workerSocket,
+				TokenFile: o.workerTokenFile})
+		}}
+		defer func() { _ = wc.Close() }()
+		workerDP = &agent.WorkerDatapath{Client: wc, Node: o.nodeName, Gates: agent.PinnedLinkGates{PinDir: o.pinDir},
+			Wait: o.workerWait, Capabilities: wc.Capabilities}
+		// Worker creates and reclaims each VPC's node state.
+		datapath, vpcState = workerDP, nil
+	}
 	a := &agent.Agent{
 		Client:     mgr.GetClient(),
 		NodeName:   o.nodeName,
@@ -194,7 +226,7 @@ func run(parent context.Context, o *options) error {
 		Ownership:  auth,
 		Host:       host,
 		Namespaces: pods,
-		Datapath:   agent.PinnedDatapath{PinDir: o.pinDir},
+		Datapath:   datapath,
 		MTU:        o.mtu,
 		EncapMTU:   agent.PinnedDatapath{PinDir: o.pinDir}.EncapMTU,
 		APIReader:  mgr.GetAPIReader(),
@@ -205,9 +237,12 @@ func run(parent context.Context, o *options) error {
 			Events:  mgr.GetEventRecorder("galactic-edge"),
 			Metrics: diag.NewMetrics(diag.RoleNode),
 		},
-		VPCState: agent.HostVPCState(host, nodevpc.Config{
-			K8s: direct, Namespace: o.bgpNamespace, Node: o.nodeName, PinDir: o.pinDir,
-		}, vpcStateTimeout),
+		VPCState: vpcState,
+	}
+	if workerDP != nil {
+		if err := mgr.Add(manager.RunnableFunc(workerDP.Run)); err != nil {
+			return err
+		}
 	}
 	metrics.MustRegister(agent.Collector{Agent: a})
 	if err := a.SetupWithManager(mgr); err != nil {
@@ -223,6 +258,6 @@ func run(parent context.Context, o *options) error {
 		return err
 	}
 	slog.Info("starting galactic-edge", "nodeName", o.nodeName, "owner", a.Owner,
-		"version", metadata.Version)
+		"worker", o.workerSocket != "", "version", metadata.Version)
 	return mgr.Start(ctx)
 }
