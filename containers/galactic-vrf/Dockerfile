@@ -6,10 +6,11 @@
 #
 # Published by .github/workflows/publish.yaml, same reusable
 # datum-cloud/actions publish-docker workflow, tag scheme and
-# linux/amd64,linux/arm64 matrix as every other image here. It has no
-# config/galactic-vrf kustomize base yet, so unlike the others it is not
-# stamped into the galactic-kustomize bundle -- the #856 deployment
-# contract is still an open, flagged dependency (§9 item 3 of the plan).
+# linux/amd64,linux/arm64 matrix as every other image here. The
+# config/galactic-vrf kustomize Component adds it to an Envoy Deployment
+# (see its README.md). The galactic-kustomize bundle carries that directory,
+# but publish.yaml does not stamp this image's tag into it, so the Component
+# keeps its `latest` tag until the consumer sets one with `images:`.
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -61,11 +62,13 @@ FROM scratch
 
 COPY --from=builder /workspace/galactic-vrf /galactic-vrf
 
-# CAP_NET_ADMIN only, never privileged -- per PR #851's explicit privilege
-# split (this sidecar creates VRF devices/routes; Envoy only binds to them).
-# The capability itself is granted by the pod's securityContext, not here;
-# USER is set to 65532:65532 since CAP_NET_ADMIN does not require running as
-# root.
+# Never privileged -- per PR #851's explicit privilege split (this sidecar
+# creates VRF devices/routes; Envoy only binds to them). The
+# config/galactic-vrf Component grants NET_ADMIN, BPF and SYS_ADMIN, mounts
+# /sys/fs/bpf and /run/galactic-worker, and runs the container as root: root
+# is needed to write the hostPath bpffs and to connect to Worker's root-owned
+# socket. The
+# USER below is the image's default for runs outside that Component.
 USER 65532:65532
 
 ENTRYPOINT ["/galactic-vrf"]

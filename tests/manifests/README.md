@@ -11,3 +11,8 @@ The same task renders every kustomization under `config/` and `deploy/`, and
 runs `hack/check-log-settings` on the output and on the source YAML, so an
 unsupported log level or format fails CI. See
 [logging](../../docs/observability/logging.md).
+
+`galactic-vrf/` composes `config/galactic-vrf` onto a stand-in Envoy
+Deployment labelled `galactic.datumapis.com/galactic-vrf: enabled` and must
+build. It has no `invalid/` counterpart: the Component is self-contained and
+requires no other Component.

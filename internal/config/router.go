@@ -170,8 +170,8 @@ func NewRouterConfig() *RouterConfig {
 	v.SetDefault("bmp_policy", DefaultRouterBMPPolicy)
 	v.SetDefault("bmp_statistics_interval", DefaultRouterBMPStatisticsInterval.String())
 	v.SetDefault("gobgp_api_dir", "")
-	v.SetDefault("worker_socket", "")
-	v.SetDefault("worker_token_file", DefaultRouterWorkerTokenFile)
+	v.SetDefault(keyWorkerSocket, "")
+	v.SetDefault(keyWorkerTokenFile, DefaultRouterWorkerTokenFile)
 
 	cfg := &RouterConfig{
 		v:      v,
@@ -203,8 +203,8 @@ func (c *RouterConfig) BindFlags(flags *pflag.FlagSet) {
 		{"bmp-policy", "bmp_policy"},
 		{"bmp-statistics-interval", "bmp_statistics_interval"},
 		{"gobgp-api-dir", "gobgp_api_dir"},
-		{"worker-socket", "worker_socket"},
-		{"worker-token-file", "worker_token_file"},
+		{flagWorkerSocket, keyWorkerSocket},
+		{flagWorkerTokenFile, keyWorkerTokenFile},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -234,8 +234,8 @@ func (c *RouterConfig) readFields() {
 	c.BMPPolicy = c.v.GetString("bmp_policy")
 	c.BMPStatisticsInterval = c.v.GetDuration("bmp_statistics_interval")
 	c.GoBGPAPIDir = c.v.GetString("gobgp_api_dir")
-	c.WorkerSocket = c.v.GetString("worker_socket")
-	c.WorkerTokenFile = c.v.GetString("worker_token_file")
+	c.WorkerSocket = c.v.GetString(keyWorkerSocket)
+	c.WorkerTokenFile = c.v.GetString(keyWorkerTokenFile)
 }
 
 // Validate checks that the required configuration fields are set and within

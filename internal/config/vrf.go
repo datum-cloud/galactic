@@ -7,12 +7,14 @@ package config
 import (
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"time"
 
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"k8s.io/apimachinery/pkg/labels"
+
+	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 )
 
 // --- VRF sidecar defaults ---------------------------------------------
@@ -34,27 +36,38 @@ const (
 	// grace period itself, so it is deliberately much shorter than
 	// DefaultVRFTeardownGracePeriod.
 	DefaultVRFSweepInterval = 5 * time.Second
+
+	// DefaultVRFHealthPort serves /healthz and /readyz, beside the metrics
+	// port in the proxy pod.
+	DefaultVRFHealthPort = 9183
+
+	// DefaultVRFWorkerTokenFile is where the pod mounts its projected
+	// Galactic Worker token.
+	DefaultVRFWorkerTokenFile = "/var/run/secrets/galactic-worker/token"
 )
 
 // --- VRF sidecar environment variable keys -----------------------------
 
 const (
 	EnvVRFMetricsPort         = "GALACTIC_VRF_METRICS_PORT"
+	EnvVRFHealthPort          = "GALACTIC_VRF_HEALTH_PORT"
 	EnvVRFTeardownGracePeriod = "GALACTIC_VRF_TEARDOWN_GRACE_PERIOD"
 	EnvVRFSweepInterval       = "GALACTIC_VRF_SWEEP_INTERVAL"
 
-	// EnvVRFNodeName and EnvVRFNamespace configure the return-path gateway
-	// advertisement publisher. Unset by default, and unlike the others
-	// NodeName has no compiled-in default: no generic value could be right for
-	// "which node is this".
+	// EnvVRFNodeName names this node, and EnvVRFNamespace the namespace of
+	// its BGPRouter, which gives the node's SRv6 source address.
 	EnvVRFNodeName  = "GALACTIC_VRF_NODE_NAME"
 	EnvVRFNamespace = "GALACTIC_VRF_NAMESPACE"
 
-	// EnvVRFGatewayPrefix configures return-path gateway address provisioning.
-	// Unset by default and with no compiled-in value, for the same reason: no
-	// generic value could be right for which address space a platform
-	// reserves.
-	EnvVRFGatewayPrefix = "GALACTIC_VRF_GATEWAY_PREFIX"
+	// EnvVRFPodNamespace is the proxy pod's namespace, which holds its
+	// VPCAttachments, and EnvVRFAttachmentSelector the label selector that
+	// picks them out.
+	EnvVRFPodNamespace       = "GALACTIC_VRF_POD_NAMESPACE"
+	EnvVRFAttachmentSelector = "GALACTIC_VRF_ATTACHMENT_SELECTOR"
+
+	// EnvVRFWorkerSocket and EnvVRFWorkerTokenFile reach Galactic Worker.
+	EnvVRFWorkerSocket    = "GALACTIC_VRF_WORKER_SOCKET"
+	EnvVRFWorkerTokenFile = "GALACTIC_VRF_WORKER_TOKEN_FILE"
 )
 
 // --- VRFConfig -----------------------------------------------------------
@@ -63,48 +76,34 @@ const (
 // flag, then environment variable, then compiled-in default. Create one with
 // NewVRFConfig, call BindFlags to layer CLI flags, then read the exported
 // fields.
-//
-// NodeName and Namespace are exceptions to that precedence. Route
-// reconciliation needs neither, deriving desired state entirely from the
-// EndpointSlice watch, but publishing this node's return-path gateway
-// advertisement needs to know which BGPRouter to attribute it to. NodeName
-// defaults to "", which disables that publisher rather than failing
-// validation, since most deployments do not set it.
 type VRFConfig struct {
 	v      *viper.Viper
 	prefix string
 
 	// Resolved fields.
 	MetricsPort         int
+	HealthPort          int
 	TeardownGracePeriod time.Duration
 	SweepInterval       time.Duration
-	// NodeName is this node's name as it appears in a BGPRouter's target
-	// reference. It is required only to enable the gateway-advertisement
-	// publisher; "" leaves that disabled. Resolved from EnvVRFNodeName, falling
-	// back to the same downward-API variable the CNI config uses.
+	// NodeName is this node's name, as Worker, the proxy's VPCAttachments and
+	// the node's BGPRouter record it. Resolved from EnvVRFNodeName, falling
+	// back to the same downward-API variable the CNI config uses. Required.
 	NodeName string
-	// Namespace is where this sidecar reads BGPRouter and BGPVRFInstance and
-	// writes BGPAdvertisement CRDs when the publisher is enabled. Defaults to
+	// Namespace is where this sidecar reads the node's BGPRouter. Defaults to
 	// DefaultNamespace, matching every other binary here.
 	Namespace string
-	// GatewayPrefix is a reserved, byte-aligned IPv6 CIDR this sidecar derives
-	// its per-VPC return-path gateway address from and assigns to the VRF-slave
-	// interface it creates for usid_egress.
-	//
-	// It must be address space nothing else ever hands out as a tenant pool,
-	// neither this repo's own IPAM nor whatever external system allocates a
-	// VPC's real subnets. It is deliberately not carved out of any tenant VPC's
-	// subnet: that space is owned by an allocator outside this repo's
-	// visibility, so nothing here can prove a reserved sub-range of it is safe,
-	// and only a structurally disjoint prefix guarantees no collision.
-	//
-	// "" disables gateway-address provisioning entirely, and there is
-	// deliberately no compiled-in value: this is a platform addressing decision
-	// for whoever owns the deployment's IPAM plan. It takes effect only when
-	// NodeName is also set, since a prefix alone derives one unadvertisable
-	// address, and an empty node identity makes every replica derive the same
-	// address for a given VPC.
-	GatewayPrefix string
+	// PodNamespace is the proxy pod's namespace, where its VPCAttachments
+	// are. Required.
+	PodNamespace string
+	// AttachmentSelector is the label selector of the proxy's own
+	// VPCAttachments, one per VPC and node it serves. NSO creates them; the
+	// replacement of a proxy pod keeps the same attachments, which is what
+	// serializes the replacement in Worker. Required.
+	AttachmentSelector string
+	// WorkerSocket is Galactic Worker's unix socket, mounted from the host.
+	WorkerSocket string
+	// WorkerTokenFile is the pod's projected token for Worker.
+	WorkerTokenFile string
 }
 
 // NewVRFConfig creates a config resolver reading the GALACTIC_VRF environment
@@ -116,9 +115,12 @@ func NewVRFConfig() *VRFConfig {
 	v.AutomaticEnv()
 
 	v.SetDefault(keyMetricsPort, DefaultVRFMetricsPort)
+	v.SetDefault("health_port", DefaultVRFHealthPort)
 	v.SetDefault("teardown_grace_period", DefaultVRFTeardownGracePeriod.String())
 	v.SetDefault("sweep_interval", DefaultVRFSweepInterval.String())
 	v.SetDefault("namespace", DefaultNamespace)
+	v.SetDefault(keyWorkerSocket, workerv1alpha1.DefaultSocketPath)
+	v.SetDefault(keyWorkerTokenFile, DefaultVRFWorkerTokenFile)
 
 	cfg := &VRFConfig{
 		v:      v,
@@ -136,11 +138,15 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 		key  string
 	}{
 		{flagMetricsPort, keyMetricsPort},
+		{"health-port", "health_port"},
 		{"teardown-grace-period", "teardown_grace_period"},
 		{"sweep-interval", "sweep_interval"},
 		{"node-name", "node_name"},
 		{"namespace", "namespace"},
-		{"gateway-prefix", "gateway_prefix"},
+		{"pod-namespace", "pod_namespace"},
+		{"attachment-selector", "attachment_selector"},
+		{flagWorkerSocket, keyWorkerSocket},
+		{flagWorkerTokenFile, keyWorkerTokenFile},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -156,9 +162,14 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 // readFields populates the exported fields from the current Viper state.
 func (c *VRFConfig) readFields() {
 	c.MetricsPort = c.v.GetInt(keyMetricsPort)
+	c.HealthPort = c.v.GetInt("health_port")
 	c.TeardownGracePeriod = c.v.GetDuration("teardown_grace_period")
 	c.SweepInterval = c.v.GetDuration("sweep_interval")
 	c.Namespace = c.v.GetString("namespace")
+	c.PodNamespace = c.v.GetString("pod_namespace")
+	c.AttachmentSelector = c.v.GetString("attachment_selector")
+	c.WorkerSocket = c.v.GetString(keyWorkerSocket)
+	c.WorkerTokenFile = c.v.GetString(keyWorkerTokenFile)
 
 	c.NodeName = c.v.GetString("node_name")
 	if c.NodeName == "" {
@@ -167,13 +178,15 @@ func (c *VRFConfig) readFields() {
 		// automatic binding to match.
 		c.NodeName = os.Getenv(EnvNodeNameLegacy)
 	}
-	c.GatewayPrefix = c.v.GetString("gateway_prefix")
 }
 
 // Validate checks that the resolved configuration is usable.
 func (c *VRFConfig) Validate() error {
 	if c.MetricsPort < 1 || c.MetricsPort > 65535 {
 		return errors.New(errMetricsPortRange)
+	}
+	if c.HealthPort < 1 || c.HealthPort > 65535 || c.HealthPort == c.MetricsPort {
+		return errors.New("health port must be in 1-65535 and differ from the metrics port")
 	}
 	if c.TeardownGracePeriod <= 0 {
 		return errors.New("teardown grace period must be positive")
@@ -184,17 +197,24 @@ func (c *VRFConfig) Validate() error {
 	if c.SweepInterval > c.TeardownGracePeriod {
 		return errors.New("sweep interval must not be greater than the teardown grace period")
 	}
-	if c.GatewayPrefix != "" {
-		ip, network, err := net.ParseCIDR(c.GatewayPrefix)
-		if err != nil {
-			return fmt.Errorf("gateway prefix %q: %w", c.GatewayPrefix, err)
-		}
-		if ip.To4() != nil {
-			return fmt.Errorf("gateway prefix %q must be an IPv6 CIDR", c.GatewayPrefix)
-		}
-		if ones, _ := network.Mask.Size(); ones%8 != 0 {
-			return fmt.Errorf("gateway prefix %q must be byte-aligned (a multiple of /8)", c.GatewayPrefix)
-		}
+	if c.NodeName == "" {
+		return fmt.Errorf("node name is required (%s)", EnvVRFNodeName)
+	}
+	if c.PodNamespace == "" {
+		return fmt.Errorf("pod namespace is required (%s)", EnvVRFPodNamespace)
+	}
+	if c.AttachmentSelector == "" {
+		return fmt.Errorf("attachment selector is required (%s)", EnvVRFAttachmentSelector)
+	}
+	sel, err := labels.Parse(c.AttachmentSelector)
+	if err != nil {
+		return fmt.Errorf("attachment selector %q: %w", c.AttachmentSelector, err)
+	}
+	if sel.Empty() {
+		return fmt.Errorf("attachment selector %q selects every VPCAttachment", c.AttachmentSelector)
+	}
+	if c.WorkerSocket == "" {
+		return errors.New("worker socket must not be empty")
 	}
 	return nil
 }

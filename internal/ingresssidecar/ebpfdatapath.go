@@ -101,8 +101,12 @@ func vrfLinkForTable(tableID uint32) (*netlink.Vrf, error) {
 			return link, nil
 		}
 	}
-	return nil, fmt.Errorf("no VRF interface found for table %d", tableID)
+	return nil, fmt.Errorf("table %d: %w", tableID, errNoVRFForTable)
 }
+
+// errNoVRFForTable is vrfLinkForTable's error when no VRF device uses the
+// table.
+var errNoVRFForTable = errors.New("no VRF interface found")
 
 // egressVethNames derives a VPC's veth pair names from tableID alone, since the
 // callers carry only a tableID forward. Collision-free because table IDs are
@@ -180,6 +184,15 @@ func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string, peerIndex uint32
 	if err != nil {
 		return nil, fmt.Errorf("wait for veth peer %q's own link-local address: %w", peer, err)
 	}
+	// A default route through the same hop stays as it is: configurePodLink
+	// sets its source to the gateway address, and replacing it would drop that.
+	current, err := vrfDefaultRoute(vrfLink.Table)
+	if err != nil {
+		return nil, err
+	}
+	if current != nil && current.LinkIndex == innerLink.Attrs().Index && current.Gw.Equal(peerLinkLocal) {
+		return peerLink, nil
+	}
 	defaultRoute := &netlink.Route{
 		Dst:       &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
 		Table:     int(vrfLink.Table),
@@ -191,6 +204,30 @@ func ensureEgressVeth(vrfLink *netlink.Vrf, inner, peer string, peerIndex uint32
 	}
 
 	return peerLink, nil
+}
+
+// vrfDefaultRoute returns the IPv6 default route through a gateway in table,
+// the one ensureEgressVeth installs, or nil when there is none. The VRF's
+// unreachable default, which has no gateway, does not count.
+func vrfDefaultRoute(table uint32) (*netlink.Route, error) {
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6,
+		&netlink.Route{Table: int(table)}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return nil, fmt.Errorf("list routes of VRF table %d: %w", table, err)
+	}
+	for i := range routes {
+		r := routes[i]
+		if r.Gw == nil || r.Type != unix.RTN_UNICAST {
+			continue
+		}
+		if r.Dst == nil {
+			return &r, nil
+		}
+		if ones, bits := r.Dst.Mask.Size(); ones == 0 && bits == 128 {
+			return &r, nil
+		}
+	}
+	return nil, nil
 }
 
 // waitForLinkLocalAddr returns link's kernel-assigned link-local IPv6 address,
@@ -268,12 +305,11 @@ func ensureNodeSourceAddress() (wrote bool, err error) {
 // (block, argument) per ifindex, so a single registration could resolve at most
 // one VPC.
 //
-// tableID is the VPC's Linux routing table. vpc is used to derive that VPC's
-// return-path gateway address when one is configured.
+// tableID is the VPC's Linux routing table.
 //
 // Idempotent: every step is a replace, so a repeat call for an
 // already-provisioned VPC is in effect a no-op.
-func ensureEgressDatapath(vpc string, tableID uint32) error {
+func ensureEgressDatapath(tableID uint32) error {
 	// node_src_addr_table is a per-node singleton, not per-VPC. usid_egress
 	// fails open, uncounted, on every encapsulation attempt until something
 	// sets it, and the CNI path only registers it as a side effect of a real
@@ -303,13 +339,6 @@ func ensureEgressDatapath(vpc string, tableID uint32) error {
 	peerLink, err := ensureEgressVeth(vrfLink, inner, peer, ifindexvrfmap.SidecarIfindex(argument))
 	if err != nil {
 		return fmt.Errorf("ensure egress veth for VRF table %d: %w", tableID, err)
-	}
-
-	// Assign the return-path gateway address and install its reply redirect
-	// before this VPC can publish a route. A missing redirect would advertise
-	// a gateway whose VRF-bound Envoy sockets cannot receive replies.
-	if err := ensureGatewayAddress(vpc, inner); err != nil {
-		return fmt.Errorf("ensure gateway return path for vpc %s: %w", vpc, err)
 	}
 
 	registry, closer, err := usidmap.OpenPinnedRegistry(ebpfPinDir)
@@ -564,17 +593,34 @@ func ensureRedirectRoute(prefix *net.IPNet, tableID uint32) error {
 }
 
 // removeRedirectRoute removes the main-table route ensureRedirectRoute
-// installed for prefix. Deleting by destination and table alone is enough to
-// identify it.
+// installed for prefix toward tableID's VRF device, and only that route.
+//
+// The main table holds one route per destination, and ensureRedirectRoute
+// replaces it. Two VPCs can carry the same backend address, as when IPAM hands
+// a deleted Network's subnet to the next one, so by the time a deleted VPC's
+// route is torn down the destination may already point at the live VPC's
+// VRF. The delete therefore names the device as well: the kernel then removes
+// the route only while it still points at this VPC's VRF.
+//
+// A missing VRF device means the kernel already dropped every route through
+// it, so there is nothing of this VPC's left to remove, and any route still
+// held for prefix belongs to another VPC.
 //
 // An absent route is the outcome a removal asks for, so ESRCH counts as
 // success. Reporting failure instead retries a teardown that can never
-// complete, and keeps the entry alive to collide with the next tenant given
-// this address.
-func removeRedirectRoute(prefix *net.IPNet) error {
-	err := netlink.RouteDel(&netlink.Route{
-		Dst:   prefix,
-		Table: unix.RT_TABLE_MAIN,
+// complete.
+func removeRedirectRoute(prefix *net.IPNet, tableID uint32) error {
+	link, err := vrfLinkForTable(tableID)
+	if errors.Is(err, errNoVRFForTable) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = netlink.RouteDel(&netlink.Route{
+		Dst:       prefix,
+		Table:     unix.RT_TABLE_MAIN,
+		LinkIndex: link.Attrs().Index,
 	})
 	if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT) {
 		return nil

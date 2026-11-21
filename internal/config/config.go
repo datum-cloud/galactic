@@ -34,6 +34,12 @@ const (
 	// flagMetricsPort is the CLI flag name several resolvers share, each
 	// binding it to the same key.
 	flagMetricsPort = "metrics-port"
+	// flagWorkerSocket and flagWorkerTokenFile, with their keys, configure a
+	// Galactic Worker client.
+	flagWorkerSocket    = "worker-socket"
+	flagWorkerTokenFile = "worker-token-file"
+	keyWorkerSocket     = "worker_socket"
+	keyWorkerTokenFile  = "worker_token_file"
 
 	// keyMetricsPort is the Viper key each component's MetricsPort field
 	// resolves from (SetDefault/BindFlags/GetInt).

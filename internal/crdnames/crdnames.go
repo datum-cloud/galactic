@@ -38,24 +38,6 @@ const AnnotationAllocatedSubnetIPv4 = "galactic.datum.net/allocated-subnet-ipv4"
 // see NetNSKey.
 const AnnotationNetNS = "galactic.datum.net/netns"
 
-// AnnotationIngressHostIfindex and AnnotationIngressHostMAC carry the two facts
-// about an ingress sidecar's own pod that the host side of its return path
-// needs, and that only the sidecar can read.
-//
-// A reply for a sidecar gateway address must be redirected into the pod holding
-// it, so the host needs the ifindex of the host-side end of that pod's veth and
-// the pod-side MAC to address the frame to. Both are trivial to read from
-// inside the pod and unreadable from outside without entering the namespace.
-// The node agent deliberately does not cross that boundary; its CAP_SYS_ADMIN
-// grant is reserved for the eBPF datapath lifecycle.
-//
-// The side that can see them publishes them, on the advertisement the sidecar
-// already creates for this address, so one object describes one return path.
-const (
-	AnnotationIngressHostIfindex = "galactic.datum.net/ingress-host-ifindex"
-	AnnotationIngressHostMAC     = "galactic.datum.net/ingress-host-mac"
-)
-
 // AnnotationNoAddressing marks a BGPAdvertisement whose spec.prefixes is empty
 // by design, because the attachment's config carries no "ipam" block and no
 // address was ever requested. A VM managing its own addressing is a supported
@@ -178,27 +160,6 @@ func VPCSegment(vpc string) string {
 	return nameSegment(vpc)
 }
 
-// IngressAttachment is the synthetic vpcAttachment segment the ingress sidecar
-// publishes its per-VPC gateway address under. A sidecar has no real
-// VPCAttachment, since no CNI ADD ever runs for it, but BGPAdvertisementName
-// needs a middle segment, and one fixed value keeps the name deterministic and
-// one per (VPC, node).
-//
-// It lives here, in the package that owns every CRD name, rather than in the
-// sidecar that writes these advertisements, because the host side has to
-// recognise them, and two copies of the same literal is how that recognition
-// silently stops matching.
-const IngressAttachment = "ingress"
-
-// IngressAdvertisementSegment returns the middle name segment of every
-// BGPAdvertisement the ingress sidecar publishes, that is, what
-// BGPAdvertisementName renders IngressAttachment as. Exported so a reader can
-// identify a sidecar's gateway advertisement without re-deriving the
-// encoding.
-func IngressAdvertisementSegment() string {
-	return nameSegment(IngressAttachment)
-}
-
 // BGPVRFInstanceName returns the deterministic name for a BGPVRFInstance,
 // keyed by (vpc, node). The kernel VRF is shared by every attachment, pod or
 // VM, on this VPC on this node, so they must all resolve to the same
@@ -304,4 +265,31 @@ func ParseTenantIdentifier(id string) (vpc, vpcAttachment string, ok bool) {
 		return "", "", false
 	}
 	return vpc, vpcAttachment, true
+}
+
+// Labels and annotation of the BGPAdvertisement Galactic Worker publishes for
+// the addresses of a routed_link or socket claim (WorkerAdvertisementName).
+// It carries no netns annotation, so galactic-router's GC never judges it;
+// Worker withdraws it when the claim goes, its lease expires or its pod is
+// gone.
+const (
+	// LabelWorkerVPC is the claim's base62 VPC.
+	LabelWorkerVPC = "galactic.datumapis.com/worker-vpc"
+	// LabelWorkerNode is the node of the Worker that published it.
+	LabelWorkerNode = "galactic.datumapis.com/worker-node"
+	// LabelWorkerAttachment is the UID of the claim's attachment.
+	LabelWorkerAttachment = "galactic.datumapis.com/worker-attachment"
+	// AnnotationWorkerPod is the UID of the pod the claim's routed link
+	// serves.
+	AnnotationWorkerPod = "galactic.datumapis.com/worker-pod"
+)
+
+// WorkerAdvertisementName returns the name of the BGPAdvertisement Worker on
+// nodeName publishes for a claim on attachment attachmentUID in vpc, used
+// when the attachment records no base62 identifier. With one, Worker names
+// the advertisement BGPAdvertisementName(vpc, identifier, nodeName), the
+// attachment's own tenant advertisement name. Both lead with the VPC segment,
+// as every BGP CRD name does.
+func WorkerAdvertisementName(vpc, attachmentUID, nodeName string) string {
+	return BGPAdvertisementName(vpc, attachmentUID, nodeName)
 }
