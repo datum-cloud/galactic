@@ -906,6 +906,20 @@ fi
 
 # Run ----------------------------------------------------------------------------
 
+# The pod can turn Ready before its first claims are made, while the proxy
+# attachments' status is still being written; wait for the sidecar to
+# report both claims held and configured.
+claims_ready=0
+for i in $(seq 1 90); do
+  metrics >"${OUT}/logs/setup-metrics.txt" 2>&1 || true
+  claims_ready=$(metric "${OUT}/logs/setup-metrics.txt" worker_claims 'state="ready"')
+  [ "${claims_ready}" = 2 ] && break
+  sleep 2
+done
+record setup "the sidecar reports both Worker claims ready" 2 "${claims_ready}"
+kd -n "${NS}" get vpcattachments -o yaml >"${OUT}/logs/proxy-attachments.yaml" 2>&1 || true
+kd -n "${NS}" logs "${POD}" -c galactic-vrf --tail=200 >"${OUT}/logs/galactic-vrf-setup.log" 2>&1 || true
+
 links
 for v in 80 81; do
   record setup "VPC ${v}: routed link ends found" yes \
