@@ -1465,6 +1465,83 @@ func (l *lab) edgeUsesWorker(t *testing.T) bool {
 	return false
 }
 
+const (
+	// workerComm is galactic-worker's process name, whether it runs in its
+	// DaemonSet's pod or as the bare process scripts/edge-worker.sh starts.
+	workerComm = "galactic-worker"
+	// workerSocket is the socket a serving galactic-worker listens on.
+	workerSocket = "/run/galactic-worker/worker.sock"
+	// defaultHostGrace is galactic-worker's --host-grace default,
+	// worker.DefaultHostGrace.
+	defaultHostGrace = time.Minute
+)
+
+// workerProc is the galactic-worker serving a node.
+type workerProc struct {
+	pid  string
+	args []string
+	// logFile is the file the process writes its log to, or "" when its
+	// output goes to a pipe, as a pod's does.
+	logFile string
+	// socket is true when the node has Worker's socket.
+	socket bool
+}
+
+// workerOnNode returns the galactic-worker process serving node, packaged or
+// bare, or nil when none runs. A running Worker owns every VPC scope on its
+// node that no other writer owns (docs/worker/ownership.md). The node's PID
+// namespace holds every process of its pods as well as its own.
+func workerOnNode(t *testing.T, node string) *workerProc {
+	t.Helper()
+	out, err := nodeExec(node, "pgrep", "-a", "-x", workerComm)
+	if err != nil && strings.TrimSpace(out) != "" {
+		t.Fatal(err)
+	}
+	var procs []*workerProc
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		// The server takes flags only; a subcommand, such as handback or
+		// inspect, is a client.
+		if err != nil || len(f) < 2 || (len(f) > 2 && !strings.HasPrefix(f[2], "-")) {
+			continue
+		}
+		procs = append(procs, &workerProc{pid: f[0], args: f[2:]})
+	}
+	switch len(procs) {
+	case 0:
+		return nil
+	case 1:
+	default:
+		t.Fatalf("%d galactic-worker servers on %s", len(procs), node)
+	}
+	w := procs[0]
+	if dst, err := nodeExec(node, "readlink", "/proc/"+w.pid+"/fd/1"); err == nil && strings.HasPrefix(dst, "/") {
+		w.logFile = dst
+	}
+	_, err = nodeExec(node, "test", "-S", workerSocket)
+	w.socket = err == nil
+	return w
+}
+
+// hostGrace returns the process's --host-grace, or its default.
+func (w *workerProc) hostGrace(t *testing.T) time.Duration {
+	t.Helper()
+	for i, arg := range w.args {
+		v, ok := strings.CutPrefix(arg, "--host-grace=")
+		if !ok && arg == "--host-grace" && i+1 < len(w.args) {
+			v, ok = w.args[i+1], true
+		}
+		if ok {
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				t.Fatalf("galactic-worker --host-grace %q: %v", v, err)
+			}
+			return d
+		}
+	}
+	return defaultHostGrace
+}
+
 // gcInterval reads galactic-router's GC interval from its DaemonSet.
 func (l *lab) gcInterval(t *testing.T) time.Duration {
 	t.Helper()
