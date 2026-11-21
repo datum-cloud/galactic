@@ -516,7 +516,7 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 		for mode, dests := range perMode {
 			mc := module.Claim{Key: e.key, Owner: e.owner, Generation: e.gen,
 				Handoff: c.spec.GetHandoff(), OwnerPod: c.rec.PodUID, Addresses: slices.Clone(att.Addresses),
-				Destinations: dests}
+				AttachmentID: att.ID, Destinations: dests}
 			if mode == workerv1alpha1.Mode_MODE_LOCAL {
 				mc.EdgeLink = edgeLink
 			}
@@ -929,8 +929,8 @@ func (w *Worker) wantAdvertisements(claims []module.Claim) []hostscope.Advertise
 		if w.d.PodAlive != nil && !w.d.PodAlive(c.OwnerPod) {
 			continue
 		}
-		want = append(want, hostscope.Advertisement{AttachmentUID: c.Key.AttachmentUID, PodUID: c.OwnerPod,
-			Addresses: slices.Clone(c.Addresses)})
+		want = append(want, hostscope.Advertisement{AttachmentUID: c.Key.AttachmentUID, AttachmentID: c.AttachmentID,
+			PodUID: c.OwnerPod, Addresses: slices.Clone(c.Addresses)})
 	}
 	return want
 }

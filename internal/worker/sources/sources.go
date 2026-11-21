@@ -57,6 +57,10 @@ type Attachment struct {
 	// attachment not yet attached and for an EdgeAttachment, whose host link
 	// its connector claim names.
 	HostInterface string
+	// ID is a VPCAttachment's base62 identifier, as its status records
+	// (status.vpcAttachment): with the VPC, the identity galactic-controller
+	// projects the attachment's status from. Empty for an EdgeAttachment.
+	ID string
 }
 
 // EgressShard is the trusted record of an egress translation shard: its
@@ -146,7 +150,7 @@ func (k Kube) Attachment(ctx context.Context, uid string) (Attachment, bool, err
 		a := vas.Items[0]
 		return Attachment{UID: uid, Kind: KindVPCAttachment, VPC: a.Status.VPC, Node: a.Status.Node,
 			Admitted: a.DeletionTimestamp.IsZero(), Addresses: interfaceAddresses(a.Spec.Interface.Addresses),
-			HostInterface: a.Status.HostInterface}, true, nil
+			HostInterface: a.Status.HostInterface, ID: a.Status.VPCAttachment}, true, nil
 	}
 	var eas galacticv1alpha1.EdgeAttachmentList
 	if err := k.Reader.List(ctx, &eas, client.MatchingFields{uidIndex: uid}); err != nil {
