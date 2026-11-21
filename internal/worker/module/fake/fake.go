@@ -238,10 +238,6 @@ func (c change) Drift() (string, bool) { return "rows differ", true }
 func (m *Module) Plan(ctx context.Context, scope module.Scope, desired []module.Claim) (module.Change, error) {
 	m.PlanCalls.Add(1)
 	m.mu.Lock()
-	if m.desired == nil {
-		m.desired = map[string][]module.Claim{}
-	}
-	m.desired[scope.VPC] = slices.Clone(desired)
 	gate, entered := m.planGate, m.planEntered
 	m.mu.Unlock()
 	if gate != nil {

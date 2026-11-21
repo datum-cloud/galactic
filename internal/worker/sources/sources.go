@@ -356,8 +356,8 @@ func vpcOf(obj any) string {
 }
 
 // Watch calls changed with a VPC identifier whenever an attachment or a
-// ServiceVIPBinding in that VPC changes, and with "" when a BGPRouter changes, which can move any
-// destination between Local and Fabric. Duplicate events are expected;
+// ServiceVIPBinding in that VPC changes, and with "" when a BGPRouter
+// changes, which can move any destination between Local and Fabric. Duplicate events are expected;
 // Worker's queue coalesces them.
 func Watch(ctx context.Context, c cache.Cache, changed func(vpc string)) error {
 	notify := func(obj any) {
@@ -365,8 +365,7 @@ func Watch(ctx context.Context, c cache.Cache, changed func(vpc string)) error {
 			changed(v)
 		}
 	}
-	for _, obj := range []client.Object{&cloudv1alpha1.VPCAttachment{}, &galacticv1alpha1.EdgeAttachment{},
-		&bgpv1alpha1.ServiceVIPBinding{}} {
+	for _, obj := range attachmentTypes() {
 		inf, err := c.GetInformer(ctx, obj)
 		if err != nil {
 			return fmt.Errorf("sources: informer: %w", err)
@@ -382,7 +381,7 @@ func Watch(ctx context.Context, c cache.Cache, changed func(vpc string)) error {
 	// A BGPRouter can move any destination between Local and Fabric, and
 	// an EgressShard any shard destination.
 	all := func(any) { changed("") }
-	for _, obj := range []client.Object{&bgpv1alpha1.BGPRouter{}, &bgpv1alpha1.EgressShard{}} {
+	for _, obj := range topologyTypes() {
 		inf, err := c.GetInformer(ctx, obj)
 		if err != nil {
 			return fmt.Errorf("sources: informer: %w", err)
@@ -394,6 +393,27 @@ func Watch(ctx context.Context, c cache.Cache, changed func(vpc string)) error {
 		}
 	}
 	return nil
+}
+
+// attachmentTypes are the types whose changes requeue one VPC: the
+// attachments, and the ServiceVIPBindings a backend destination resolves
+// from (vpcOf).
+func attachmentTypes() []client.Object {
+	return []client.Object{&cloudv1alpha1.VPCAttachment{}, &galacticv1alpha1.EdgeAttachment{},
+		&bgpv1alpha1.ServiceVIPBinding{}}
+}
+
+// topologyTypes are the types whose changes can move any destination.
+func topologyTypes() []client.Object {
+	return []client.Object{&bgpv1alpha1.BGPRouter{}, &bgpv1alpha1.EgressShard{}}
+}
+
+// WatchedTypes returns every type Watch and Kube read through the cache,
+// which the cache lists and watches cluster-wide. Worker's ClusterRole must
+// grant get, list and watch on each; a test checks
+// config/galactic-worker/rbac.yaml against it.
+func WatchedTypes() []client.Object {
+	return append(attachmentTypes(), topologyTypes()...)
 }
 
 // AddToScheme adds every type Kube reads to a scheme.
