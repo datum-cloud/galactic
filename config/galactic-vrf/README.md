@@ -63,8 +63,12 @@ Worker's allowlist, using the Deployment's namespace:
   `local.socket` unavailable with `RoutedLinkUnavailable`, the sidecar's
   claims are never programmed, and the proxy never becomes ready
   ([Worker operations](../../docs/worker/operations.md#install)).
-- NSO (network-services-operator) creates the proxy pod's per-VPC
-  VPCAttachment in production. This Component does not.
+- NSO (network-services-operator) creates the proxy's per-VPC
+  VPCAttachment in production, one per proxy, node and VPC, with
+  `status.podName` naming the proxy pod; it names a replacement pod on the
+  same attachment. galactic-controller then certifies the attachment's node
+  from that pod. This Component creates no attachment
+  ([Worker contract](../../docs/worker/contract.md#envoy-and-the-galactic-vrf-sidecar)).
 - bpffs mounted at `/sys/fs/bpf` and `/run/galactic-worker` present on each
   node (both are `type: Directory` hostPaths).
 

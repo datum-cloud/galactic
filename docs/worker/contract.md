@@ -496,10 +496,26 @@ has an attachment in it and the VPC has at least one backend.
 | Destinations      | The VPCAttachments of the VPC's backends. The sidecar finds them from the tenant EndpointSlices: the label `galactic.datum.net/tenant-id` is `<vpc>-<vpcAttachment>`, matching the backend's `status.vpc` and `status.vpcAttachment`. |
 
 NSO creates the proxy's per-VPC VPCAttachment, with the gateway address in
-`spec.interface.addresses`, labels that match the selector, and `status.vpc`
-and `status.node` recorded. That sits outside Galactic and outside this epic.
-Until NSO does it, a VPC has no claim. The lab fixture creates these
-attachments by hand.
+`spec.interface.addresses`, labels that match the selector, and `status.vpc`,
+`status.vpcAttachment` and `status.podName` (the proxy pod) recorded. It keeps
+one attachment per proxy, node and VPC, and names a replacement pod on that
+same attachment, which is what serializes the replacement (D42). That sits
+outside Galactic and outside this epic. Until NSO does it, a VPC has no claim.
+The lab fixture writes these attachments itself.
+
+NSO does not write `status.node`. Worker admits a claim only on an attachment
+whose `status.node` is its own node, and that node is certified by
+galactic-controller alone. For an attachment that names its pod and has no
+advertisement yet, the controller sets `status.node` to that pod's
+`spec.nodeName`, read uncached from the attachment's namespace, only while the
+pod exists, is scheduled and is not terminating, and clears it otherwise
+(D40). It reads the pod again every 30 seconds rather than keeping a pod
+informer, so a deleted or rescheduled pod is noticed within that interval. A
+pod in another namespace never certifies an attachment, and a sidecar pod can
+claim no node the scheduler did not give it. Once Worker's advertisement for
+the claim exists, the controller projects the node and Programmed from it, as
+it does for an attachment CNI attached, and falls back to the pod-certified
+node when the advertisement is withdrawn.
 
 **Worker side.** Worker gives a `routed_link` or `socket` claim to the Local
 module even when none of its destinations resolves to Local, because the routed
@@ -518,13 +534,22 @@ over the routed link. Worker writes the BGPVRFInstance of any VPC with claims
 through `nodevpc.Ensure`, under the Argument lock; the sidecar writes neither
 resource.
 
-| Field                                            | Value                                                        |
-| ------------------------------------------------ | ------------------------------------------------------------ |
-| Name                                             | `crdnames.WorkerAdvertisementName(vpc, attachmentUID, node)` |
-| Label `galactic.datumapis.com/worker-vpc`        | The VPC                                                      |
-| Label `galactic.datumapis.com/worker-node`       | The node                                                     |
-| Label `galactic.datumapis.com/worker-attachment` | The claim attachment                                         |
-| Annotation `galactic.datumapis.com/worker-pod`   | The UID of the pod the claim serves                          |
+| Field                                            | Value                                                                                                                                                         |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Name                                             | The attachment's own advertisement name, `<vpc>-<vpcAttachment>-<node>` (`crdnames.BGPAdvertisementName`); from its UID when its status records no identifier |
+| Label `galactic.datumapis.com/worker-vpc`        | The VPC                                                                                                                                                       |
+| Label `galactic.datumapis.com/worker-node`       | The node                                                                                                                                                      |
+| Label `galactic.datumapis.com/worker-attachment` | The claim attachment                                                                                                                                          |
+| Annotation `galactic.datumapis.com/worker-pod`   | The UID of the pod the claim serves                                                                                                                           |
+
+Naming the advertisement after the attachment makes it the attachment's
+tenant advertisement for galactic-controller, so the attachment reports
+Programmed once galactic-router advertises it. No CNI advertisement changes:
+CNI names an advertisement after an attachment it attached, which a proxy
+attachment never is, and Worker refuses to replace an advertisement of that
+name it did not write. An advertisement an earlier Worker named after the
+attachment's UID is deleted and replaced on the next commit of its scope, since
+Worker keeps exactly the advertisements it wants for a VPC.
 
 The advertisement has no netns annotation, so galactic-router GC never judges
 it. Worker rewrites it when the claim moves to the owner's new pod, and
