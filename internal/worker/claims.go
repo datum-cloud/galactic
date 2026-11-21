@@ -86,7 +86,10 @@ func validateSpec(gen uint64, spec *workerv1alpha1.ClaimSpec) error {
 		case *workerv1alpha1.Destination_Attachment:
 			ok = t.Attachment.GetUid() != ""
 		case *workerv1alpha1.Destination_Shard:
-			ok = t.Shard.GetGroup() != ""
+			if t.Shard.GetGroup() != "" || t.Shard.GetIndex() != 0 {
+				return malformed(fmt.Sprintf("destination %d: a shard is named by name; group and index are not used", i))
+			}
+			ok = t.Shard.GetName() != ""
 		case *workerv1alpha1.Destination_Backend:
 			ok = t.Backend.GetNode() != ""
 		}
@@ -212,9 +215,13 @@ func (w *Worker) admit(ctx context.Context, caller auth.Caller, k module.ClaimKe
 	if err != nil {
 		return refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "trusted sources unavailable", nil)
 	}
+	if !ok {
+		if err := w.admitShardAttachment(ctx, caller, k, spec); err != nil {
+			return err
+		}
+		return w.admitDestinations(ctx, caller, k, spec)
+	}
 	switch {
-	case !ok:
-		return notAuthorized("the claim's attachment does not exist")
 	case att.VPC != k.VPC:
 		return notAuthorized("the claim's attachment is not in the claimed VPC")
 	case att.Node != w.cfg.Node:
@@ -227,12 +234,93 @@ func (w *Worker) admit(ctx context.Context, caller auth.Caller, k module.ClaimKe
 		spec.GetHandoff() == workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK:
 		return notAuthorized("a routed_link claim on an EdgeAttachment must name its edge_link")
 	}
+	return w.admitDestinations(ctx, caller, k, spec)
+}
+
+// admitShardAttachment authorizes a claim whose attachment is an EgressShard
+// rather than a VPCAttachment or EdgeAttachment: the NAT shard's claim on a
+// VPC it serves. Such a claim is allowed only when the allowlist lets the
+// caller name an EgressShard, the claim is a veth_pair whose every
+// destination is a shard, the EgressShard runs on this node, and the VPC has
+// an admitted VPCAttachment on this node. A uid that names no EgressShard
+// either is refused as a missing attachment.
+func (w *Worker) admitShardAttachment(ctx context.Context, caller auth.Caller, k module.ClaimKey,
+	spec *workerv1alpha1.ClaimSpec) error {
+	es, ok, err := w.d.Sources.EgressShardByUID(ctx, k.AttachmentUID)
+	if err != nil {
+		return refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "trusted sources unavailable", nil)
+	}
+	if !ok {
+		return refusal.New(codes.PermissionDenied, workerv1alpha1.ReasonVPCNotAuthorized,
+			"the claim's attachment does not exist", nil)
+	}
+	if !caller.EgressShardClaims {
+		return refusal.New(codes.PermissionDenied, workerv1alpha1.ReasonCapabilityNotAllowed,
+			caller.ServiceAccount+" may not name an EgressShard as a claim's attachment", nil)
+	}
+	if spec.GetHandoff() != workerv1alpha1.Handoff_HANDOFF_VETH_PAIR {
+		return malformed("a claim whose attachment is an EgressShard must use the veth_pair handoff")
+	}
+	for i, d := range spec.GetDestinations() {
+		if _, isShard := d.GetTarget().(*workerv1alpha1.Destination_Shard); !isShard {
+			return malformed(fmt.Sprintf(
+				"destination %d: a claim whose attachment is an EgressShard may name only shards", i))
+		}
+	}
+	if msg, err := w.shardAuthority(ctx, k, es); err != nil {
+		return refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "trusted sources unavailable", nil)
+	} else if msg != "" {
+		return refusal.New(codes.PermissionDenied, workerv1alpha1.ReasonVPCNotAuthorized, msg, nil)
+	}
+	return nil
+}
+
+// shardAuthority checks the trusted facts that let EgressShard es serve as
+// claim k's attachment, and returns why not, or "" when they hold. Worker
+// checks them at admission and again on every reconcile, so the claim is
+// withdrawn when the shard moves or the VPC leaves the node.
+func (w *Worker) shardAuthority(ctx context.Context, k module.ClaimKey, es sources.EgressShard) (string, error) {
+	if es.Node != w.cfg.Node {
+		return "the claim's EgressShard does not run on this node", nil
+	}
+	tenants, err := w.d.Sources.VPCAttachments(ctx, k.VPC, w.cfg.Node)
+	if err != nil {
+		return "", err
+	}
+	if len(tenants) == 0 {
+		return "the claimed VPC has no admitted VPCAttachment on this node", nil
+	}
+	return "", nil
+}
+
+// admitDestinations authorizes a claim's destinations and the capabilities
+// they need.
+func (w *Worker) admitDestinations(ctx context.Context, caller auth.Caller, k module.ClaimKey,
+	spec *workerv1alpha1.ClaimSpec) error {
+	notAuthorized := func(msg string) error {
+		return refusal.New(codes.PermissionDenied, workerv1alpha1.ReasonVPCNotAuthorized, msg, nil)
+	}
 	own, err := w.d.Sources.Locator(ctx, w.cfg.Node)
 	if err != nil {
 		return refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "trusted sources unavailable", nil)
 	}
 	needFabric := spec.GetMode() == workerv1alpha1.Mode_MODE_FABRIC
 	for _, d := range spec.GetDestinations() {
+		if sh, isShard := d.GetTarget().(*workerv1alpha1.Destination_Shard); isShard {
+			es, found, err := w.d.Sources.EgressShard(ctx, sh.Shard.GetName())
+			if err != nil {
+				return refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "trusted sources unavailable", nil)
+			}
+			if !found {
+				return notAuthorized("destination shard " + sh.Shard.GetName() + " does not exist")
+			}
+			// A shard serves every VPC, so it has no VPC to compare. One on
+			// another node is reached over the fabric.
+			if spec.GetMode() != workerv1alpha1.Mode_MODE_LOCAL && es.Node != w.cfg.Node {
+				needFabric = true
+			}
+			continue
+		}
 		t, ok := d.GetTarget().(*workerv1alpha1.Destination_Attachment)
 		if !ok {
 			continue

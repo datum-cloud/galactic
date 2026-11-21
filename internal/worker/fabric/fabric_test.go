@@ -421,3 +421,29 @@ func TestWithdrawalAfterTheVRFIsGone(t *testing.T) {
 		t.Fatal("the withdrawal is still pending")
 	}
 }
+
+// TestShardDestinationReadsItsSID judges a remote shard by its own SID's
+// underlay next hop, writes nothing for it, and keeps it apart from the
+// tenant routes.
+func TestShardDestinationReadsItsSID(t *testing.T) {
+	f := newFixture(t)
+	shardSID := netip.MustParseAddr("2001:db8:5:2::")
+	shardLoc := netip.MustParsePrefix("2001:db8:5:2::/64")
+	shard := func(id string) module.Destination {
+		return module.Destination{ID: id, Mode: workerv1alpha1.Mode_MODE_FABRIC, VPC: vpcA, Locator: shardLoc,
+			Shard: &module.ShardTarget{Name: id, SID: shardSID}}
+	}
+	desired := []module.Claim{{Key: claimA, Generation: 3, Handoff: workerv1alpha1.Handoff_HANDOFF_VETH_PAIR,
+		Destinations: []module.Destination{shard("shard-b")}}}
+	_, st := f.reconcile(vpcA, desired)
+	wantState(t, st, "shard-b", true, false, true, workerv1alpha1.ReasonUnderlayUnreachable)
+	if n := len(f.dp.Entries(tableA)); n != 0 {
+		t.Fatalf("a shard destination wrote %d entries", n)
+	}
+	f.dp.Reach(shardLoc, linkB, "02:00:00:00:00:0b")
+	_, st = f.reconcile(vpcA, desired)
+	wantState(t, st, "shard-b", true, true, true, "")
+	f.dp.SetReturn(vpcA, errors.New("no vrf_table row"))
+	_, st = f.reconcile(vpcA, desired)
+	wantState(t, st, "shard-b", true, true, false, workerv1alpha1.ReasonReturnPathNotProgrammed)
+}

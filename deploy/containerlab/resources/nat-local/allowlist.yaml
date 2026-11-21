@@ -1,0 +1,6 @@
+serviceAccounts:
+  - serviceAccount: galactic-system/galactic-router
+    capabilities: [fabric.routes]
+  - serviceAccount: galactic-system/galactic-nat
+    capabilities: [local.veth_pair, fabric.srv6]
+    egressShardClaims: true
