@@ -196,23 +196,70 @@ func (c *workerCollector) Collect(ch chan<- prometheus.Metric) {
 // local pairs: it claims a pair per VPC from Galactic Worker and attaches the
 // loaded datapath to each.
 func startLocalDelivery(ctx context.Context, cfg *config.NATConfig, mgr ctrl.Manager) error {
-	objs := natDatapathKeepAlive.objs
-	if objs == nil {
-		return errors.New("the datapath is not loaded")
-	}
-	plumb, err := newKernelLocal(objs.NatIngress, natattach.PinDir,
-		natmap.LocalTables{Pair: natmap.KernelTable{Map: objs.NatLocalPair},
-			Return: natmap.KernelTable{Map: objs.NatLocalReturn}},
-		natmap.VLANTable{Table: natmap.KernelTable{Map: objs.NatVlanEgress}})
+	plumb, err := loadedLocal()
 	if err != nil {
 		return err
 	}
 	w := newNATWorker(cfg.NodeName, workerclientDial(cfg.WorkerSocket, cfg.WorkerTokenFile), plumb)
-	metrics.MustRegister(&workerCollector{worker: w, stats: objs.NatLocalStats})
+	metrics.MustRegister(&workerCollector{worker: w, stats: natDatapathKeepAlive.objs.NatLocalStats})
 	if err := watchWorkerSources(ctx, mgr.GetCache(), mgr.GetClient(), cfg.NodeName, w); err != nil {
 		return err
 	}
 	go w.Run(ctx)
 	slog.Info("Local shard delivery through Galactic Worker is on", "socket", cfg.WorkerSocket)
+	return nil
+}
+
+// loadedLocal returns the Local plumbing over the datapath this process
+// loaded.
+func loadedLocal() (*kernelLocal, error) {
+	objs := natDatapathKeepAlive.objs
+	if objs == nil {
+		return nil, errors.New("the datapath is not loaded")
+	}
+	return newKernelLocal(objs.NatIngress, natattach.PinDir,
+		natmap.LocalTables{Pair: natmap.KernelTable{Map: objs.NatLocalPair},
+			Return: natmap.KernelTable{Map: objs.NatLocalReturn}},
+		natmap.VLANTable{Table: natmap.KernelTable{Map: objs.NatVlanEgress}})
+}
+
+// openLocalPlumbing opens the Local state to prune on a start with the Worker
+// integration off: through the loaded datapath when there is one, otherwise
+// from what a previous process pinned.
+func openLocalPlumbing(cfg *config.NATConfig) (localPlumbing, func(), error) {
+	if cfg.DatapathEnabled {
+		plumb, err := loadedLocal()
+		return plumb, func() {}, err
+	}
+	return openPinnedLocal(natattach.PinDir)
+}
+
+// settleLocalDelivery runs start when cfg turns the Worker integration on.
+// Otherwise it prunes every Local pin and row a previous process left, so
+// a pair that still exists stops translating now rather than when Worker
+// withdraws its claim at session-lease expiry.
+//
+// A failure to prune is logged, not returned, like turnOffDatapath's: a
+// crash-looping process would not remove the state either, and Worker
+// deletes the pairs once their claims lapse.
+func settleLocalDelivery(cfg *config.NATConfig, start func() error,
+	open func() (localPlumbing, func(), error),
+) error {
+	if cfg.WorkerSocket != "" && cfg.DatapathEnabled {
+		return start()
+	}
+	plumb, closeFn, err := open()
+	if err != nil {
+		slog.Error("Cannot open the Local pair state to remove it; "+
+			"Local pairs keep translating until Worker withdraws their claims", "err", err)
+		return nil
+	}
+	defer closeFn()
+	if err := plumb.Prune(nil); err != nil {
+		slog.Error("Cannot remove the Local pair state; "+
+			"Local pairs keep translating until Worker withdraws their claims", "err", err)
+		return nil
+	}
+	slog.Info("Local shard delivery is off; removed any Local pair links and rows left by a previous process")
 	return nil
 }
