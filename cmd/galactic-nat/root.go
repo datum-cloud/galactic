@@ -156,10 +156,11 @@ func runCmd(cfg *config.NATConfig) error {
 	// EgressShard's Programmed condition reports that instead.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 
-	if cfg.WorkerSocket != "" && cfg.DatapathEnabled {
-		if err := startLocalDelivery(ctx, cfg, mgr); err != nil {
-			return fmt.Errorf("start local shard delivery: %w", err)
-		}
+	if err := settleLocalDelivery(cfg,
+		func() error { return startLocalDelivery(ctx, cfg, mgr) },
+		func() (localPlumbing, func(), error) { return openLocalPlumbing(cfg) },
+	); err != nil {
+		return fmt.Errorf("start local shard delivery: %w", err)
 	}
 
 	// Register EgressShard controller.
