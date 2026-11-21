@@ -415,21 +415,17 @@ func (k *Kernel) routedCheck(h *host, m *model, c module.Claim, vrfIdx int, objs
 	// The link counts only while it reaches the owner's current pod.
 	var podErr error
 	present := false
+	var got routedLink
 	if podNS, err := k.Pods.Open(r.podUID); err != nil {
 		podErr = err
 	} else {
-		_, present = h.readRouted(r, podNS)
+		got, present = h.readRouted(r, podNS)
 		_ = podNS.Close()
 	}
 	if present {
-		out.handoffs[c.Key] = append(out.handoffs[c.Key], module.HandoffInterface{
-			Role: workerv1alpha1.HandoffRoleHost, Name: r.host, Ifindex: int32(l.Attrs().Index)})
-		if v, ok := l.(*netlink.Veth); ok {
-			if peer, err := netlink.VethPeerIndex(v); err == nil {
-				out.handoffs[c.Key] = append(out.handoffs[c.Key], module.HandoffInterface{
-					Role: workerv1alpha1.HandoffRolePod, Name: r.pod, Ifindex: int32(peer)})
-			}
-		}
+		out.handoffs[c.Key] = append(out.handoffs[c.Key],
+			module.HandoffInterface{Role: workerv1alpha1.HandoffRoleHost, Name: r.host, Ifindex: int32(l.Attrs().Index)},
+			module.HandoffInterface{Role: workerv1alpha1.HandoffRolePod, Name: r.pod, Ifindex: int32(got.podIndex)})
 	}
 	return func(ck *check, _ netlink.Link) {
 		if podErr != nil {
