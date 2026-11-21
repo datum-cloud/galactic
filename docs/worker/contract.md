@@ -297,6 +297,14 @@ These amend the mechanisms the qualification plan first named:
   kernel's untag. With VLAN receive offload, as on veth and most NICs, XDP on
   the lower device sees the frame untagged and cannot tell VLANs apart, so the
   slot program selects by destination, never by VLAN.
+- **`local_rx` runs where the dispatcher does, ahead of the bond master.**
+  The kernel runs every tcx program before every clsact filter, and a
+  cluster CNI attaches to a bond master through tcx and ends the packet's
+  ingress there, so a clsact filter on the master never runs. `local_rx`
+  therefore attaches to the interfaces the XDP dispatcher runs on, a bond's
+  members included, as galactic-cni classifies on them, and a flow's replies
+  leave through the bond (D49). Found by #1438: on a node where a tcx
+  program sits on the bond, `local_rx` on the master delivered nothing.
 - **Each handoff decides the receiver's policy on its own path and marks the
   packet.** `tp_deliver` decides every unmarked packet on the Private path. A
   public client delivered to a TAP is PublicService and a NAT return is
@@ -354,13 +362,13 @@ pinned. Its own maps (`lt_*`) are pinned under `/sys/fs/bpf/galactic-local`
 (`--local-pin-dir`), so a restarted Worker keeps the rows the running programs
 read.
 
-| Program            | Hook                                                                               | Does                                                                                                                                                                                                                                                                                                          |
-| ------------------ | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local_rx`         | tc ingress of each public receiving device: its bond, or its VLANs when it has any | Delivers a packet whose metadata (`localprog/local_meta.h`) names a TAP a `local.tap` claim authorizes, on the PublicService path, and records the flow. With GLM2 metadata it first checks the backend SID and translates the VIP to the backend (D46). A packet without the metadata goes on to the kernel. |
-| `local_link_rx`    | tc ingress of each destination's tenant interface, after galactic-cni's filters    | Sends a recorded flow's reply out of the device the flow arrived on, on the PublicService path, and a flow whose destination has a `PassThroughLocalNAT` entry into the VPC's pair, on the PublicNAT path.                                                                                                    |
-| `local_pair_rx`    | tc ingress of a pair's tenant end                                                  | Delivers the NAT end's return to the destination address it names in the pair's VPC, on the PublicNAT path.                                                                                                                                                                                                   |
-| `local_link_guard` | tc ingress of a routed link's host end                                             | Drops any source the link was not given.                                                                                                                                                                                                                                                                      |
-| `local_pair_napi`  | XDP, native, of a pair's tenant end                                                | Passes everything, so the tenant end receives what the NAT end's return redirects into the pair.                                                                                                                                                                                                              |
+| Program            | Hook                                                                                                                                                                         | Does                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local_rx`         | tc ingress of each public receiving device: each interface the XDP dispatcher runs on, a bond's members included, or the VLANs above it or its bond when there are any (D49) | Delivers a packet whose metadata (`localprog/local_meta.h`) names a TAP a `local.tap` claim authorizes, on the PublicService path, and records the flow, whose replies leave through the bond for a bond member (`lt_rx`). With GLM2 metadata it first checks the backend SID and translates the VIP to the backend (D46). A packet without the metadata goes on to the kernel. |
+| `local_link_rx`    | tc ingress of each destination's tenant interface, after galactic-cni's filters                                                                                              | Sends a recorded flow's reply out of the device the flow arrived on, on the PublicService path, and a flow whose destination has a `PassThroughLocalNAT` entry into the VPC's pair, on the PublicNAT path.                                                                                                                                                                      |
+| `local_pair_rx`    | tc ingress of a pair's tenant end                                                                                                                                            | Delivers the NAT end's return to the destination address it names in the pair's VPC, on the PublicNAT path.                                                                                                                                                                                                                                                                     |
+| `local_link_guard` | tc ingress of a routed link's host end                                                                                                                                       | Drops any source the link was not given.                                                                                                                                                                                                                                                                                                                                        |
+| `local_pair_napi`  | XDP, native, of a pair's tenant end                                                                                                                                          | Passes everything, so the tenant end receives what the NAT end's return redirects into the pair.                                                                                                                                                                                                                                                                                |
 
 The module keeps link lifecycle apart from program ownership. CNI creates and
 deletes tenant TAPs and veths; the module attaches only its own filters and
@@ -386,8 +394,9 @@ confirmed by read-back. It is ready when, in addition:
   galactic-cni's chain (`HandoffInterfaceMissing` otherwise);
 - the module's filters are current (`HandoffHookMissing`);
 - for `local.tap`, a receiving device's dispatcher runs a live public slot
-  (`DispatcherSlotUnclaimed`) and the TAP's MTU covers the device's
-  (`HandoffMTUTooSmall`);
+  (`DispatcherSlotUnclaimed`), the TAP's MTU covers the device's
+  (`HandoffMTUTooSmall`), and `local_rx` runs on every receiving device with
+  no tcx program ahead of it (`HandoffHookMissing`, naming the device);
 - for `local.veth_pair`, the client's program runs native on the NAT end
   (`HandoffHookMissing`, or `HookUnsupported` in generic mode), and the pair
   has carrier;

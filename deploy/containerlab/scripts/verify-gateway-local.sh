@@ -809,6 +809,19 @@ bound_ok() { [ "$(bound_bindings)" -ge "${WANT_BINDINGS}" ]; }
 wait_until 300 bound_ok || die "only $(bound_bindings)/${WANT_BINDINGS} gwlocal ServiceVIPBindings Bound after 300s"
 wait_until 120 pool_holds 4 || die "the gateways do not hold all four pool backends after 120s"
 kc -n galactic-system get networkgateways -o yaml >"${OUT}/networkgateways-setup.yaml"
+# Where each program runs on the gateways' public bond and its members: the
+# cluster CNI's tcx program on the bond master runs before every clsact
+# filter, so local_rx belongs on the members, which carry the XDP
+# dispatcher (D49).
+for gw in "${GATEWAYS[@]}"; do
+  pid=$(docker inspect -f '{{.State.Pid}}' "${gw}")
+  {
+    for dev in bond0 $(docker exec "${gw}" sh -c 'cat /sys/class/net/bond0/bonding/slaves 2>/dev/null'); do
+      echo "--- ${dev}"
+      sudo -n nsenter -t "${pid}" -n bpftool net show dev "${dev}" 2>&1
+    done
+  } >"${OUT}/bpftool-net-${gw}.txt"
+done
 kc -n galactic-system get networkservices -o yaml >"${OUT}/networkservices-setup.yaml"
 
 # Warm-up: traffic policy and every node's bindings are in place once each

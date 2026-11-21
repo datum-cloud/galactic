@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -301,10 +302,16 @@ func (k *Kernel) tapCheck(rs []receiver) func(*check, netlink.Link) {
 			ck.notReady(true, false, workerv1alpha1.ReasonDispatcherSlotUnclaimed, msg)
 			return
 		}
-		hooked := false
+		var unhooked []string
 		for _, r := range live {
-			if ok, err := k.filterCurrent(r.idx, filterRx); err == nil && ok {
-				hooked = true
+			if ok, err := k.filterCurrent(r.idx, filterRx); err != nil || !ok {
+				unhooked = append(unhooked, r.name+" (no local_rx)")
+			} else if id, name, err := k.tcxAhead(r.idx); err == nil && id != 0 {
+				// tcx runs before every clsact filter, so a program there
+				// decides first and can end the packet's ingress before
+				// local_rx sees it.
+				unhooked = append(unhooked, fmt.Sprintf("%s (tcx program %q, id %d, runs ahead of local_rx)",
+					r.name, name, id))
 			}
 			if r.mtu > l.Attrs().MTU {
 				ck.notReady(true, false, workerv1alpha1.ReasonHandoffMTUTooSmall,
@@ -312,9 +319,9 @@ func (k *Kernel) tapCheck(rs []receiver) func(*check, netlink.Link) {
 						r.name, r.mtu))
 			}
 		}
-		if !hooked {
+		if len(unhooked) > 0 {
 			ck.notReady(true, false, workerv1alpha1.ReasonHandoffHookMissing,
-				"Local's tc program is on no receiving device")
+				"local_rx does not receive on every receiving device: "+strings.Join(unhooked, ", "))
 		}
 	}
 }
