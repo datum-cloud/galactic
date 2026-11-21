@@ -222,8 +222,14 @@ Empty, the default, leaves all of this off. The shard then claims no pair and
 behaves exactly as without Worker. The pinned links and rows survive a
 restart, so a pair keeps translating while the process is down; the next
 process prunes the ones whose claim it no longer holds once every claim has
-reported. `galactic_nat_worker_session_up`,
-`galactic_nat_worker_capability_available`,
+reported. A process that starts with this empty, or with the datapath
+disabled, removes every pinned link under `links` and every row of
+`nat_local_pair`, `nat_local_return` and `nat_vlan_egress` at startup, so its
+pairs stop translating at once rather than when Worker withdraws their
+claims. Before uninstalling galactic-nat from a node that used Worker, restart
+it once with this empty, or remove `/sys/fs/bpf/galactic-nat/links/local-*`
+and the pinned maps under `/sys/fs/bpf/galactic-nat` by hand.
+`galactic_nat_worker_session_up`, `galactic_nat_worker_capability_available`,
 `galactic_nat_local_handoff_ready` and `galactic_nat_local_packets_total`
 report the integration's state.
 
