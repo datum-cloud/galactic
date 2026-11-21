@@ -80,7 +80,9 @@ hashed mode with more than three NAT64 prefixes in
   counted as `standby`, and `GalacticEgressPoolBelowMinimum` counts it
   toward the pool minimum, since it takes over without anyone acting. A
   primary running on this node is local and never resolves, so on the
-  primary's own node the standby still takes NAT64 tenants.
+  primary's own node the standby still takes NAT64 tenants, except in a
+  VPC that takes the local shard (below), where the local primary holds the
+  standby too.
 
   Moving between a primary and a standby is not a failover of sessions.
   When a held standby takes the class, or is held again once a primary
@@ -274,11 +276,19 @@ a healthy empty pool: read it together with `galactic_cni_egress_mode` and
 
 A shard whose `spec.targetRef` names the node itself is `local` on that node.
 The node originates the shard's locator, so the SID never resolves over an
-uplink there, and it takes no tenant from that node. Hashed mode does not
-resolve a local shard's SID at all. Ordered mode, which tries each SID in the
-list, fails to resolve it and moves on, so neither mode sends that node's
-traffic to its own shard. An edge node running the cluster's only shard
-therefore has no active member. It also has no tenant, so
+uplink there, and the shard takes no tenant from that node over the underlay.
+Hashed mode does not resolve a local shard's SID at all. Ordered mode, which
+tries each SID in the list, fails to resolve it and moves on.
+
+With galactic-worker, a VPC whose service-internal veth pair to the local
+shard is ready takes the shard without crossing the underlay
+([Local NAT shards](../worker/contract.md#local-nat-shards)). Its tenants
+choose from a second view of each group in which the local shard is alive,
+and ordered mode places its routes on the local shard when that shard comes
+first among the usable shards of the list. Every other VPC, and every node
+without galactic-worker, behaves as described above. An edge node running
+the cluster's only shard therefore has no active member for a VPC that does
+not take the local shard. It also has no tenant, so
 `GalacticEgressPoolEmpty` and `GalacticEgressPoolBelowMinimum` fire only on a
 node with routes on the group (`galactic_cni_egress_group_routes` above 0):
 an empty pool on a node with nothing to egress is no outage. `config/monitoring/` alerts on these

@@ -637,11 +637,16 @@ func (x *AttachmentRef) GetUid() string {
 	return ""
 }
 
+// ShardRef names an egress translation shard.
 type ShardRef struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// group names the shard group.
-	Group         string `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
-	Index         uint32 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+	// group and index are not used. A request that sets either is refused
+	// with INVALID_ARGUMENT/MalformedSpec; name the shard with name.
+	Group string `protobuf:"bytes,1,opt,name=group,proto3" json:"group,omitempty"`
+	Index uint32 `protobuf:"varint,2,opt,name=index,proto3" json:"index,omitempty"`
+	// name is the EgressShard's name, in the namespace Worker reads
+	// EgressShards from.
+	Name          string `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -688,6 +693,13 @@ func (x *ShardRef) GetIndex() uint32 {
 		return x.Index
 	}
 	return 0
+}
+
+func (x *ShardRef) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
 }
 
 type BackendRef struct {
@@ -830,8 +842,8 @@ type Destination_Attachment struct {
 }
 
 type Destination_Shard struct {
-	// shard is resolved by #1437. Until then it reports
-	// DestinationKindUnsupported.
+	// shard is an egress translation shard. It resolves to Local when the
+	// shard runs on this node and to Fabric otherwise.
 	Shard *ShardRef `protobuf:"bytes,2,opt,name=shard,proto3,oneof"`
 }
 
@@ -1699,6 +1711,14 @@ type HandoffInterface struct {
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	// ifindex is the interface index in its network namespace.
 	Ifindex int32 `protobuf:"varint,3,opt,name=ifindex,proto3" json:"ifindex,omitempty"`
+	// tenant_sid is set on the "nat" end of a veth pair whose claim has a
+	// Local shard destination. It is the SID that names the claim's VPC on
+	// this node: this node's source SID completed with the VPC's Argument,
+	// as usid_egress writes it into a packet it encapsulates. The NAT end's
+	// program keys the VPC's sessions by it, as it keys a remote tenant's by
+	// the outer source, and returns a reply for it into the pair. Empty until
+	// Worker has read the VPC's Argument.
+	TenantSid string `protobuf:"bytes,4,opt,name=tenant_sid,json=tenantSid,proto3" json:"tenant_sid,omitempty"`
 	// link_local is the interface's IPv6 link-local address, set for a routed
 	// link's host end once the kernel has assigned it. The pod routes the
 	// destinations it reaches through the link to this address.
@@ -1758,6 +1778,13 @@ func (x *HandoffInterface) GetIfindex() int32 {
 	return 0
 }
 
+func (x *HandoffInterface) GetTenantSid() string {
+	if x != nil {
+		return x.TenantSid
+	}
+	return ""
+}
+
 func (x *HandoffInterface) GetLinkLocal() string {
 	if x != nil {
 		return x.LinkLocal
@@ -1792,10 +1819,11 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"\x03vpc\x18\x02 \x01(\tR\x03vpc\x12%\n" +
 	"\x0eattachment_uid\x18\x03 \x01(\tR\rattachmentUid\"!\n" +
 	"\rAttachmentRef\x12\x10\n" +
-	"\x03uid\x18\x01 \x01(\tR\x03uid\"6\n" +
+	"\x03uid\x18\x01 \x01(\tR\x03uid\"J\n" +
 	"\bShardRef\x12\x14\n" +
 	"\x05group\x18\x01 \x01(\tR\x05group\x12\x14\n" +
-	"\x05index\x18\x02 \x01(\rR\x05index\"4\n" +
+	"\x05index\x18\x02 \x01(\rR\x05index\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\"4\n" +
 	"\n" +
 	"BackendRef\x12\x12\n" +
 	"\x04node\x18\x01 \x01(\tR\x04node\x12\x12\n" +
@@ -1872,11 +1900,13 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"\x10withdrawal_scope\x18\x06 \x01(\x0e2).galactic.worker.v1alpha1.WithdrawalScopeR\x0fwithdrawalScope\x12\x1a\n" +
 	"\breleased\x18\a \x01(\bR\breleased\x12\x1a\n" +
 	"\brevision\x18\b \x01(\x04R\brevision\x12Y\n" +
-	"\x12handoff_interfaces\x18\t \x03(\v2*.galactic.worker.v1alpha1.HandoffInterfaceR\x11handoffInterfaces\"s\n" +
+	"\x12handoff_interfaces\x18\t \x03(\v2*.galactic.worker.v1alpha1.HandoffInterfaceR\x11handoffInterfaces\"\x92\x01\n" +
 	"\x10HandoffInterface\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
 	"\aifindex\x18\x03 \x01(\x05R\aifindex\x12\x1d\n" +
+	"\n" +
+	"tenant_sid\x18\x04 \x01(\tR\ttenantSid\x12\x1d\n" +
 	"\n" +
 	"link_local\x18\x05 \x01(\tR\tlinkLocal*u\n" +
 	"\x0fCapabilityState\x12 \n" +

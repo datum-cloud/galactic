@@ -187,8 +187,11 @@ func run(o *options) error {
 	}
 	fabric.InitMetrics()
 	pods := &local.ProcPods{ProcRoot: o.procRoot, Pods: auth.CgroupPodResolver{ProcRoot: o.procRoot}}
+	shards := &local.PinnedShards{PinDir: o.pinDir}
+	defer func() { _ = shards.Close() }()
 	localKernel := &local.Kernel{PinDir: o.pinDir, LocalPinDir: o.localPinDir, DispatchDir: o.dispatchDir,
-		Pods: pods}
+		Shards: shards,
+		Pods:   pods}
 	defer func() { _ = localKernel.Close() }()
 	// Routed links and sockets need capabilities only a placement that
 	// enables them grants; without them those capabilities report why.
