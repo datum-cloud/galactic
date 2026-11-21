@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"strconv"
 
@@ -20,6 +21,7 @@ import (
 	"go.datum.net/galactic/internal/worker/auth"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/refusal"
+	"go.datum.net/galactic/internal/worker/sources"
 	"go.datum.net/galactic/internal/worker/store"
 )
 
@@ -71,6 +73,9 @@ func validateSpec(gen uint64, spec *workerv1alpha1.ClaimSpec) error {
 	default:
 		return malformed("mode must be auto, local or fabric")
 	}
+	if el := spec.GetEdgeLink(); el != nil {
+		return validateEdgeLink(spec, el)
+	}
 	if len(spec.GetDestinations()) == 0 {
 		return malformed("at least one destination is required")
 	}
@@ -96,6 +101,46 @@ func validateSpec(gen uint64, spec *workerv1alpha1.ClaimSpec) error {
 	}
 	return nil
 }
+
+// validateEdgeLink checks a connector claim's spec (D37): a routed link on
+// an existing host link, with no destinations of its own, since its one
+// destination is the claim's attachment.
+func validateEdgeLink(spec *workerv1alpha1.ClaimSpec, el *workerv1alpha1.EdgeLink) error {
+	if spec.GetHandoff() != workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK {
+		return malformed("edge_link needs handoff routed_link")
+	}
+	if len(spec.GetDestinations()) > 0 {
+		return malformed("a claim with edge_link names no destinations")
+	}
+	if m := spec.GetMode(); m == workerv1alpha1.Mode_MODE_FABRIC {
+		return malformed("an edge link is delivered Local")
+	}
+	if !linkName.MatchString(el.GetName()) {
+		return malformed("edge_link.name must be an interface name")
+	}
+	if len(el.GetPrefixes()) > maxEdgeLinkPrefixes {
+		return malformed(fmt.Sprintf("edge_link carries at most %d prefixes", maxEdgeLinkPrefixes))
+	}
+	for _, p := range el.GetPrefixes() {
+		pfx, err := netip.ParsePrefix(p)
+		if err != nil {
+			return malformed("edge_link prefix " + strconv.Quote(p) + " is not a CIDR prefix")
+		}
+		// A default route never belongs to one edge link: its pass-through
+		// entry would take every destination of the VPC.
+		if pfx.Bits() == 0 {
+			return malformed("edge_link prefix " + strconv.Quote(p) + " is a default route")
+		}
+	}
+	return nil
+}
+
+// linkName matches a Linux interface name.
+var linkName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]{0,14}$`)
+
+// maxEdgeLinkPrefixes bounds one edge link's prefixes: a pass-through entry
+// each, in a table every VPC on the node shares.
+const maxEdgeLinkPrefixes = 1024
 
 // specHash is the hash of a spec's deterministic encoding.
 func specHash(spec *workerv1alpha1.ClaimSpec) string {
@@ -176,6 +221,11 @@ func (w *Worker) admit(ctx context.Context, caller auth.Caller, k module.ClaimKe
 		return notAuthorized("the claim's attachment is not on this node")
 	case !att.Admitted:
 		return notAuthorized("the claim's attachment is not admitted")
+	case spec.GetEdgeLink() != nil && att.Kind != sources.KindEdgeAttachment:
+		return notAuthorized("an edge_link claim must be on an EdgeAttachment")
+	case spec.GetEdgeLink() == nil && att.Kind == sources.KindEdgeAttachment &&
+		spec.GetHandoff() == workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK:
+		return notAuthorized("a routed_link claim on an EdgeAttachment must name its edge_link")
 	}
 	own, err := w.d.Sources.Locator(ctx, w.cfg.Node)
 	if err != nil {

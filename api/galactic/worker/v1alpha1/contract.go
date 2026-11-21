@@ -159,6 +159,10 @@ const (
 	// is below the receiving path's, so a packet the path carries would
 	// not reach the guest.
 	ReasonHandoffMTUTooSmall = "HandoffMTUTooSmall"
+	// ReasonHandoffInterfaceNotOwned is a connector claim whose edge link
+	// does not carry its attachment's stamp, or whose forwarding gate does
+	// not name the attachment's address: Worker registers nothing on it.
+	ReasonHandoffInterfaceNotOwned = "HandoffInterfaceNotOwned"
 )
 
 // Handoff interface roles, carried in HandoffInterface.

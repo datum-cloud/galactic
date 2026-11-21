@@ -95,6 +95,23 @@ type Claim struct {
 	// Destinations are the claim's resolved destinations for the module's
 	// mode, each with an available capability.
 	Destinations []Destination
+	// EdgeLink is set on a connector claim's Local desired state (D37): the
+	// host link galactic-edge created, which the Local module registers and
+	// never creates or deletes. Its one destination is the claim's own
+	// attachment.
+	EdgeLink *EdgeLink
+}
+
+// EdgeLink is a Galactic Edge attachment's host link, as a connector claim
+// names it.
+type EdgeLink struct {
+	// Name is the host link's interface name.
+	Name string
+	// Address is the link's own address: the EdgeAttachment's, from its
+	// trusted source.
+	Address netip.Addr
+	// Prefixes are what the link carries beyond Address, masked.
+	Prefixes []netip.Prefix
 }
 
 // DestinationState is what a module read back for one destination.

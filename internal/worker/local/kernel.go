@@ -109,6 +109,9 @@ type Kernel struct {
 	Pods PodNetns
 	// LinkMTU is the MTU of the links Local creates; DefaultLinkMTU when 0.
 	LinkMTU int
+	// edge is the edge-link host access; the pinned maps under PinDir when
+	// nil.
+	edge edgeHost
 
 	mu      sync.Mutex
 	objs    *localprog.Objects
@@ -137,6 +140,14 @@ func (k *Kernel) Close() error {
 		k.rclose, k.routes = nil, nil
 	}
 	return errors.Join(errs...)
+}
+
+// edgeHost returns the edge-link host access.
+func (k *Kernel) edgeHost() edgeHost {
+	if k.edge != nil {
+		return k.edge
+	}
+	return pinnedEdgeHost{pinDir: k.PinDir}
 }
 
 func (k *Kernel) mtu() int {

@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,25 +72,64 @@ const (
 // process can tell a predecessor's scope from another writer's.
 const ownerPrefix = "galactic-edge/"
 
+// Link is an attachment's host link, as the agent registers it.
+type Link struct {
+	// VPC is the attachment's VPC.
+	VPC string
+	// AttachmentUID is the attachment the link carries the stamp of. It is
+	// empty when the agent clears an ifindex no attachment of its holds,
+	// such as the number of a deleted link a new link reuses.
+	AttachmentUID string
+	// Table is the routing table of the VPC's canonical host VRF.
+	Table uint32
+	// Index and Name are the link's ifindex and interface name.
+	Index uint32
+	Name  string
+	// Addr is the link's own address: the attachment's.
+	Addr netip.Addr
+}
+
+// LinkRoutes is a registered link and the prefixes it carries beyond its own
+// address.
+type LinkRoutes struct {
+	Link     Link
+	Prefixes []netip.Prefix
+}
+
 // Datapath registers attachment host links with the node's uSID datapath.
+// PinnedDatapath writes the pinned maps itself; WorkerDatapath claims each
+// link from Galactic Worker, which writes them (docs/worker/connector.md).
 type Datapath interface {
-	// Register registers the host link with ifindex, enslaved to the VRF
-	// with routing table vrfTable, as an edge link whose own address is
-	// addr: it carries nothing else until a gate opens for it, and nothing
-	// its traffic policy does not allow. The link is gated before any
-	// program that forwards its traffic is attached. It is called while a
-	// new link is still down.
-	Register(vrfTable, ifindex uint32, ifname string, addr netip.Addr) error
-	// Unregister closes ifindex's gates and removes every row Register
+	// Register registers the host link, enslaved to the VRF with routing
+	// table l.Table, as an edge link whose own address is l.Addr: it carries
+	// nothing else until a gate opens for it, and nothing its traffic policy
+	// does not allow. The link is gated before any program that forwards
+	// its traffic is attached. It is called while a new link is still down,
+	// and returns only once the link is registered.
+	Register(l Link) error
+	// Unregister closes l.Index's gates and removes every row Register
 	// wrote for it except the gate's link row, so the link carries nothing
-	// beyond its own address until it is gone.
-	Unregister(ifindex uint32) error
+	// beyond its own address until it is gone. With no l.AttachmentUID it
+	// clears what an earlier link with the same ifindex left.
+	Unregister(l Link) error
 	// Forget removes ifindex's gate link row, once the link is deleted.
 	Forget(ifindex uint32) error
 	// SyncRoutes makes the destinations the workloads of the VRF with
-	// routing table vrfTable reach on this node's edge links exactly want,
-	// so the VRF's default route to the egress shards never takes them.
-	SyncRoutes(vrfTable uint32, want []netip.Prefix) error
+	// routing table vrfTable reach on this node's edge links exactly the
+	// links' own addresses and their prefixes, so the VRF's default route to
+	// the egress shards never takes them.
+	SyncRoutes(vrfTable uint32, links []LinkRoutes) error
+}
+
+// Want returns every destination links carry: each link's own address and
+// its prefixes.
+func Want(links []LinkRoutes) []netip.Prefix {
+	var out []netip.Prefix
+	for _, l := range links {
+		out = append(out, netip.PrefixFrom(l.Link.Addr, l.Link.Addr.BitLen()))
+		out = append(out, l.Prefixes...)
+	}
+	return out
 }
 
 // Agent reconciles the host state of the attachments on one node.
@@ -261,6 +301,19 @@ func (a *Agent) resolve(ctx context.Context, podUID string) podNS {
 // and programs every live attachment, in one snapshot commit.
 func (a *Agent) reconcileScope(vpc string, active, releasing []*galacticv1alpha1.EdgeAttachment,
 	pods map[string]podNS) ([]outcome, error) {
+	// The edge gate scope is taken before anything else in the pass, so a
+	// newer process fences an older one there at once, not only at its first
+	// gate commit. A process a newer one fenced stops writing the VPC
+	// altogether and leaves its status to the newer one.
+	if _, err := a.ticket(EdgeGateScope(vpc)); err != nil {
+		if errors.Is(err, ownership.ErrNotOwner) || errors.Is(err, ownership.ErrTransitioning) {
+			a.markLost(EdgeGateScope(vpc))
+		}
+		return nil, fmt.Errorf("edge gate scope of VPC %s: %w", vpc, err)
+	}
+	if c, ok := a.Datapath.(Connector); ok {
+		return a.reconcileWorkerScope(c, vpc, active, releasing, pods)
+	}
 	scope := ownership.VPCScope(vpc)
 	unavailable := func(err error) ([]outcome, error) {
 		out := make([]outcome, 0, len(active))
@@ -316,9 +369,116 @@ func (a *Agent) reconcileScope(vpc string, active, releasing []*galacticv1alpha1
 	return out, nil
 }
 
+// reconcileWorkerScope is reconcileScope when Galactic Worker registers the
+// scope's links (docs/worker/connector.md). Worker owns the VPC's scope, so
+// the pass takes no ticket for it: the links, devices and pods are
+// galactic-edge's own, and Worker writes every row of the shared VPC state
+// when the agent claims a link. A scope galactic-edge still owns is handed to
+// Worker first.
+func (a *Agent) reconcileWorkerScope(c Connector, vpc string, active, releasing []*galacticv1alpha1.EdgeAttachment,
+	pods map[string]podNS) ([]outcome, error) {
+	if err := a.handOver(c, vpc, active); err != nil {
+		// While Worker cannot be reached the scope stays as it is, and so
+		// does the status of every attachment Programmed: its link keeps
+		// forwarding. Any other attachment waits for Worker.
+		var we *WorkerError
+		if errors.As(err, &we) && we.Unreachable {
+			var out []outcome
+			for _, att := range active {
+				if !meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentProgrammed) {
+					out = append(out, outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
+						status: metav1.ConditionFalse, reason: ReasonWorkerUnavailable, message: err.Error()})
+				}
+			}
+			return out, err
+		}
+		out := make([]outcome, 0, len(active))
+		for _, att := range active {
+			out = append(out, outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
+				status: metav1.ConditionFalse, reason: ReasonOwnershipUnavailable, message: err.Error()})
+		}
+		return out, err
+	}
+	return a.applyScope(vpc, active, releasing, pods)
+}
+
+// handOver is galactic-edge's ownership transfer step for vpc's scope
+// (docs/worker/ownership.md, step 3). While this process, an older one, or a
+// Worker handback holds the scope, it claims every live link of the scope
+// from Worker, which reports the claims ScopeOwnedElsewhere and writes
+// nothing yet, and then gives the scope up with Relinquish. Worker then takes
+// the scope and commits a snapshot that includes those claims, so every
+// registered link keeps its rows throughout. A scope that is unowned or
+// Worker's needs nothing; one a newer galactic-edge process or any other
+// writer holds is refused.
+func (a *Agent) handOver(c Connector, vpc string, active []*galacticv1alpha1.EdgeAttachment) error {
+	scope := ownership.VPCScope(vpc)
+	if a.isLost(scope) {
+		return fmt.Errorf("%w: scope %s was taken over by another writer", ownership.ErrNotOwner, scope)
+	}
+	rec, err := a.Ownership.Read(scope)
+	if err != nil {
+		return err
+	}
+	ours := func(r ownership.Record) bool {
+		return r.Owner == a.Owner || olderIncarnation(r.Owner, a.Owner) || ownership.HandedBack(r.Owner) ||
+			(r.Owner == "" && r.Transitioning)
+	}
+	switch {
+	case rec.Owner == "" && !rec.Transitioning, ownership.WorkerOwned(rec.Owner):
+		return nil
+	case !ours(rec):
+		if strings.HasPrefix(rec.Owner, ownerPrefix) {
+			a.markLost(scope)
+		}
+		return fmt.Errorf("%w: %q owns %s", ownership.ErrNotOwner, rec.Owner, scope)
+	}
+	links, err := hostattach.List(a.Host)
+	if err != nil {
+		return err
+	}
+	byID := map[string]hostattach.ObservedAttachment{}
+	for _, l := range links {
+		byID[l.ID] = l
+	}
+	for _, att := range active {
+		l, ok := byID[hostattach.LinkID(att.Status.VPC, string(att.UID))]
+		addr, perr := netip.ParseAddr(att.Status.Address)
+		if !ok || l.HostIndex == 0 || perr != nil {
+			continue
+		}
+		if err := c.Prepare(Link{VPC: vpc, AttachmentUID: string(att.UID), Index: uint32(l.HostIndex),
+			Name: l.HostLink, Addr: addr}); err != nil {
+			// Worker refuses a link it would not authorize, such as one
+			// of an attachment no longer admitted. Worker removes that
+			// link's rows once it takes the scope, as revocation does, so
+			// the transfer goes on without it.
+			var we *WorkerError
+			if errors.As(err, &we) && we.Reason == ReasonWorkerRefused {
+				slog.Warn("galactic-edge: Worker refused a link's claim during the transfer",
+					"vpc", vpc, "link", l.HostLink, "err", err)
+				continue
+			}
+			return fmt.Errorf("claim %s before handing %s to Worker: %w", l.HostLink, scope, err)
+		}
+	}
+	if _, err := a.Ownership.Relinquish(scope, ours, ""); err != nil {
+		return fmt.Errorf("hand %s to Worker: %w", scope, err)
+	}
+	delete(a.tickets, scope)
+	slog.Info("galactic-edge: handed the VPC's scope to Galactic Worker", "vpc", vpc, "from", rec.Owner)
+	// Worker learns of the transfer from the claims, sent again.
+	if err := c.Nudge(vpc); err != nil {
+		slog.Warn("galactic-edge: could not ask Worker to take the VPC's scope; it retries on its own",
+			"vpc", vpc, "err", err)
+	}
+	return nil
+}
+
 // ticket returns this process's ticket for scope, taking the scope over the
-// first time: an unowned scope is claimed, and a scope an older galactic-edge
-// process owns, or was handing over, is fenced and adopted. A scope another
+// first time: an unowned scope is claimed, a scope an older galactic-edge
+// process owns, or was handing over, is fenced and adopted, and a scope a
+// Worker handback left is taken over. A scope another
 // writer owns or is handing over, or one a newer process took from this
 // one, is refused.
 func (a *Agent) ticket(scope string) (ownership.Ticket, error) {
@@ -349,6 +509,13 @@ func (a *Agent) ticket(scope string) (ownership.Ticket, error) {
 		if gen, err = a.Ownership.Fence(scope); err == nil {
 			t, err = a.Ownership.Adopt(scope, a.Owner, gen)
 		}
+	case ownership.HandedBack(rec.Owner):
+		// A Worker handback left the scope to its legacy writer
+		// (docs/worker/connector.md#rollback); the snapshot commit that
+		// follows registers every link again.
+		t, err = a.Ownership.Takeover(scope, a.Owner, func(r ownership.Record) bool {
+			return ownership.HandedBack(r.Owner)
+		})
 	case rec.Transitioning:
 		err = fmt.Errorf("%w: scope %s", ownership.ErrTransitioning, scope)
 	default:
@@ -519,7 +686,7 @@ func (a *Agent) syncRoutes(vpc string) error {
 	if err != nil {
 		return err
 	}
-	var want []netip.Prefix
+	var want []LinkRoutes
 	local := map[string]map[netip.Prefix]bool{}
 	for _, l := range links {
 		v, uid, ok := hostattach.ParseLinkID(l.ID)
@@ -534,14 +701,16 @@ func (a *Agent) syncRoutes(vpc string) error {
 			continue
 		}
 		own := netip.PrefixFrom(addr, addr.BitLen())
-		want = append(want, own)
+		lr := LinkRoutes{Link: Link{VPC: vpc, AttachmentUID: uid, Table: table, Index: uint32(l.HostIndex),
+			Name: l.HostLink, Addr: addr}}
 		local[uid] = map[netip.Prefix]bool{}
 		for _, p := range append(a.openPrefixes(l, addr.String()), a.held[uid]...) {
 			if p != own && !local[uid][p] {
 				local[uid][p] = true
-				want = append(want, p)
+				lr.Prefixes = append(lr.Prefixes, p)
 			}
 		}
+		want = append(want, lr)
 	}
 	if err := a.Datapath.SyncRoutes(table, want); err != nil {
 		return err
@@ -576,7 +745,7 @@ func (a *Agent) release(att *galacticv1alpha1.EdgeAttachment, link hostattach.Ob
 	}
 	if link.HostIndex != 0 {
 		// The link still carries this ID, so its ifindex is still its own.
-		if err := a.Datapath.Unregister(uint32(link.HostIndex)); err != nil {
+		if err := a.Datapath.Unregister(ownLink(link)); err != nil {
 			return err
 		}
 	}
@@ -591,6 +760,22 @@ func (a *Agent) release(att *galacticv1alpha1.EdgeAttachment, link hostattach.Ob
 		return err
 	}
 	return a.forget(link)
+}
+
+// workerReason is the condition reason of a datapath failure: Worker's
+// unavailability or refusal, or DatapathFailed.
+func workerReason(err error) string {
+	var we *WorkerError
+	if errors.As(err, &we) {
+		return we.Reason
+	}
+	return ReasonDatapathFailed
+}
+
+// ownLink is the Link of an observed stamped link, for unregistering it.
+func ownLink(l hostattach.ObservedAttachment) Link {
+	vpc, uid, _ := hostattach.ParseLinkID(l.ID)
+	return Link{VPC: vpc, AttachmentUID: uid, Index: uint32(l.HostIndex), Name: l.HostLink}
 }
 
 // forget removes a released link's gate link row.
@@ -612,7 +797,7 @@ func (a *Agent) releaseLink(spec hostattach.Attachment) error {
 	for _, l := range links {
 		if l.ID == spec.ID {
 			own = l
-			if err := a.Datapath.Unregister(uint32(l.HostIndex)); err != nil {
+			if err := a.Datapath.Unregister(ownLink(l)); err != nil {
 				return err
 			}
 		}
@@ -637,6 +822,24 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 	if err != nil {
 		return fail(ReasonProvisionFailed, err)
 	}
+	// workerFail reports a Worker failure. While Worker cannot be reached,
+	// a link it already registered keeps its rows, and forwarding never
+	// depends on Worker: an attachment Programmed on that link stays so,
+	// rather than ending its routes and sessions for an outage of Worker.
+	workerFail := func(err error) outcome {
+		var we *WorkerError
+		if errors.As(err, &we) && we.Unreachable && link.ID == spec.ID &&
+			meta.IsStatusConditionTrue(att.Status.Conditions, galacticv1alpha1.EdgeAttachmentProgrammed) {
+			slog.Warn("galactic-edge: Galactic Worker is unreachable; keeping the attachment's registered link",
+				"attachment", att.Namespace+"/"+att.Name, "link", spec.HostLink, "err", err)
+			s := spec
+			return outcome{att: att, condition: galacticv1alpha1.EdgeAttachmentProgrammed,
+				status: metav1.ConditionTrue, reason: ReasonProgrammed,
+				message: fmt.Sprintf("host link %s in %s; Galactic Worker unreachable, its registration kept",
+					spec.HostLink, spec.HostVRF), spec: &s}
+		}
+		return fail(workerReason(err), err)
+	}
 	if reason, err := a.checkUnderlay(); err != nil {
 		return fail(reason, err)
 	}
@@ -651,6 +854,14 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 		return fail(ReasonNamespaceUnavailable, err)
 	}
 	defer func() { _ = pod.Close() }()
+	if c, ok := a.Datapath.(Connector); ok {
+		// Claimed before the link exists: Worker creates the VPC's node
+		// state for a VPC with a claim, and keeps it while the claim does.
+		if err := c.Prepare(Link{VPC: att.Status.VPC, AttachmentUID: string(att.UID), Name: spec.HostLink,
+			Addr: spec.Address}); err != nil {
+			return workerFail(err)
+		}
+	}
 	if reason, err := a.ensureHostVRF(att.Status.VPC, spec.HostVRF); err != nil {
 		return fail(reason, err)
 	}
@@ -662,10 +873,11 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 		// removed yet: they are cleared before the new link is registered,
 		// so it never carries another attachment's prefixes or policy.
 		if fresh || res.HostIndex != link.HostIndex {
-			datapathErr = a.Datapath.Unregister(uint32(res.HostIndex))
+			datapathErr = a.Datapath.Unregister(Link{VPC: att.Status.VPC, Index: uint32(res.HostIndex)})
 		}
 		if datapathErr == nil {
-			datapathErr = a.Datapath.Register(res.HostTable, uint32(res.HostIndex), spec.HostLink, spec.Address)
+			datapathErr = a.Datapath.Register(Link{VPC: att.Status.VPC, AttachmentUID: string(att.UID),
+				Table: res.HostTable, Index: uint32(res.HostIndex), Name: spec.HostLink, Addr: spec.Address})
 		}
 		return datapathErr
 	}
@@ -694,7 +906,7 @@ func (a *Agent) program(att *galacticv1alpha1.EdgeAttachment, ns podNS, link hos
 	case errors.Is(datapathErr, attachreg.ErrVRFNotRegistered):
 		return fail(ReasonHostVRFMissing, fmt.Errorf("%w: %s", err, a.noVPCState(att.Status.VPC)))
 	case datapathErr != nil:
-		return fail(ReasonDatapathFailed, err)
+		return workerFail(datapathErr)
 	case errors.Is(err, hostattach.ErrNamespaceReplaced):
 		return fail(ReasonNamespaceReplaced, err)
 	case err != nil:
@@ -759,6 +971,9 @@ func (a *Agent) ensureHostVRF(vpc, name string) (string, error) {
 
 // noVPCState says why a gVPC's host VRF or its uSID entry is missing.
 func (a *Agent) noVPCState(vpc string) string {
+	if _, ok := a.Datapath.(Connector); ok {
+		return fmt.Sprintf("Galactic Worker creates the node state of the VPC %s for the attachment's claim", vpc)
+	}
 	if a.VPCState == nil {
 		return fmt.Sprintf("a workload of the VPC %s must run on the node", vpc)
 	}
