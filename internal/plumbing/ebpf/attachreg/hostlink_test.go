@@ -175,3 +175,117 @@ func testHostLinkPolicy(t *testing.T, pinDir string, table, edge uint32, addr ne
 	}
 	return maps
 }
+
+// TestRegisterHostLinkInfra registers a link as an infra interface: its
+// traffic policy row is an infra row, which replaces a tenant row the
+// ifindex had, even on a node that enforces policy without passing the
+// preflight, and HostLinkRegistered, HostLinkPresent and DetachHostLink see
+// and remove exactly what it wrote.
+func TestRegisterHostLinkInfra(t *testing.T) { //nolint:gocyclo // privileged end-to-end sequence
+	requireRoot(t)
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	orig, err := netns.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = orig.Close() }()
+	ns, err := netns.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ns.Close(); _ = netns.Set(orig) }()
+
+	pinDir := fmt.Sprintf("/sys/fs/bpf/galactic-attachreg-hostlink-infra-%d", os.Getpid())
+	t.Cleanup(func() { _ = os.RemoveAll(pinDir) })
+	objs, err := attach.Load(pinDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = objs.Close() })
+
+	const (
+		table = 4011
+		block = 0xfc0000010000
+		name  = "routed-h"
+	)
+	if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: name}, PeerName: name + "p"}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := netlink.LinkByName(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := uint32(l.Attrs().Index)
+
+	if ok, err := HostLinkRegistered(pinDir, table, idx, name, tpmap.KindInfra); err != nil || ok {
+		t.Fatalf("HostLinkRegistered before registration = %t, %v", ok, err)
+	}
+	err = RegisterHostLinkKind(pinDir, table, idx, name, netip.Addr{}, tpmap.KindInfra)
+	if !errors.Is(err, ErrVRFNotRegistered) {
+		t.Fatalf("unregistered VRF = %v", err)
+	}
+	if err := RegisterHostLinkKind(pinDir, table, idx, name, netip.Addr{}, 7); err == nil {
+		t.Fatal("an unknown traffic policy kind registered")
+	}
+	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = closer.Close() }()
+	if err := registry.VRF.Register(block, 0x30, table, usidmap.EgressKindVeth); err != nil {
+		t.Fatal(err)
+	}
+
+	maps, err := tpmap.OpenPinned(pinDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(maps.Close)
+	// A tenant row a reused ifindex kept, on a node that enforces policy but
+	// failed the preflight.
+	if err := maps.PutInterface(idx, 0x4135, tpmap.KindTenant); err != nil {
+		t.Fatal(err)
+	}
+	if err := maps.SetState(tpmap.State{Mode: tpmap.ModeEnforce, Capable: false}); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if err := RegisterHostLinkKind(pinDir, table, idx, name, netip.Addr{}, tpmap.KindInfra); err != nil {
+			t.Fatalf("registration %d: %v", i, err)
+		}
+		var row prog.UsidTpIfaceValue
+		if err := maps.Interfaces.Lookup(idx, &row); err != nil || row.Kind != tpmap.KindInfra || row.PolicyToken != 0 {
+			t.Fatalf("registration %d: policy row = %+v, %v; want an infra row", i, row, err)
+		}
+	}
+	ifindexes, ifCloser, err := ifindexvrfmap.OpenPinned(pinDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ifCloser.Close() }()
+	if e, ok, err := ifindexes.Get(idx); err != nil || !ok || e.Block != block || e.Argument != 0x30 {
+		t.Fatalf("ifindex_vrf_table row = %+v %t %v", e, ok, err)
+	}
+	for kind, want := range map[uint32]bool{tpmap.KindInfra: true, tpmap.KindTenant: false} {
+		if ok, err := HostLinkRegistered(pinDir, table, idx, name, kind); err != nil || ok != want {
+			t.Errorf("HostLinkRegistered(kind %d) = %t, %v; want %t", kind, ok, err, want)
+		}
+	}
+	if ok, err := HostLinkPresent(pinDir, idx, name); err != nil || !ok {
+		t.Fatalf("HostLinkPresent after registration = %t, %v", ok, err)
+	}
+
+	if err := DetachHostLink(pinDir, idx, name); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := HostLinkPresent(pinDir, idx, name); err != nil || ok {
+		t.Fatalf("HostLinkPresent after DetachHostLink = %t, %v", ok, err)
+	}
+	if ok, err := HostLinkRegistered(pinDir, table, idx, name, tpmap.KindInfra); err != nil || ok {
+		t.Fatalf("HostLinkRegistered after DetachHostLink = %t, %v", ok, err)
+	}
+	if err := DetachHostLink(pinDir, idx, name); err != nil {
+		t.Errorf("repeated DetachHostLink: %v", err)
+	}
+}

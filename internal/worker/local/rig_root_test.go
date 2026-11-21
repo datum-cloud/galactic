@@ -60,6 +60,9 @@ var (
 	// natTable stands in for the shard resolver (#1437): the client's prefix
 	// steers into the VPC's pair.
 	podAddr = netip.MustParseAddr("fd20:80:ff04::50")
+	// rigLocator is the node's SRv6 locator, its Block and Node-ID, from
+	// which a routed link's egress datapath derives its source SID.
+	rigLocator = netip.MustParsePrefix("2001:db8:4135:1::/64")
 )
 
 const (
@@ -181,7 +184,7 @@ func newRig(t *testing.T, cell string, mode xdpmode.Mode) *rig {
 	r.buildDispatcher()
 
 	r.kernel = &Kernel{PinDir: r.pin + "/usid", LocalPinDir: r.pin + "/local", DispatchDir: r.pin + "/xdp",
-		Pods: r.pods}
+		Pods: r.pods, NodeLocator: func() (netip.Prefix, error) { return rigLocator, nil }}
 	t.Cleanup(func() { _ = r.kernel.Close() })
 	if r.mod, err = New(Config{Kernel: r.kernel, Node: testNode}); err != nil {
 		t.Fatal(err)
