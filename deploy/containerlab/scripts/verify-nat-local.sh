@@ -232,7 +232,7 @@ cni_rollout_diagnostics() {
     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' |
     awk '$2 != "True" {print $1}'); do
     echo "-- ${p}"
-    kc -n galactic-system describe pod "${p}" 2>&1 | sed -n '/^Conditions:/,$p' | head -40
+    kc -n galactic-system describe pod "${p}" 2>&1 | sed -n '/^Conditions:/,$p' | awk 'NR <= 40'
     kc -n galactic-system logs "${p}" --all-containers --tail=60 2>&1 | grep -v '"level":"debug"' | tail -40
   done
   kc -n galactic-system get events --sort-by=.lastTimestamp 2>&1 | grep -i 'galactic-cni' | tail -15 || true
@@ -337,11 +337,13 @@ diagnostics() {
   local host=G000000080086H tenant nat
   docker exec "${EDGE}" tc filter show dev "${host}" ingress 2>&1 || true
   tenant=$(docker exec "${EDGE}" ip -o link show type veth |
-    awk '/alias galactic-local:80\// && / master / {sub(/@.*/, "", $2); print $2; exit}')
+    awk '/alias galactic-local:80\// && / master / {sub(/@.*/, "", $2); print $2}')
+  tenant=${tenant%%$'\n'*}
   nat=$(docker exec "${EDGE}" ip -o link show type veth |
-    awk '/alias galactic-local:80\// && !/ master / {sub(/@.*/, "", $2); print $2; exit}')
+    awk '/alias galactic-local:80\// && !/ master / {sub(/@.*/, "", $2); print $2}')
+  nat=${nat%%$'\n'*}
   for l in "${tenant}" "${nat}"; do
-    [ -n "${l}" ] && docker exec "${EDGE}" ip -d link show "${l}" 2>&1 | head -6
+    [ -n "${l}" ] && docker exec "${EDGE}" ip -d link show "${l}" 2>&1 | awk 'NR <= 6'
   done
   path_trace "${host}" "${tenant}" "${nat}"
 }
@@ -437,7 +439,7 @@ probe() {
   case "${kind}" in
     tcp*) ok=$(grep -c '^200$' <<<"${out}" || true) ;;
     udp*) ok=$(grep -c '^echo-' <<<"${out}" || true) ;;
-    icmp*) ok=$(sed -n 's/.* \([0-9]*\) received.*/\1/p' <<<"${out}" | head -1) ;;
+    icmp*) ok=$(sed -n 's/.* \([0-9]*\) received.*/\1/p' <<<"${out}" | awk 'NR == 1') ;;
   esac
   local strip='s/\.[0-9]+$//'
   case "${kind}" in icmp*) strip='s/^//' ;; esac
@@ -477,7 +479,7 @@ udp_tuple() {
   out=$(pod_exec "${guest}" sh -c "echo tuple | nc -u -w2 -p 40000 ${dst} ${ECHO_PORT}" 2>&1) || true
   wait "${tpid}" || true
   [ "${out}" = tuple ] || die "UDP echo to ${dst} from ${guest} got '${out}'"
-  grep -oE ' IP6? [0-9a-f:.]+ >' "${cap}" | awk '{print $2}' | head -1
+  grep -oE ' IP6? [0-9a-f:.]+ >' "${cap}" | awk 'NR == 1 {print $2}'
 }
 
 # tuple_from GUEST ADDR repeats udp_tuple until the flow leaves from ADDR, at
@@ -635,8 +637,11 @@ echo "    galactic-nat restart: ${before} -> ${after}"
 
 # The NAT end is the pair end outside any VRF; the tenant end has one as
 # its master.
+# awk reads all of ip's output (no early exit), so ip never takes SIGPIPE,
+# which pipefail would turn into a silent exit.
 nat_end=$(docker exec "${EDGE}" ip -o link show type veth |
-  awk '/alias galactic-local:80\// && !/ master / {sub(/@.*/, "", $2); print $2; exit}')
+  awk '/alias galactic-local:80\// && !/ master / {sub(/@.*/, "", $2); print $2}')
+nat_end=${nat_end%%$'\n'*}
 [ -n "${nat_end}" ] || die "found no NAT end of VPC 80's pair on ${EDGE}"
 old_idx=$(docker exec "${EDGE}" cat "/sys/class/net/${nat_end}/ifindex")
 docker exec "${EDGE}" ip link del "${nat_end}"
