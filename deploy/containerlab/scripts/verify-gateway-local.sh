@@ -224,10 +224,18 @@ harness_check() {
   if [ -n "${EXPECT_HEAD:-}" ] && [ "${head}" != "${EXPECT_HEAD}" ]; then
     precondition "${REPO_DIR} is at ${head}, not EXPECT_HEAD ${EXPECT_HEAD}"
   fi
-  integ=$(git -C "${REPO_DIR}" rev-parse --verify -q "${INTEGRATION_REF}^{commit}" || true)
-  [ -n "${integ}" ] || precondition "${REPO_DIR} has no ${INTEGRATION_REF}; fetch it"
+  # A payload captures the integration head once, at its start, and exports
+  # it as INTEGRATION_SHA, so an integration merge while the payload runs
+  # does not void the case. Without it, the live ref is used.
+  if [ -n "${INTEGRATION_SHA:-}" ]; then
+    integ=$(git -C "${REPO_DIR}" rev-parse --verify -q "${INTEGRATION_SHA}^{commit}" || true)
+    [ -n "${integ}" ] || precondition "${REPO_DIR} does not have INTEGRATION_SHA ${INTEGRATION_SHA}; fetch it"
+  else
+    integ=$(git -C "${REPO_DIR}" rev-parse --verify -q "${INTEGRATION_REF}^{commit}" || true)
+    [ -n "${integ}" ] || precondition "${REPO_DIR} has no ${INTEGRATION_REF}; fetch it"
+  fi
   git -C "${REPO_DIR}" merge-base --is-ancestor "${integ}" HEAD ||
-    precondition "${INTEGRATION_REF} (${integ}) moved past this branch; merge it first"
+    precondition "integration (${integ}) is not in this branch; merge it first"
   changed=$({
     git -C "${REPO_DIR}" diff --name-only "${integ}" -- deploy/containerlab
     git -C "${REPO_DIR}" ls-files --others --exclude-standard -- deploy/containerlab
