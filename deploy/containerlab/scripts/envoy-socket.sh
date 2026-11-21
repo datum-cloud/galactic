@@ -715,9 +715,12 @@ links() {
 RUN=es$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')
 volatile run "${RUN}"
 SEQ=0
-nonce() {
+# next_nonce sets NONCE to the next request's nonce. It runs in the caller's
+# shell, not in a command substitution, so SEQ advances: a nonce made in a
+# subshell would repeat, and every request would carry the same one.
+next_nonce() {
   SEQ=$((SEQ + 1))
-  printf '%s%05d' "${RUN}" "${SEQ}"
+  printf -v NONCE '%s%05d' "${RUN}" "${SEQ}"
 }
 
 # curl_args NONCE PATH prints one request's curl options, one per line.
@@ -744,7 +747,8 @@ fresh() {
   : >"${f}"
   stats >"${f}.before"
   for i in $(seq 1 "${N}"); do
-    n=$(nonce)
+    next_nonce
+    n=${NONCE}
     printf '%s\t%s\n' "${n}" "${p}" >>"${OUT}/logs/${w}/nonces.tsv"
     mapfile -t a < <(curl_args "${n}" "${p}/fresh")
     client curl "${a[@]}" >>"${f}" 2>&1 || true
@@ -764,7 +768,8 @@ reused() {
   f="${OUT}/logs/${w}/${p//\//-}-reused.txt"
   stats >"${f}.before"
   for i in $(seq 1 "${N}"); do
-    n=$(nonce)
+    next_nonce
+    n=${NONCE}
     printf '%s\t%s\n' "${n}" "${p}" >>"${OUT}/logs/${w}/nonces.tsv"
     [ "${i}" -gt 1 ] && args+=(--next)
     mapfile -t a < <(curl_args "${n}" "${p}/pooled")
@@ -1098,7 +1103,8 @@ for p in 81/local; do
   fresh move "${p}"
   reused move "${p}"
 done
-n=$(nonce)
+next_nonce
+n=${NONCE}
 mapfile -t a < <(curl_args "${n}" 80/local/fresh)
 out=$(client curl "${a[@]}" 2>&1 || true)
 record move "80/local: no backend answers" yes "$(jq -R -s '[split("\n")[] | fromjson? | objects] | length == 0' <<<"${out}" |
