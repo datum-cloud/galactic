@@ -1,0 +1,9 @@
+# The one-shot handback pod (config/galactic-worker/handback) at the
+# integration branch's moving image tag, so hack/check-privileges compares
+# what it may do on a node with privileges.yaml beside it. A deployment pins
+# the tag its Worker ran, v0.0.0-<short-sha>.
+resources:
+  - ../../../../config/galactic-worker/handback
+images:
+  - name: ghcr.io/datum-cloud/galactic-worker
+    newTag: v0.0.0-integration-galactic-worker

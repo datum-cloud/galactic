@@ -1,0 +1,42 @@
+# Combined placement with routed links: the combined Component and the
+# routed-link Component, which grants Worker the two capabilities a routed
+# link's pod end needs. A deployment adds the allowlist entry of the client
+# that uses local.routed_link or local.socket, such as the galactic-vrf
+# sidecar. Pinned to the integration branch's moving image tag; task
+# test:manifests renders it, and hack/check-privileges compares it with
+# privileges.yaml beside it.
+resources:
+  - ../../../../config/galactic-system
+  - ../../../../config/galactic-cni
+  - ../../../../config/galactic-router
+  - ../../../../config/galactic-worker
+  - ../../../../config/galactic-worker/base
+  - ../../../../config/galactic-nat
+  - ../../../../config/galactic-nat/base
+  - ../../../../config/galactic-gateway
+  - ../../../../config/galactic-gateway/base
+components:
+  - ../../../../config/galactic-worker/profiles/combined
+  - ../../../../config/galactic-worker/profiles/routed-link
+patches:
+  # The gateway's public uplink is per deployment; the fixture names one.
+  - target:
+      kind: DaemonSet
+      name: galactic-gateway
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: GALACTIC_GATEWAY_PUBLIC_INTERFACE
+          value: bond0
+images:
+  - name: ghcr.io/datum-cloud/galactic-cni
+    newTag: v0.0.0-integration-galactic-worker
+  - name: ghcr.io/datum-cloud/galactic-router
+    newTag: v0.0.0-integration-galactic-worker
+  - name: ghcr.io/datum-cloud/galactic-worker
+    newTag: v0.0.0-integration-galactic-worker
+  - name: ghcr.io/datum-cloud/galactic-nat
+    newTag: v0.0.0-integration-galactic-worker
+  - name: ghcr.io/datum-cloud/galactic-gateway
+    newTag: v0.0.0-integration-galactic-worker

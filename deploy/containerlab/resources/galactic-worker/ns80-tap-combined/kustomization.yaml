@@ -1,0 +1,21 @@
+# ns80-tap placed for the combined Worker check (scripts/verify-worker.sh):
+# the same guests as tenants/ns80-tap/dfw, pinned to dfw-worker2, an edge
+# node that runs the gateway and NAT, instead of dfw's compute worker. It is
+# here rather than under tenants/ns80-tap, where every directory is a site.
+resources:
+  - ../../tenants/ns80-tap/dfw
+  - vpcattachments.yaml
+patches:
+  - target:
+      kind: Deployment
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/nodeSelector
+        value:
+          kubernetes.io/hostname: dfw-worker2
+      - op: add
+        path: /spec/template/spec/tolerations
+        value:
+          - key: galactic.datumapis.com/nat
+            operator: Exists
+            effect: NoSchedule

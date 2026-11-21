@@ -41,6 +41,9 @@ func fix(dry, wrong bool, do func() error) error {
 func putRow[K, V comparable](mp *ebpf.Map, key K, want V, dry bool, what string) error {
 	var cur V
 	err := mp.Lookup(key, &cur)
+	if dry && (err != nil || cur != want) {
+		return dirty("%s is missing or differs", what)
+	}
 	return fix(dry, err != nil || cur != want, func() error {
 		if err := mp.Put(key, want); err != nil {
 			return fmt.Errorf("local: write %s: %w", what, err)

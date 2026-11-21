@@ -33,6 +33,7 @@ import (
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/worker/auth"
+	"go.datum.net/galactic/internal/worker/diag"
 	"go.datum.net/galactic/internal/worker/hostscope"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/routes"
@@ -81,6 +82,12 @@ type Config struct {
 	// claim, attachment link or edge attachment, before Worker reclaims it.
 	// It keeps the state across an attachment's replacement.
 	HostGrace time.Duration
+	// StatusFile is where Worker writes its status snapshot
+	// (internal/worker/diag) for galactic-worker inspect. Empty writes
+	// none; the gauges are refreshed either way.
+	StatusFile string
+	// StatusInterval is how often the gauges and snapshot are refreshed.
+	StatusInterval time.Duration
 }
 
 func (c *Config) defaults() {
@@ -107,6 +114,9 @@ func (c *Config) defaults() {
 	}
 	if c.HostGrace == 0 {
 		c.HostGrace = DefaultHostGrace
+	}
+	if c.StatusInterval == 0 {
+		c.StatusInterval = DefaultStatusInterval
 	}
 }
 
@@ -157,6 +167,12 @@ type scopeState struct {
 	// unreferencedSince is when Worker first found the scope's host state
 	// unused, or zero while something uses it.
 	unreferencedSince time.Time
+	// committed is the digest of the desired state the scope's last
+	// successful reconcile committed; a change planned against the same
+	// desired state repairs drift.
+	committed string
+	// lastDrift is the last drift repaired in the scope.
+	lastDrift *diag.Drift
 }
 
 // Worker is the reconciliation core and gRPC service.
@@ -181,7 +197,10 @@ type Worker struct {
 
 	shutting atomic.Bool
 	started  atomic.Bool
-	wg       sync.WaitGroup
+	// statusDirty is set when a claim's status changes, so the next
+	// diagnostics pass writes the snapshot.
+	statusDirty atomic.Bool
+	wg          sync.WaitGroup
 
 	// subscribed, when set, runs after Observe registers a subscriber and
 	// before it queues the first snapshot. Tests use it to publish in
@@ -270,6 +289,7 @@ func (w *Worker) Start(ctx context.Context) error {
 		w.queue.ShutDown()
 	})
 	w.wg.Go(func() { w.every(ctx, w.cfg.RenewInterval, w.ExpireLeases) })
+	w.wg.Go(func() { w.runDiagnostics(ctx) })
 	w.wg.Go(func() {
 		w.every(ctx, w.cfg.ResyncInterval, func() {
 			w.discover(ctx)
@@ -337,8 +357,9 @@ func (w *Worker) discover(ctx context.Context) {
 		w.log.Error("discover VPC host state", "error", err)
 		return
 	}
-	// A scope a Worker incarnation owns or left mid-transfer may have no
-	// VRF, such as one whose CNI ADD waits for the transfer to finish.
+	// A scope a Worker incarnation owns or left mid-transfer, or a handback
+	// left, may have no VRF, such as one whose CNI ADD waits for the
+	// transfer to finish.
 	scopes, err := w.d.Fence.Scopes()
 	if err != nil {
 		w.log.Error("list VPC write fence scopes", "error", err)
@@ -348,7 +369,8 @@ func (w *Worker) discover(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		if rec, err := w.d.Fence.Read(name); err == nil && ownership.WorkerOwned(rec.Owner) {
+		rec, err := w.d.Fence.Read(name)
+		if err == nil && (ownership.WorkerOwned(rec.Owner) || ownership.HandedBack(rec.Owner)) {
 			vpcs = append(vpcs, vpc)
 		}
 	}

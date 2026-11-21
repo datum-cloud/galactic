@@ -1,0 +1,8 @@
+# The lab's Worker claim client (tests/handoffs/cmd/worker-claim): one pod
+# per node, holding a session while scripts/verify-worker.sh requests,
+# observes and releases claims through it with kubectl exec.
+# scripts/worker-lab.sh sets the node name.
+namespace: galactic-system
+resources:
+  - serviceaccount.yaml
+  - pod.yaml
