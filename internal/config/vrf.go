@@ -119,8 +119,8 @@ func NewVRFConfig() *VRFConfig {
 	v.SetDefault("teardown_grace_period", DefaultVRFTeardownGracePeriod.String())
 	v.SetDefault("sweep_interval", DefaultVRFSweepInterval.String())
 	v.SetDefault("namespace", DefaultNamespace)
-	v.SetDefault("worker_socket", workerv1alpha1.DefaultSocketPath)
-	v.SetDefault("worker_token_file", DefaultVRFWorkerTokenFile)
+	v.SetDefault(keyWorkerSocket, workerv1alpha1.DefaultSocketPath)
+	v.SetDefault(keyWorkerTokenFile, DefaultVRFWorkerTokenFile)
 
 	cfg := &VRFConfig{
 		v:      v,
@@ -145,8 +145,8 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 		{"namespace", "namespace"},
 		{"pod-namespace", "pod_namespace"},
 		{"attachment-selector", "attachment_selector"},
-		{"worker-socket", "worker_socket"},
-		{"worker-token-file", "worker_token_file"},
+		{flagWorkerSocket, keyWorkerSocket},
+		{flagWorkerTokenFile, keyWorkerTokenFile},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -168,8 +168,8 @@ func (c *VRFConfig) readFields() {
 	c.Namespace = c.v.GetString("namespace")
 	c.PodNamespace = c.v.GetString("pod_namespace")
 	c.AttachmentSelector = c.v.GetString("attachment_selector")
-	c.WorkerSocket = c.v.GetString("worker_socket")
-	c.WorkerTokenFile = c.v.GetString("worker_token_file")
+	c.WorkerSocket = c.v.GetString(keyWorkerSocket)
+	c.WorkerTokenFile = c.v.GetString(keyWorkerTokenFile)
 
 	c.NodeName = c.v.GetString("node_name")
 	if c.NodeName == "" {
