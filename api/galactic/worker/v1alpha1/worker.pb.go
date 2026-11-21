@@ -1702,7 +1702,7 @@ type HandoffInterface struct {
 	// link_local is the interface's IPv6 link-local address, set for a routed
 	// link's host end once the kernel has assigned it. The pod routes the
 	// destinations it reaches through the link to this address.
-	LinkLocal     string `protobuf:"bytes,4,opt,name=link_local,json=linkLocal,proto3" json:"link_local,omitempty"`
+	LinkLocal     string `protobuf:"bytes,5,opt,name=link_local,json=linkLocal,proto3" json:"link_local,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1878,7 +1878,7 @@ const file_galactic_worker_v1alpha1_worker_proto_rawDesc = "" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
 	"\aifindex\x18\x03 \x01(\x05R\aifindex\x12\x1d\n" +
 	"\n" +
-	"link_local\x18\x04 \x01(\tR\tlinkLocal*u\n" +
+	"link_local\x18\x05 \x01(\tR\tlinkLocal*u\n" +
 	"\x0fCapabilityState\x12 \n" +
 	"\x1cCAPABILITY_STATE_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aCAPABILITY_STATE_AVAILABLE\x10\x01\x12 \n" +
