@@ -48,6 +48,15 @@ each destination. `local` and `fabric` restrict the result; a destination that
 cannot resolve to the requested mode reports `Resolved=False` with reason
 `ModeUnavailable`.
 
+A **connector claim** (D37) is how galactic-edge hands Worker an edge host
+link it created. Its spec uses the `routed_link` handoff, names no
+destinations and sets `edge_link`: the link's name and the prefixes the link
+carries beyond its own address. Its key names an EdgeAttachment, and Worker
+resolves one Local destination for it, that attachment. Worker registers the
+link with the datapath and never creates or deletes it, unlike the routed link
+of the [Local module](#the-local-module). [Connector](connector.md) describes
+the claim and galactic-edge's side.
+
 ## Operations
 
 The API is a gRPC service, `galactic.worker.v1alpha1.Worker` (D7).
@@ -525,6 +534,7 @@ Status carries these reasons besides the ones above:
 | `HookUnsupported`                                  | `Ready`               | A hook runs in a mode the handoff cannot use, such as the NAT end's program in generic mode               |
 | `RoutedLinkUnavailable`                            | `Programmed`          | Worker lacks the capabilities a routed link or socket pod end needs; see operations                       |
 | `ReturnPathNotProgrammed`                          | `Ready`               | This node does not yet decapsulate the VPC's SID into the VPC's table                                     |
+| `HandoffInterfaceNotOwned`                         | `Programmed`          | A connector claim's link carries another attachment's stamp, or its gate names another address            |
 
 Clients retry with exponential backoff from 200 ms to 30 s with full jitter.
 Every mutating call is idempotent for a given generation, so a retry after a
@@ -554,9 +564,11 @@ qualified for detecting a dead service agent (D5).
   removal.
 - **Authority revoked.** When the VPCAttachment is deleted or an EdgeAttachment
   loses `Admitted`, Worker sets `Admitted=False` with reason
-  `AuthorizationRevoked` and withdraws the claim the same way
-  ([#1440](https://github.com/datum-cloud/galactic/issues/1440) tests
-  revocation).
+  `AuthorizationRevoked` and withdraws the claim the same way. For a
+  connector claim this is the second cut: galactic-edge's forwarding gate
+  already bounds delivery after a revocation, as the
+  [provider contract](../edge/provider-contract.md#bounds) states
+  ([connector](connector.md#authority)).
 - **Worker restart.** Worker reads desired state from disk, then takes each
   scope over and reconciles a full snapshot, as [ownership](ownership.md#bootstrap-adoption-and-transfer)
   describes. Programmed and observed state are rebuilt by reading the host.
@@ -594,6 +606,8 @@ D8 and D9 were confirmed on 2026-11-18.
       capabilities: [local.veth_pair, fabric.srv6]
     - serviceAccount: galactic-system/galactic-router
       capabilities: [fabric.routes]
+    - serviceAccount: galactic-system/galactic-edge
+      capabilities: [local.routed_link]
   ```
 
 - **Access model (D9).** Host-network agents (NAT, Gateway, galactic-edge) mount

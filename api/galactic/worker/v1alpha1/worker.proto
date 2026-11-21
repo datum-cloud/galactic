@@ -146,9 +146,29 @@ message Destination {
 
 message ClaimSpec {
   Handoff handoff = 1;
+  // destinations are the claim's tenant destinations. A claim with
+  // edge_link names none.
   repeated Destination destinations = 2;
   // mode is the mode preference. Unset means MODE_AUTO.
   Mode mode = 3;
+  // edge_link makes the claim a connector claim (D37): HANDOFF_ROUTED_LINK
+  // on an EdgeAttachment, whose host link galactic-edge created. Worker
+  // registers that link with the datapath and never creates or deletes it.
+  // Its one destination is the claim's own attachment, resolved Local.
+  EdgeLink edge_link = 4;
+}
+
+// EdgeLink is the host link of a Galactic Edge attachment. Its address is
+// the EdgeAttachment's status.address, never the request's.
+message EdgeLink {
+  // name is the host link's interface name. The link must carry the
+  // attachment's stamp, or the claim reports HandoffInterfaceNotOwned.
+  string name = 1;
+  // prefixes are what the link carries beyond its own address: the prefixes
+  // of its open gates and of routes it holds, in CIDR notation. Worker keeps
+  // a pass-through entry for each, and for the link's own address, in the
+  // VPC's egress_route_table.
+  repeated string prefixes = 2;
 }
 
 message RequestRequest {
