@@ -7,7 +7,8 @@ take such a backend out of the table on every gateway node, and put it back
 once it serves again.
 
 Health checks are opt-in per service. A service without `spec.healthCheck`
-behaves exactly as it does without this feature.
+is never probed. Its backends can still be reported `Unhealthy` with reason
+`LocalHandoffNotReady` ([Local handoff not ready](#local-handoff-not-ready)).
 
 ## What stays the same
 
@@ -94,14 +95,14 @@ all-unhealthy rule below keeps the backends in the table.
 On each of the backend's `ServiceVIPBinding`s, in `status.health`, written
 only by `galactic-router` on the backend's node:
 
-| Field                | Meaning                                                                          |
-| -------------------- | -------------------------------------------------------------------------------- |
-| `state`              | `Healthy`, `Unhealthy` or `Unknown`: the damped decision, not the last probe     |
-| `reason`             | `ProbeSucceeded`, `ProbeFailed`, `Pending` or `ProbeUnavailable`                 |
-| `message`            | The last probe error, when there is one                                          |
-| `attachmentUID`      | The `VPCAttachment` incarnation the decision is about                            |
-| `port`               | The port that was probed                                                         |
-| `lastTransitionTime` | When `state` last changed                                                        |
+| Field                | Meaning                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| `state`              | `Healthy`, `Unhealthy` or `Unknown`: the damped decision, not the last probe                |
+| `reason`             | `ProbeSucceeded`, `ProbeFailed`, `Pending`, `ProbeUnavailable` or `LocalHandoffNotReady`    |
+| `message`            | The last probe error, or the gateway's report for `LocalHandoffNotReady`, when there is one |
+| `attachmentUID`      | The `VPCAttachment` incarnation the decision is about                                       |
+| `port`               | The port that was probed                                                                    |
+| `lastTransitionTime` | When `state` last changed                                                                   |
 
 A backend has one binding per VIP family it serves, and each carries the same
 decision. A gateway reads a family's decision from that family's binding.
@@ -125,12 +126,13 @@ So a recreated attachment that reuses an address, or a port change, starts from
 
 ### States
 
-| State       | Reason             | When                                                                   | In the table |
-| ----------- | ------------------ | ---------------------------------------------------------------------- | ------------ |
-| `Unknown`   | `Pending`          | Too few probes since the backend, or its health check, appeared        | Yes          |
-| `Healthy`   | `ProbeSucceeded`   | `healthyThreshold` consecutive successes                               | Yes          |
-| `Unhealthy` | `ProbeFailed`      | `unhealthyThreshold` consecutive failures                              | No           |
-| `Unknown`   | `ProbeUnavailable` | `unhealthyThreshold` consecutive probes that could not run             | Yes          |
+| State       | Reason                 | When                                                                  | In the table |
+| ----------- | ---------------------- | --------------------------------------------------------------------- | ------------ |
+| `Unknown`   | `Pending`              | Too few probes since the backend, or its health check, appeared       | Yes          |
+| `Healthy`   | `ProbeSucceeded`       | `healthyThreshold` consecutive successes                              | Yes          |
+| `Unhealthy` | `ProbeFailed`          | `unhealthyThreshold` consecutive failures                             | No           |
+| `Unknown`   | `ProbeUnavailable`     | `unhealthyThreshold` consecutive probes that could not run            | Yes          |
+| `Unhealthy` | `LocalHandoffNotReady` | The gateway on the backend's node reports its Local handoff not ready | No           |
 
 A probe cannot run when the backend's host-side interface, or its link-local
 address, is missing on the node.
@@ -138,6 +140,42 @@ address, is missing on the node.
 Only an observed failure takes a backend out. `Unknown` keeps it in, so
 turning health checks on never shrinks a pool before the first probes finish,
 and a prober that cannot run removes nothing.
+
+## Local handoff not ready
+
+A gateway that runs with Galactic Worker hands each backend on its own node to
+the backend's TAP ([Local handoff](architecture.md#local-handoff)). While
+Worker does not report that handoff ready, the gateway drops the flows it
+selects for the backend and lists the backend's attachment in its
+`NetworkGateway`'s `status.localBackends` with `ready: false`. Every gateway
+must build the same table, so the backend has to leave every table for that
+gateway's share of its flows to reach another backend.
+
+`galactic-router` on that node watches the node's `NetworkGateway`s and
+publishes `Unhealthy` with reason `LocalHandoffNotReady` on each of the
+backend's bindings. The message names the gateway and its reason.
+
+- **Without `spec.healthCheck`.** The decision is published anyway. No probe
+  loop starts for it.
+- **With `spec.healthCheck`.** The decision overrides a passing probe. The
+  probe reaches the guest over its TAP, past the handoff, so it cannot see
+  the handoff fail. The probe keeps running, and its own decision returns
+  when the gateway reports the handoff ready again.
+- **Identity.** The decision names the attachment only, not a port: a Local
+  handoff serves every port of the attachment. A gateway still checks that
+  the binding is the current generated binding and that `attachmentUID` is
+  the attachment holding the address.
+- **Gating.** Gateways leave the backend out of the Maglev table only while
+  backend health filtering applies, that is while every `NetworkGateway` in
+  the namespace reports `backendHealthFiltering`. Otherwise the backend stays
+  in every table, and the flows the gateway on its node selects for it are
+  dropped there (`local_unavailable`).
+- **Every backend unhealthy.** The [rules below](#every-backend-unhealthy)
+  apply: with every backend of a family `Unhealthy`, a `FailOpen` rule keeps
+  all of them, and a `FailClosed` rule is not loaded.
+
+galactic-router needs `get`, `list` and `watch` on `networkgateways`
+(`config/galactic-router/rbac.yaml`).
 
 ## Flap damping
 
@@ -242,11 +280,11 @@ Per backend, `status.health` on each `ServiceVIPBinding`, as above.
 Per rule, each gateway node's `<node>/Programmed` condition, which stays
 `True` while the rule is loaded, takes one of these reasons:
 
-| Reason                   | Meaning                                                                       |
-| ------------------------ | ----------------------------------------------------------------------------- |
-| `BackendsUnhealthy`      | Loaded without the unhealthy backends; the message names them                 |
-| `NoHealthyBackends`      | Every backend is unhealthy, so all of them are kept                           |
-| `HealthChecksNotApplied` | A gateway node in the namespace does not apply health, so none of them does   |
+| Reason                   | Meaning                                                                     |
+| ------------------------ | --------------------------------------------------------------------------- |
+| `BackendsUnhealthy`      | Loaded without the unhealthy backends; the message names them               |
+| `NoHealthyBackends`      | Every backend is unhealthy, so all of them are kept                         |
+| `HealthChecksNotApplied` | A gateway node in the namespace does not apply health, so none of them does |
 
 The rule-wide `BackendsReady` condition reports each of them as a backend
 problem, as it reports `BackendsUnresolved`.

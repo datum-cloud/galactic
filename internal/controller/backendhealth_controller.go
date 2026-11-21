@@ -97,14 +97,36 @@ func (r *BackendHealthReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("get NetworkService for ServiceVIPBinding %s: %w", req.NamespacedName, err)
 	}
-	if rule.Spec.HealthCheck == nil {
-		r.Prober.Release(owner)
-		return ctrl.Result{}, r.publish(ctx, binding, nil)
-	}
-
 	attachment, err := r.backendAttachment(ctx, rule.Spec.VPCRef, binding.Spec.BackendAddress)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	var local localHandoffState
+	if attachment != nil {
+		if local, err = r.localHandoff(ctx, binding.Namespace, attachment.UID); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if rule.Spec.HealthCheck == nil {
+		r.Prober.Release(owner)
+		if attachment != nil && local.notReady {
+			// No probe runs, but the gateway on this node drops the flows it
+			// would hand to this backend, so every gateway leaves it out.
+			now := metav1.NewTime(time.Now().Truncate(time.Second))
+			if h := binding.Status.Health; h != nil && localHandoffNotReady(h, ruleBackend{uid: attachment.UID}) {
+				now = h.LastTransitionTime
+			}
+			return ctrl.Result{}, r.publish(ctx, binding, &bgpv1alpha1.ServiceVIPBindingHealth{
+				ObservedGeneration: rule.Generation,
+				State:              bgpv1alpha1.BackendHealthUnhealthy,
+				Reason:             bgpv1alpha1.BackendHealthReasonLocalHandoffNotReady,
+				Message:            truncateMessage(local.message()),
+				AttachmentUID:      attachment.UID,
+				Port:               rule.Spec.BackendPort,
+				LastTransitionTime: now,
+			})
+		}
+		return ctrl.Result{}, r.publish(ctx, binding, nil)
 	}
 	if attachment == nil {
 		// No attachment on this node holds the address any more, so the
@@ -129,6 +151,19 @@ func (r *BackendHealthReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		seed = nil
 	}
 	decision := r.Prober.Ensure(owner, id, target, seed)
+	if local.notReady {
+		// The probe reaches the guest over its TAP, past the Local handoff,
+		// so it cannot see the handoff fail. The gateway's report wins while
+		// it lasts; the probe keeps running for when it ends.
+		decision.State = healthprobe.State(bgpv1alpha1.BackendHealthUnhealthy)
+		decision.Reason = bgpv1alpha1.BackendHealthReasonLocalHandoffNotReady
+		decision.Message = local.message()
+		if h := binding.Status.Health; h != nil && localHandoffNotReady(h, ruleBackend{uid: attachment.UID}) {
+			decision.Since = h.LastTransitionTime.Time
+		} else {
+			decision.Since = time.Now()
+		}
+	}
 	var lastProbeTime metav1.Time
 	if failClosedHealth(rule) {
 		lastProbeTime = metav1.NewTime(decision.LastProbeTime.Truncate(time.Second))
@@ -143,6 +178,43 @@ func (r *BackendHealthReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		Port:               int32(target.Port),
 		LastTransitionTime: metav1.NewTime(decision.Since.Truncate(time.Second)),
 	})
+}
+
+// localHandoffState is what the gateway on this node reports about one
+// backend attachment's Local handoff.
+type localHandoffState struct {
+	notReady bool
+	gateway  string
+	reason   string
+}
+
+func (s localHandoffState) message() string {
+	return fmt.Sprintf("NetworkGateway %s reports this backend not ready for the Local handoff: %s",
+		s.gateway, s.reason)
+}
+
+// localHandoff reads the NetworkGateways in namespace that target this node
+// and reports whether one lists the attachment uid's Local handoff not ready
+// (status.localBackends).
+func (r *BackendHealthReconciler) localHandoff(
+	ctx context.Context, namespace string, uid types.UID,
+) (localHandoffState, error) {
+	list := &bgpv1alpha1.NetworkGatewayList{}
+	if err := r.List(ctx, list, client.InNamespace(namespace)); err != nil {
+		return localHandoffState{}, fmt.Errorf("list NetworkGateways in %s: %w", namespace, err)
+	}
+	for i := range list.Items {
+		gw := &list.Items[i]
+		if gw.Spec.TargetRef.Name != r.NodeName {
+			continue
+		}
+		for _, b := range gw.Status.LocalBackends {
+			if b.AttachmentUID == string(uid) && !b.Ready {
+				return localHandoffState{notReady: true, gateway: gw.Name, reason: b.Reason}, nil
+			}
+		}
+	}
+	return localHandoffState{}, nil
 }
 
 // ownsBinding reports whether binding is a generated binding written for this
@@ -270,9 +342,11 @@ func healthTargetID(uid types.UID, t healthprobe.Target) string {
 }
 
 // seedDecision returns published as a starting decision when it describes the
-// backend held by uid on port, and nil otherwise.
+// backend held by uid on port and came from a probe, and nil otherwise.
 func seedDecision(published *bgpv1alpha1.ServiceVIPBindingHealth, uid types.UID, port uint16) *healthprobe.Decision {
-	if published == nil || published.AttachmentUID != uid || published.Port != int32(port) {
+	if published == nil || published.AttachmentUID != uid || published.Port != int32(port) ||
+		published.Reason == bgpv1alpha1.BackendHealthReasonLocalHandoffNotReady {
+		// A LocalHandoffNotReady decision is the gateway's, not a probe's.
 		return nil
 	}
 	return &healthprobe.Decision{
@@ -322,6 +396,14 @@ func (r *BackendHealthReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 			builder.WithPredicates(attachmentProbeTargetChanged()),
 		).
+		// The gateway on this node reports a backend's Local handoff ready
+		// or not, which every binding of the backend carries.
+		Watches(&bgpv1alpha1.NetworkGateway{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []ctrlreconcile.Request {
+				return r.gatewayBindingRequests(ctx, obj)
+			}),
+			builder.WithPredicates(localBackendsChanged()),
+		).
 		// A probe loop's decision changed.
 		WatchesRawSource(source.Channel(r.events, &handler.EnqueueRequestForObject{})).
 		Named("backend-health").
@@ -370,6 +452,35 @@ func (r *BackendHealthReconciler) nodeBindings(
 		return nil, err
 	}
 	return list.Items, nil
+}
+
+// gatewayBindingRequests maps a NetworkGateway targeting this node to this
+// node's bindings in its namespace.
+func (r *BackendHealthReconciler) gatewayBindingRequests(
+	ctx context.Context, obj client.Object,
+) []ctrlreconcile.Request {
+	gw, ok := obj.(*bgpv1alpha1.NetworkGateway)
+	if !ok || gw.Spec.TargetRef.Name != r.NodeName {
+		return nil
+	}
+	bindings, err := r.nodeBindings(ctx, gw.Namespace, nil)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "list ServiceVIPBindings for NetworkGateway change", "networkGateway", gw.Name)
+		return nil
+	}
+	return bindingRequests(bindings)
+}
+
+// localBackendsChanged passes a NetworkGateway create or delete, and an
+// update of its status.localBackends.
+func localBackendsChanged() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			o, okOld := e.ObjectOld.(*bgpv1alpha1.NetworkGateway)
+			n, okNew := e.ObjectNew.(*bgpv1alpha1.NetworkGateway)
+			return !okOld || !okNew || !slices.Equal(o.Status.LocalBackends, n.Status.LocalBackends)
+		},
+	}
 }
 
 // ruleBindingRequests maps a NetworkService to its bindings on this node.

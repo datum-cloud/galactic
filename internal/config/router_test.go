@@ -79,11 +79,11 @@ func TestRouterConfigEnvOverride(t *testing.T) {
 	t.Setenv(EnvRouterBMPPolicy, "local-rib")
 	t.Setenv(EnvRouterBMPStatisticsInterval, "0s")
 	t.Setenv(EnvRouterGoBGPAPIDir, "/run/galactic-router")
-	t.Setenv(EnvRouterWorkerSocket, "/run/galactic-worker/worker.sock")
+	t.Setenv(EnvRouterWorkerSocket, testWorkerSocket)
 	t.Setenv(EnvRouterWorkerTokenFile, "/token")
 
 	cfg := NewRouterConfig()
-	if cfg.WorkerSocket != "/run/galactic-worker/worker.sock" || cfg.WorkerTokenFile != "/token" {
+	if cfg.WorkerSocket != testWorkerSocket || cfg.WorkerTokenFile != "/token" {
 		t.Errorf("Worker socket and token = %q, %q", cfg.WorkerSocket, cfg.WorkerTokenFile)
 	}
 

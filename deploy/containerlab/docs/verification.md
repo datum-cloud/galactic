@@ -237,6 +237,29 @@ site leaves that site four bindings, and `deploy:galactic-gateway`'s wait and
 switch on either one is enough; dfw needs it on both. The IPv4 check fails
 for any gateway node with the switch off, whatever its site.
 
+`verify:gateway-local` covers a gateway that hands the backends on its own
+node to their TAPs through Galactic Worker's Local handoff (#1438). It adds a
+TAP-backed guest in `ns80`'s VPC 80 on each of dfw's edge nodes, serves
+`ns80`'s `vpc-a` and `vpc-a2` as VIP backends too, and gives each backend its
+own TCP and UDP rules (`resources/gateway-local/`). With galactic-worker
+running on both edge nodes and both gateways pointed at it, it sends IPv4 and
+IPv6 TCP and UDP from remote-host through each gateway in turn. A backend on
+the gateway's own node must be reached through the handoff, counted by
+`galactic_edge_local_handoffs_total` and Worker's `rx_deliver`; every other
+backend must be encapsulated to, with neither counter moving. Captures on the
+backend's TAP or veth and at the client show each request and its reply from
+the VIP. It then removes `local_rx` from dfw-worker2's uplink, takes a TAP's
+reader away and zeroes dfw-worker2's `public_uplink_table`, and checks the
+`LocalHandoff` and `PublicPath` conditions, the backend's health, every
+gateway's Maglev table, the gateway's BGPAdvertisements and the egress
+shards' counters. Worker keeps the edge nodes' VPC scopes, so the lab needs
+`task destroy`, `task deploy` and `task baseline:twice` after it. The edge
+nodes originate the site's VIP prefixes from FRR, which the gateway cannot
+withdraw, so for its transit checks the script withdraws dfw-worker2's
+origination of each family in turn with `vtysh` and re-adds it on exit. It
+requires backend health (`GALACTIC_GATEWAY_BACKEND_HEALTH`) on every dfw
+gateway.
+
 ```bash
 # NetworkGateways Ready, NetworkServices Accepted, ServiceVIPBindings Bound
 task verify:gateway
@@ -262,6 +285,11 @@ task verify:gateway-detach
 # must pass, then the one through dfw-worker2 once the links are back.
 # Disruptive -- not part of `task verify`
 task verify:gateway-node-loss
+
+# Local and Fabric backends through each dfw gateway, then local_rx, TAP and
+# public-path failures on dfw-worker2. Runs galactic-worker on the edge
+# nodes -- not part of `task verify`; redeploy and run baseline:twice after
+task verify:gateway-local
 
 # By hand: one TCP request to dfw's VIP, from the off-fabric host
 echo probe | docker exec -i clab-gvpc-remote-host \

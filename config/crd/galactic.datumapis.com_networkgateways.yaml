@@ -164,6 +164,47 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              localBackends:
+                description: |-
+                  LocalBackends lists the backends on this gateway's own node that it
+                  hands to their TAPs through Galactic Worker's Local handoff, rather
+                  than encapsulating toward them, and whether each handoff is ready. The
+                  gateway writes it only while its Worker integration is on. A backend
+                  listed not ready is reported Unhealthy, with reason
+                  LocalHandoffNotReady, by galactic-router on this node, so every
+                  gateway leaves it out of its Maglev table until the handoff is ready
+                  again.
+                items:
+                  description: |-
+                    NetworkGatewayLocalBackend is the Local handoff state of one backend
+                    attachment on the gateway's node.
+                  properties:
+                    attachmentUID:
+                      description: AttachmentUID is the UID of the backend's VPCAttachment.
+                      minLength: 1
+                      type: string
+                    ready:
+                      description: |-
+                        Ready is true when Worker reports every backend slot of the attachment
+                        ready for the Local handoff.
+                      type: boolean
+                    reason:
+                      description: |-
+                        Reason is Ready when Ready is true, and otherwise the Worker reason of
+                        the first destination that is not, WorkerUnavailable while the
+                        gateway has no Worker session, or PublicUplinkMissing while this
+                        node's public_uplink_table has no next hop for the backend's replies.
+                      maxLength: 128
+                      type: string
+                  required:
+                  - attachmentUID
+                  - ready
+                  type: object
+                maxItems: 1024
+                type: array
+                x-kubernetes-list-map-keys:
+                - attachmentUID
+                x-kubernetes-list-type: map
               observedGeneration:
                 description: ObservedGeneration is the .metadata.generation this status
                   was computed from.

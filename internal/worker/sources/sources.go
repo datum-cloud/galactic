@@ -4,7 +4,8 @@
 
 // Package sources reads the facts Worker takes only from trusted sources,
 // never from a request (docs/worker/contract.md, "Trusted sources"): an
-// attachment's VPC, node and admission, and a node's physical locator.
+// attachment's VPC, node and admission, a node's physical locator, an
+// egress shard's node and SID, and the backend a load-balancer slot names.
 package sources
 
 import (
@@ -16,6 +17,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -25,6 +27,7 @@ import (
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/nodelocator"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
 // Attachment kinds.
@@ -80,6 +83,28 @@ type EgressShard struct {
 	Draining bool
 }
 
+// BackendBinding is the trusted record of a ServiceVIPBinding: what
+// galactic-router wrote for one backend of a service on one node, and
+// whether that node confirmed it.
+type BackendBinding struct {
+	Name string
+	// Node is the backend's node (spec.targetRef).
+	Node string
+	// VPCRef is spec.vpcRef, copied from the owning NetworkService: a VPC's
+	// status.vpc, the base62 identifier VPCAttachment.status.vpc also
+	// records, so it compares directly with an attachment's VPC.
+	VPCRef string
+	// BackendAddress is the backend's own IPv6 address.
+	BackendAddress netip.Addr
+	// BackendPort is the backend's own port; for a port-preserving range
+	// binding, the range's first port, as galactic-router keys its rows.
+	BackendPort uint16
+	// Bound is true while the binding is not being deleted, its source
+	// authority, if it has one, is enforced, and its Bound condition is True
+	// for its current generation: the evidence the gateway trusts.
+	Bound bool
+}
+
 // Sources answers Worker's trusted-source lookups.
 type Sources interface {
 	// Attachment returns the attachment with uid, and false when none
@@ -96,6 +121,10 @@ type Sources interface {
 	EgressShardByUID(ctx context.Context, uid string) (EgressShard, bool, error)
 	// VPCAttachments returns the admitted VPCAttachments of vpc on node.
 	VPCAttachments(ctx context.Context, vpc, node string) ([]Attachment, error)
+	// BackendBindings returns the ServiceVIPBindings for node whose IPv6
+	// backend address and port hash to slot (srv6.BackendSlot), Bound or
+	// not, sorted by name.
+	BackendBindings(ctx context.Context, node string, slot uint16) ([]BackendBinding, error)
 }
 
 // uidIndex indexes attachments and EgressShards by metadata.uid.
@@ -103,6 +132,17 @@ const uidIndex = "metadata.uid"
 
 // vpcIndex indexes VPCAttachments by status.vpc.
 const vpcIndex = "status.vpc"
+
+// bindingNodeIndex indexes ServiceVIPBindings by spec.targetRef.name.
+const bindingNodeIndex = "spec.targetRef.name"
+
+// bindingNode is the bindingNodeIndex value of a ServiceVIPBinding.
+func bindingNode(o client.Object) []string {
+	if b, ok := o.(*bgpv1alpha1.ServiceVIPBinding); ok && b.Spec.TargetRef.Name != "" {
+		return []string{b.Spec.TargetRef.Name}
+	}
+	return nil
+}
 
 // RegisterIndexes adds the field indexes Kube needs to a cache.
 func RegisterIndexes(ctx context.Context, idx client.FieldIndexer) error {
@@ -125,6 +165,9 @@ func RegisterIndexes(ctx context.Context, idx client.FieldIndexer) error {
 	if err := idx.IndexField(ctx, &cloudv1alpha1.VPCAttachment{}, vpcIndex, byVPC); err != nil {
 		return fmt.Errorf("sources: index VPCAttachment by VPC: %w", err)
 	}
+	if err := idx.IndexField(ctx, &bgpv1alpha1.ServiceVIPBinding{}, bindingNodeIndex, bindingNode); err != nil {
+		return fmt.Errorf("sources: index ServiceVIPBinding by node: %w", err)
+	}
 	return nil
 }
 
@@ -134,6 +177,9 @@ type Kube struct {
 	Reader client.Reader
 	// Namespace is where BGPRouters and EgressShards live.
 	Namespace string
+	// GatewayNamespace is the gateway namespace, where galactic-router
+	// writes the ServiceVIPBindings of the gateway's services.
+	GatewayNamespace string
 }
 
 // Attachment implements Sources.
@@ -247,23 +293,73 @@ func (k Kube) VPCAttachments(ctx context.Context, vpc, node string) ([]Attachmen
 	return out, nil
 }
 
-// Watch calls changed with a VPC identifier whenever an attachment in that
-// VPC changes, and with "" when a BGPRouter changes, which can move any
-// destination between Local and Fabric. Duplicate events are expected;
+// BackendBindings implements Sources.
+func (k Kube) BackendBindings(ctx context.Context, node string, slot uint16) ([]BackendBinding, error) {
+	if node == "" || k.GatewayNamespace == "" {
+		return nil, nil
+	}
+	var list bgpv1alpha1.ServiceVIPBindingList
+	if err := k.Reader.List(ctx, &list, client.InNamespace(k.GatewayNamespace),
+		client.MatchingFields{bindingNodeIndex: node}); err != nil {
+		return nil, fmt.Errorf("sources: list ServiceVIPBindings of %s: %w", node, err)
+	}
+	var out []BackendBinding
+	for i := range list.Items {
+		b, ok := backendBinding(&list.Items[i])
+		if ok && b.Node == node && srv6.BackendSlot(b.BackendAddress, b.BackendPort) == slot {
+			out = append(out, b)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// backendBinding is the trusted record of b, and false for a binding whose
+// backend address is not an IPv6 address, for which galactic-router writes
+// no row.
+func backendBinding(b *bgpv1alpha1.ServiceVIPBinding) (BackendBinding, bool) {
+	addr, err := netip.ParseAddr(b.Spec.BackendAddress)
+	if err != nil {
+		return BackendBinding{}, false
+	}
+	addr = addr.Unmap()
+	if !addr.Is6() {
+		return BackendBinding{}, false
+	}
+	port := uint16(b.Spec.BackendPort) //nolint:gosec // kubebuilder-validated 1-65535
+	if b.Spec.PortRange != nil {
+		port = uint16(b.Spec.PortRange.Start) //nolint:gosec // kubebuilder-validated 1-65535
+	}
+	bound := meta.FindStatusCondition(b.Status.Conditions, bgpv1alpha1.ConditionTypeBound)
+	return BackendBinding{Name: b.Name, Node: b.Spec.TargetRef.Name, VPCRef: b.Spec.VPCRef,
+		BackendAddress: addr, BackendPort: port,
+		Bound: b.DeletionTimestamp.IsZero() && (b.Spec.SourceRef == nil || b.Status.SourceAuthorityEnforced) &&
+			bound != nil && bound.Status == metav1.ConditionTrue && bound.ObservedGeneration == b.Generation}, true
+}
+
+// vpcOf is the VPC scope a change to obj requeues: an attachment's VPC, and
+// a ServiceVIPBinding's vpcRef, the scope of every backend destination it
+// can resolve. It is "" for any other object.
+func vpcOf(obj any) string {
+	if t, ok := obj.(toolscache.DeletedFinalStateUnknown); ok {
+		obj = t.Obj
+	}
+	switch o := obj.(type) {
+	case *cloudv1alpha1.VPCAttachment:
+		return o.Status.VPC
+	case *galacticv1alpha1.EdgeAttachment:
+		return o.Status.VPC
+	case *bgpv1alpha1.ServiceVIPBinding:
+		return o.Spec.VPCRef
+	}
+	return ""
+}
+
+// Watch calls changed with a VPC identifier whenever an attachment or a
+// ServiceVIPBinding in that VPC changes, and with "" when a BGPRouter
+// changes, which can move any destination between Local and Fabric. Duplicate events are expected;
 // Worker's queue coalesces them.
 func Watch(ctx context.Context, c cache.Cache, changed func(vpc string)) error {
-	vpcOf := func(obj any) string {
-		if t, ok := obj.(toolscache.DeletedFinalStateUnknown); ok {
-			obj = t.Obj
-		}
-		switch o := obj.(type) {
-		case *cloudv1alpha1.VPCAttachment:
-			return o.Status.VPC
-		case *galacticv1alpha1.EdgeAttachment:
-			return o.Status.VPC
-		}
-		return ""
-	}
 	notify := func(obj any) {
 		if v := vpcOf(obj); v != "" {
 			changed(v)
@@ -299,9 +395,12 @@ func Watch(ctx context.Context, c cache.Cache, changed func(vpc string)) error {
 	return nil
 }
 
-// attachmentTypes are the types whose changes requeue one VPC.
+// attachmentTypes are the types whose changes requeue one VPC: the
+// attachments, and the ServiceVIPBindings a backend destination resolves
+// from (vpcOf).
 func attachmentTypes() []client.Object {
-	return []client.Object{&cloudv1alpha1.VPCAttachment{}, &galacticv1alpha1.EdgeAttachment{}}
+	return []client.Object{&cloudv1alpha1.VPCAttachment{}, &galacticv1alpha1.EdgeAttachment{},
+		&bgpv1alpha1.ServiceVIPBinding{}}
 }
 
 // topologyTypes are the types whose changes can move any destination.
@@ -336,12 +435,41 @@ type Static struct {
 	attachments map[string]Attachment
 	locators    map[string]netip.Prefix
 	shards      map[string]EgressShard
+	bindings    map[string]BackendBinding
 }
 
 // NewStatic returns an empty Static.
 func NewStatic() *Static {
 	return &Static{attachments: map[string]Attachment{}, locators: map[string]netip.Prefix{},
-		shards: map[string]EgressShard{}}
+		shards: map[string]EgressShard{}, bindings: map[string]BackendBinding{}}
+}
+
+// SetBackendBinding adds or replaces a ServiceVIPBinding's record, by name.
+func (s *Static) SetBackendBinding(b BackendBinding) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bindings[b.Name] = b
+}
+
+// DeleteBackendBinding removes the ServiceVIPBinding named name.
+func (s *Static) DeleteBackendBinding(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.bindings, name)
+}
+
+// BackendBindings implements Sources.
+func (s *Static) BackendBindings(_ context.Context, node string, slot uint16) ([]BackendBinding, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []BackendBinding
+	for _, b := range s.bindings {
+		if b.Node == node && srv6.BackendSlot(b.BackendAddress, b.BackendPort) == slot {
+			out = append(out, b)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 // SetEgressShard adds or replaces an EgressShard, by name.

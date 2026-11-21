@@ -27,7 +27,14 @@ const (
 	DropReasonReturnHopLimit   uint32 = 9
 	DropReasonICMPRateLimited  uint32 = 10
 	DropReasonIPv4Fragment     uint32 = 11
-	DropReasonCount            uint32 = 12
+	// DropReasonLocalUnavailable is a packet whose selected backend is Local
+	// on this node (edge_local_table) while its handoff is not Ready. A
+	// Local backend is never encapsulated instead.
+	DropReasonLocalUnavailable uint32 = 12
+	// DropReasonAdjustMetaFailed is a Local handoff the kernel refused room
+	// for its metadata.
+	DropReasonAdjustMetaFailed uint32 = 13
+	DropReasonCount            uint32 = 14
 )
 
 // DropReasonNames maps each index to a short, stable, metrics-friendly name,
@@ -46,4 +53,6 @@ var DropReasonNames = map[uint32]string{
 	DropReasonReturnHopLimit:   "return_hop_limit",
 	DropReasonICMPRateLimited:  "icmp_rate_limited",
 	DropReasonIPv4Fragment:     "ipv4_fragment",
+	DropReasonLocalUnavailable: "local_unavailable",
+	DropReasonAdjustMetaFailed: "adjust_meta_failed",
 }

@@ -101,9 +101,12 @@ func Load(pinDir string, dispatchMaps map[string]*ebpf.Map) (*edgeprog.EdgedsrOb
 	if loadErr != nil && errors.Is(loadErr, ebpf.ErrMapIncompatible) {
 		// Every map here is control-plane-owned and reconstructable: the VIP
 		// table is repopulated from live CRDs, the statistics map is a
-		// pure cache the datapath refills from traffic, and the
-		// encapsulation config is a single entry rewritten at process
-		// startup. A stale pin from an incompatible layout is safe to
+		// pure cache the datapath refills from traffic, the encapsulation
+		// config is a single entry rewritten at process startup, and
+		// edge_local_table, the backends this node hands to Worker's Local
+		// module, is rewritten by the next reconcile. Until it is, a Local
+		// backend has no row and edge_lb encapsulates to its uSID as to
+		// any other backend. A stale pin from an incompatible layout is safe to
 		// recreate rather than fatal. The dispatcher's maps are not ours and
 		// are never touched here.
 		unpinned, unpinErr := mappin.UnpinIncompatible(spec, pinDir, func(name string) bool { return dispatchMapNames[name] })

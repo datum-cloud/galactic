@@ -186,6 +186,14 @@ const (
 	BackendHealthUnknown BackendHealthState = "Unknown"
 )
 
+// BackendHealthReasonLocalHandoffNotReady is the reason of an Unhealthy
+// decision galactic-router publishes, with or without a healthCheck, for a
+// backend that the gateway on its own node reports not ready for Galactic
+// Worker's Local handoff (NetworkGateway status.localBackends). Every gateway
+// then leaves the backend out of its Maglev table, as for a failed probe,
+// since the gateway on its node drops the flows it would hand to it.
+const BackendHealthReasonLocalHandoffNotReady = "LocalHandoffNotReady"
+
 // ServiceVIPBindingHealth is the health decision for a binding's backend. A
 // decision describes one backend: the VPCAttachment with AttachmentUID, probed
 // on Port. A reader treats a decision whose attachment UID or port does not

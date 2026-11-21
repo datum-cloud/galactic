@@ -1,0 +1,47 @@
+# The VIP backends of verify:gateway-local: the public-service grants ns60's
+# backends have, plus the private-nat grants ns80's guests keep while
+# verify-gateway-local.sh binds vpc-a and vpc-a2 to these policies instead of
+# their own. PublicService has no source restriction, so a client of the
+# IPv6 VIPs arrives as itself and one of the IPv4 VIPs as its address under
+# 64:ff9b::/96; a wrong source shows in the responder's answer instead of
+# as a silent denial.
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: gateway-local-egress
+  namespace: ns80
+spec:
+  rules:
+    - name: allow-service-replies
+      action: Allow
+      match:
+        path: PublicService
+    - name: allow-private
+      action: Allow
+      match:
+        path: Private
+    - name: allow-nat
+      action: Allow
+      match:
+        path: PublicNAT
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: gateway-local-ingress
+  namespace: ns80
+spec:
+  rules:
+    - name: allow-service
+      action: Allow
+      match:
+        path: PublicService
+    - name: allow-vpc
+      action: Allow
+      match:
+        path: Private
+        sourceCIDRs: ["fd20:80::/32", "fe80::/10"]
+    - name: allow-nat-returns
+      action: Allow
+      match:
+        path: PublicNAT

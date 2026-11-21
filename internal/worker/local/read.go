@@ -219,6 +219,11 @@ func (k *Kernel) destinationCheck(ck *check, h *host, vrfIdx int, c module.Claim
 				ck.unprogrammed(workerv1alpha1.ReasonPending, "Local has not authorized "+d.HostInterface+" yet")
 				return l
 			}
+			// The client keys its datapath on the TAP's ifindex, so only a
+			// TAP lt_tap authorizes is reported, whatever kind of
+			// destination, an attachment or a backend, it serves.
+			addHandoff(out, c.Key, module.HandoffInterface{Role: workerv1alpha1.HandoffRoleTap,
+				Name: d.HostInterface, Ifindex: int32(l.Attrs().Index)})
 		}
 		if c.Handoff == workerv1alpha1.Handoff_HANDOFF_VETH_PAIR {
 			for _, a := range ipv6(d.Addresses) {
@@ -261,6 +266,14 @@ func (k *Kernel) destinationCheck(ck *check, h *host, vrfIdx int, c module.Claim
 		}
 	}
 	return l
+}
+
+// addHandoff adds h to claim k's handoff interfaces unless k already has it,
+// as several destinations of one claim can share one TAP.
+func addHandoff(out *readResult, k module.ClaimKey, h module.HandoffInterface) {
+	if !slices.Contains(out.handoffs[k], h) {
+		out.handoffs[k] = append(out.handoffs[k], h)
+	}
 }
 
 // tapCheck checks a local.tap destination's receive path: a receiving device
