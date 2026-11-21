@@ -228,8 +228,8 @@ disabled, removes every pinned link under `links` and every row of
 pairs stop translating at once rather than when Worker withdraws their
 claims. Before uninstalling galactic-nat from a node that used Worker, restart
 it once with this empty, or remove `/sys/fs/bpf/galactic-nat/links/local-*`
-and the pinned maps under `/sys/fs/bpf/galactic-nat` by hand. `galactic_nat_worker_session_up`,
-`galactic_nat_worker_capability_available`,
+and the pinned maps under `/sys/fs/bpf/galactic-nat` by hand.
+`galactic_nat_worker_session_up`, `galactic_nat_worker_capability_available`,
 `galactic_nat_local_handoff_ready` and `galactic_nat_local_packets_total`
 report the integration's state.
 
