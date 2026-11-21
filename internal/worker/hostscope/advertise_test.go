@@ -17,10 +17,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
+	"go.datum.net/galactic/internal/cloud/galactic"
 	"go.datum.net/galactic/internal/crdnames"
 )
 
 const (
+	testPod  = "pod-1"
 	testAtt  = "att-1"
 	testNS   = "galactic-system"
 	testNode = "node-a"
@@ -60,7 +62,7 @@ func TestAdvertise(t *testing.T) {
 	k := &Kernel{K8s: k8s, Namespace: testNS, Node: testNode}
 
 	gw := netip.MustParseAddr("2001:db8:ff::1")
-	want := []Advertisement{{AttachmentUID: testAtt, PodUID: "pod-1",
+	want := []Advertisement{{AttachmentUID: testAtt, PodUID: testPod,
 		Addresses: []netip.Addr{gw, gw, netip.MustParseAddr("192.0.2.1")}}}
 	if ok, err := k.Current(ctx, testVPC, want); err != nil || ok {
 		t.Fatalf("Current before publishing = %t, %v; want false", ok, err)
@@ -72,7 +74,7 @@ func TestAdvertise(t *testing.T) {
 		t.Fatalf("Current after publishing = %t, %v; want true", ok, err)
 	}
 	name := crdnames.WorkerAdvertisementName(testVPC, testAtt, testNode)
-	checkAdvertisement(t, k8s, name, "pod-1")
+	checkAdvertisement(t, k8s, name, testPod)
 
 	// The VPC's instance moves to another VRF ID: the advertisement is no
 	// longer current, and publishing again follows the instance.
@@ -127,7 +129,7 @@ func TestAdvertise(t *testing.T) {
 // BGPVRFInstance, which carries the VRFID remote nodes return traffic with.
 func TestAdvertiseNeedsTheVPCInstance(t *testing.T) {
 	k := &Kernel{K8s: fake.NewClientBuilder().WithScheme(advScheme()).Build(), Namespace: testNS, Node: testNode}
-	err := k.Advertise(context.Background(), testVPC, []Advertisement{{AttachmentUID: testAtt, PodUID: "pod-1",
+	err := k.Advertise(context.Background(), testVPC, []Advertisement{{AttachmentUID: testAtt, PodUID: testPod,
 		Addresses: []netip.Addr{netip.MustParseAddr("2001:db8:ff::1")}}})
 	if err == nil {
 		t.Fatal("Advertise without the VPC's BGPVRFInstance succeeded")
@@ -158,5 +160,52 @@ func checkAdvertisement(t *testing.T, k8s client.Client, name, pod string) {
 		if strings.HasPrefix(key, crdnames.AnnotationNetNS) {
 			t.Fatalf("annotation %s would let galactic-router's GC judge the advertisement", key)
 		}
+	}
+}
+
+// TestAdvertiseNamesTheAttachmentsOwnAdvertisement names the advertisement
+// after the attachment's base62 identifier, the name galactic-controller
+// reads an attachment's tenant advertisement by, replaces a UID-named one an
+// earlier Worker left, and never replaces an advertisement Worker did not
+// write.
+func TestAdvertiseNamesTheAttachmentsOwnAdvertisement(t *testing.T) {
+	ctx := context.Background()
+	gw := []netip.Addr{netip.MustParseAddr("2001:db8:ff::1")}
+	old := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
+		Name: crdnames.WorkerAdvertisementName(testVPC, testAtt, testNode), Namespace: testNS,
+		Labels: map[string]string{crdnames.LabelWorkerVPC: testVPC, crdnames.LabelWorkerNode: testNode}}}
+	k8s := fake.NewClientBuilder().WithScheme(advScheme()).WithObjects(instance(testVPC, 9), old).Build()
+	k := &Kernel{K8s: k8s, Namespace: testNS, Node: testNode}
+	want := []Advertisement{{AttachmentUID: testAtt, AttachmentID: "e80", PodUID: testPod, Addresses: gw}}
+	if err := k.Advertise(ctx, testVPC, want); err != nil {
+		t.Fatal(err)
+	}
+	name := crdnames.BGPAdvertisementName(testVPC, "e80", testNode)
+	if identity := galactic.AdvertisementName(testVPC, "e80"); name != identity+"-"+testNode {
+		t.Fatalf("name %s is not the controller's %s-%s", name, identity, testNode)
+	}
+	var list bgpv1alpha1.BGPAdvertisementList
+	if err := k8s.List(ctx, &list, client.InNamespace(testNS)); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Name != name {
+		t.Fatalf("advertisements = %v, want only %s", list.Items, name)
+	}
+
+	// An advertisement of that name that Worker did not write, as CNI's for
+	// an attachment it attached, is never replaced.
+	cni := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
+		Name: crdnames.BGPAdvertisementName(testVPC, "e81", testNode), Namespace: testNS}}
+	if err := k8s.Create(ctx, cni); err != nil {
+		t.Fatal(err)
+	}
+	err := k.Advertise(ctx, testVPC, []Advertisement{{AttachmentUID: "att-2", AttachmentID: "e81", PodUID: testPod,
+		Addresses: gw}})
+	if err == nil {
+		t.Fatal("Advertise replaced an advertisement Worker did not write")
+	}
+	var got bgpv1alpha1.BGPAdvertisement
+	if err := k8s.Get(ctx, client.ObjectKeyFromObject(cni), &got); err != nil || len(got.Labels) != 0 {
+		t.Fatalf("CNI's advertisement changed: %v %v", got.Labels, err)
 	}
 }

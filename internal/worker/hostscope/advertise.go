@@ -24,6 +24,11 @@ import (
 // node's host VRF, where the routed link's /128 routes deliver it.
 type Advertisement struct {
 	AttachmentUID string
+	// AttachmentID is the attachment's base62 identifier. With it the
+	// advertisement is named as the attachment's own tenant advertisement,
+	// so galactic-controller projects the attachment's Programmed condition
+	// and node from it; without it, the name uses the UID.
+	AttachmentID string
 	// PodUID is the pod the claim's routed link serves.
 	PodUID    string
 	Addresses []netip.Addr
@@ -62,7 +67,7 @@ func (k *Kernel) Advertise(ctx context.Context, vpc string, want []Advertisement
 			return fmt.Errorf("BGPVRFInstance %s names no router or export route target", key.Name)
 		}
 		for _, a := range want {
-			name := crdnames.WorkerAdvertisementName(vpc, a.AttachmentUID, k.Node)
+			name := advertisementName(vpc, a, k.Node)
 			keep[name] = true
 			if err := k.applyAdvertisement(ctx, vpc, name, a, inst); err != nil {
 				return err
@@ -104,7 +109,7 @@ func (k *Kernel) Current(ctx context.Context, vpc string, want []Advertisement) 
 		byName[adv.Name] = adv
 	}
 	for _, a := range want {
-		adv, ok := byName[crdnames.WorkerAdvertisementName(vpc, a.AttachmentUID, k.Node)]
+		adv, ok := byName[advertisementName(vpc, a, k.Node)]
 		if !ok || adv.Annotations[crdnames.AnnotationWorkerPod] != a.PodUID ||
 			!slices.Equal(adv.Spec.Prefixes, advertisedPrefixes(a.Addresses)) || !matchesInstance(adv, inst) {
 			return false, nil
@@ -129,6 +134,17 @@ func (k *Kernel) applyAdvertisement(ctx context.Context, vpc, name string, a Adv
 	prefixes := advertisedPrefixes(a.Addresses)
 	vrfID := inst.Spec.VRFID
 	function := bgpv1alpha1.SRv6FunctionEndDT46
+	// The name is the attachment's tenant advertisement name, which CNI
+	// would use for an attachment it attached. Worker never takes over an
+	// advertisement it did not write.
+	var existing bgpv1alpha1.BGPAdvertisement
+	err := k.K8s.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: name}, &existing)
+	switch {
+	case err == nil && existing.Labels[crdnames.LabelWorkerVPC] != vpc:
+		return fmt.Errorf("BGPAdvertisement %s exists and is not Worker's; not replacing it", name)
+	case err != nil && !apierrors.IsNotFound(err):
+		return fmt.Errorf("read BGPAdvertisement %s: %w", name, err)
+	}
 	adv := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: k.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, k.K8s, adv, func() error {
 		if adv.Labels == nil {
@@ -181,4 +197,13 @@ func matchesInstance(adv bgpv1alpha1.BGPAdvertisement, inst *bgpv1alpha1.BGPVRFI
 		adv.Spec.Function != nil && *adv.Spec.Function == bgpv1alpha1.SRv6FunctionEndDT46 &&
 		slices.Equal(adv.Spec.Communities,
 			[]bgpv1alpha1.Community{bgpv1alpha1.Community(inst.Spec.ExportRouteTargets[0].Value)})
+}
+
+// advertisementName names a's advertisement: the attachment's tenant
+// advertisement name when its identifier is known, else a name from its UID.
+func advertisementName(vpc string, a Advertisement, node string) string {
+	if a.AttachmentID != "" {
+		return crdnames.BGPAdvertisementName(vpc, a.AttachmentID, node)
+	}
+	return crdnames.WorkerAdvertisementName(vpc, a.AttachmentUID, node)
 }

@@ -285,8 +285,11 @@ const (
 )
 
 // WorkerAdvertisementName returns the name of the BGPAdvertisement Worker on
-// nodeName publishes for the claim on attachment attachmentUID in vpc. It
-// leads with the VPC segment, as every BGP CRD name does.
+// nodeName publishes for a claim on attachment attachmentUID in vpc, used
+// when the attachment records no base62 identifier. With one, Worker names
+// the advertisement BGPAdvertisementName(vpc, identifier, nodeName), the
+// attachment's own tenant advertisement name. Both lead with the VPC segment,
+// as every BGP CRD name does.
 func WorkerAdvertisementName(vpc, attachmentUID, nodeName string) string {
 	return BGPAdvertisementName(vpc, attachmentUID, nodeName)
 }

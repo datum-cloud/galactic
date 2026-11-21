@@ -117,6 +117,9 @@ type Claim struct {
 	// Addresses are the addresses of the claim's own attachment, from its
 	// trusted source: for a routed link, the sources its pod end may use.
 	Addresses []netip.Addr
+	// AttachmentID is the claim attachment's base62 identifier, empty when
+	// its trusted source records none.
+	AttachmentID string
 	// Destinations are the claim's resolved destinations for the module's
 	// mode, each with an available capability.
 	Destinations []Destination
