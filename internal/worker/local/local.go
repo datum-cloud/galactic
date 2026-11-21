@@ -34,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
@@ -129,10 +130,12 @@ func (m *Module) Capabilities() []module.Capability {
 	return caps
 }
 
-// change is the Local module's change for one scope: the model to ensure.
+// change is the Local module's change for one scope: the model to ensure,
+// and the connector claims whose edge links to register.
 type change struct {
 	vpc   string
 	m     *model
+	edge  []module.Claim
 	dirty bool
 	// detail names the first difference Plan found, when it knows it.
 	detail string
@@ -142,6 +145,10 @@ type change struct {
 	// planned is set when the difference follows from desired state, such
 	// as another scope's TAP claim changing the receiving devices.
 	planned bool
+	// keepEdge leaves the scope's edge links as they are: a handback
+	// returns them to galactic-edge, which registers them again with the
+	// same rows (docs/worker/connector.md#rollback).
+	keepEdge bool
 }
 
 // Empty implements module.Change.
@@ -160,7 +167,12 @@ func (c *change) Drift() (string, bool) {
 
 // Plan implements module.Module. It computes the scope's desired Local state
 // and checks the host against it without writing.
-func (m *Module) Plan(_ context.Context, scope module.Scope, desired []module.Claim) (module.Change, error) {
+func (m *Module) Plan(ctx context.Context, scope module.Scope, desired []module.Claim) (module.Change, error) {
+	return m.plan(ctx, scope, desired, false)
+}
+
+// plan is Plan, leaving the scope's edge links alone when keepEdge is set.
+func (m *Module) plan(_ context.Context, scope module.Scope, desired []module.Claim, keepEdge bool) (*change, error) {
 	vpc := scope.VPC
 	want := desire(vpc, desired)
 	m.mu.Lock()
@@ -178,11 +190,21 @@ func (m *Module) Plan(_ context.Context, scope module.Scope, desired []module.Cl
 	retry := len(m.errs[vpc]) > 0
 	m.mu.Unlock()
 
-	ch := &change{vpc: vpc, m: want, retry: retry}
+	ch := &change{vpc: vpc, m: want, edge: edgeClaims(desired), retry: retry, keepEdge: keepEdge}
 	if err := m.cfg.Kernel.Loaded(); err != nil {
 		// Worker programs no destination whose capability is unavailable,
 		// and leaves whatever an earlier Worker wrote until it can read it.
 		return ch, nil
+	}
+	ep := &edgePlan{}
+	if !keepEdge {
+		var err error
+		if ep, err = m.planEdge(vpc, ch.edge); err != nil {
+			return nil, fmt.Errorf("local: plan edge links of %s: %w", vpc, err)
+		}
+	}
+	if ep.dirty() {
+		ch.dirty, ch.detail = true, "an edge link's registration or pass-through entries differ from its claim"
 	}
 	_, err := m.cfg.Kernel.ensure(want, true)
 	if err == nil {
@@ -208,6 +230,17 @@ func (m *Module) Apply(_ context.Context, scope module.Scope, c module.Change) e
 	if err != nil {
 		return err
 	}
+	// The edge plan is made again under the commit's lock, from the host as
+	// it stands now.
+	if !ch.keepEdge {
+		ep, err := m.planEdge(ch.vpc, ch.edge)
+		if err != nil {
+			return fmt.Errorf("local: plan edge links of %s: %w", ch.vpc, err)
+		}
+		if err := applyEdge(m.cfg.Kernel.edgeHost(), ep); err != nil {
+			return err
+		}
+	}
 	for name, e := range res.errs {
 		m.cfg.Log.Info("a routed link could not be created; retrying on the next change", "vpc", ch.vpc,
 			"link", name, "error", e)
@@ -232,9 +265,13 @@ func (m *Module) Read(_ context.Context, scope module.Scope) (module.State, erro
 	claims := m.desired[vpc]
 	errs := m.errs[vpc]
 	m.mu.Unlock()
-	res, err := m.cfg.Kernel.read(vpc, m.cfg.Node, claims, desire(vpc, claims), errs)
+	plain := slices.DeleteFunc(slices.Clone(claims), func(c module.Claim) bool { return c.EdgeLink != nil })
+	res, err := m.cfg.Kernel.read(vpc, m.cfg.Node, plain, desire(vpc, plain), errs)
 	if err != nil {
 		return nil, fmt.Errorf("local: read %s: %w", vpc, err)
+	}
+	if err := readEdge(m.cfg.Kernel.edgeHost(), m.cfg.Node, vpc, claims, res.state); err != nil {
+		return nil, fmt.Errorf("local: read edge links of %s: %w", vpc, err)
 	}
 	m.mu.Lock()
 	m.handoffs[vpc] = res.handoffs
@@ -264,7 +301,8 @@ func (m *Module) Release(ctx context.Context, scope module.Scope) error {
 	}
 	for _, vpc := range forms {
 		s := module.Scope{VPC: vpc}
-		ch, err := m.Plan(ctx, s, nil)
+		// Edge links stay registered: galactic-edge takes them back.
+		ch, err := m.plan(ctx, s, nil, true)
 		if err != nil {
 			return err
 		}
@@ -287,6 +325,15 @@ func (m *Module) HandoffInterfaces(scope module.Scope) map[module.ClaimKey][]mod
 		out[k] = append([]module.HandoffInterface(nil), v...)
 	}
 	return out
+}
+
+// planEdge plans the scope's edge links against the host as it stands.
+func (m *Module) planEdge(vpc string, edge []module.Claim) (*edgePlan, error) {
+	table, _, haveVRF, err := tableID(vpc)
+	if err != nil {
+		return nil, err
+	}
+	return planEdge(m.cfg.Kernel.edgeHost(), vpc, table, haveVRF, edge)
 }
 
 // tapVPCs returns the scopes with a local.tap claim.

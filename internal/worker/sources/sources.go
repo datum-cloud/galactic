@@ -52,11 +52,13 @@ type Attachment struct {
 	Admitted bool
 	// Addresses are the attachment's interface addresses from its spec,
 	// without their prefix lengths. A VPCAttachment whose guest manages its
-	// own addressing records none, and neither does an EdgeAttachment.
+	// own addressing records none. An EdgeAttachment's is the address core
+	// allocated it (status.address), once allocated.
 	Addresses []netip.Addr
 	// HostInterface is the host-side link CNI created for a VPCAttachment,
 	// as its status records: the TAP or host veth. It is empty for an
-	// attachment not yet attached and for an EdgeAttachment.
+	// attachment not yet attached and for an EdgeAttachment, whose host link
+	// its connector claim names.
 	HostInterface string
 }
 
@@ -200,8 +202,12 @@ func (k Kube) Attachment(ctx context.Context, uid string) (Attachment, bool, err
 		a := eas.Items[0]
 		admitted := a.DeletionTimestamp.IsZero() &&
 			meta.IsStatusConditionTrue(a.Status.Conditions, galacticv1alpha1.EdgeAttachmentAdmitted)
+		var addrs []netip.Addr
+		if addr, err := netip.ParseAddr(a.Status.Address); err == nil {
+			addrs = []netip.Addr{addr}
+		}
 		return Attachment{UID: uid, Kind: KindEdgeAttachment, VPC: a.Status.VPC, Node: a.Status.NodeName,
-			Admitted: admitted}, true, nil
+			Admitted: admitted, Addresses: addrs}, true, nil
 	}
 	return Attachment{}, false, nil
 }

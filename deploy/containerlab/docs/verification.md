@@ -494,6 +494,33 @@ arrival is read from `galactic_nat_drops_total{reason="nat66_no_return_conn"}`
 (and its `nat64_` counterpart) moving, which a packet that never reached the
 XDP program could not do.
 
+## BMP collector
+
+`task verify:bmp` checks that the route reflector and every fabric-router
+stream to the collector, and that the collector's latest Peer Up/Down for each
+session matches the router's state.
+
+A failure reading `latest Peer Up/Down is 'none'` for an Established session
+usually means the collector received the Peer Up and could not parse it. When
+that happens, the check prints the Peer Up messages GoBMP rejected.
+
+The known cause is an FRR 10.7.1 defect. In a connection collision, FRR keeps
+its own outgoing connection if it has the higher router ID. If the connection
+it accepted had sent an OPEN but not yet received one, FRR loses the session's
+received OPEN. From then on, every Peer Up for that session, including the
+dump to a collector that connects later, carries a 19-byte placeholder in the
+OPEN's place. bgpd logs `bmp: missing RX OPEN message for peer <peer>`, and
+GoBMP rejects the message with `need at least 29 bytes, have 19`. FRR fixed
+this on master in [FRRouting/frr#23456](https://github.com/FRRouting/frr/pull/23456),
+which no release contains yet.
+
+To recover, reset that one session on the router the check names, so FRR
+records both OPENs again and sends a new Peer Up:
+
+```bash
+kubectl exec -n galactic-system <fabric-router pod> -c frr -- vtysh -c "clear bgp <peer address>"
+```
+
 ## Automated checks
 
 ```bash
