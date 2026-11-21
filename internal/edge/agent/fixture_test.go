@@ -166,21 +166,22 @@ type datapath struct {
 	routes map[uint32][]netip.Prefix
 }
 
-func (d *datapath) Register(vrfTable, ifindex uint32, _ string, addr netip.Addr) error {
+func (d *datapath) Register(l Link) error {
 	d.Lock()
 	defer d.Unlock()
 	if d.onRegister != nil {
-		d.onRegister(ifindex)
+		d.onRegister(l.Index)
 	}
 	if d.failRegister != nil {
 		return d.failRegister
 	}
-	d.rows[ifindex] = vrfTable
-	d.gates.setLink(ifindex, addr)
+	d.rows[l.Index] = l.Table
+	d.gates.setLink(l.Index, l.Addr)
 	return nil
 }
 
-func (d *datapath) Unregister(ifindex uint32) error {
+func (d *datapath) Unregister(l Link) error {
+	ifindex := l.Index
 	d.Lock()
 	defer d.Unlock()
 	if d.failUnregister > 0 {
@@ -198,10 +199,10 @@ func (d *datapath) Forget(ifindex uint32) error {
 	return nil
 }
 
-func (d *datapath) SyncRoutes(vrfTable uint32, want []netip.Prefix) error {
+func (d *datapath) SyncRoutes(vrfTable uint32, links []LinkRoutes) error {
 	d.Lock()
 	defer d.Unlock()
-	d.routes[vrfTable] = slices.Clone(want)
+	d.routes[vrfTable] = Want(links)
 	return nil
 }
 
