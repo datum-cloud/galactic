@@ -63,6 +63,31 @@ type Destination struct {
 	// from its trusted source, which a Local destination is delivered
 	// through. It is empty until CNI has attached it.
 	HostInterface string
+	// Shard is set for a shard destination.
+	Shard *ShardTarget
+}
+
+// ShardTarget is what a shard destination resolved to.
+type ShardTarget struct {
+	// Name is the EgressShard's name.
+	Name string
+	// SID is the shard's SID, from the EgressShard's status. Its locator,
+	// not the shard node's router locator, is the destination's Locator.
+	SID netip.Addr
+	// Tenants are, for a Local shard, the admitted attachments of the
+	// claim's VPC on this node, whose flows the shard serves through the
+	// claim's veth pair.
+	Tenants []ShardTenant
+}
+
+// ShardTenant is one attachment a Local shard serves.
+type ShardTenant struct {
+	UID string
+	// HostInterface is the attachment's host-side link, empty until CNI
+	// has attached it.
+	HostInterface string
+	// Addresses are the attachment's addresses, which the pair returns to.
+	Addresses []netip.Addr
 }
 
 // DestinationID is the identity of a destination within a claim.
@@ -71,7 +96,7 @@ func DestinationID(d *workerv1alpha1.Destination) string {
 	case *workerv1alpha1.Destination_Attachment:
 		return "attachment/" + t.Attachment.GetUid()
 	case *workerv1alpha1.Destination_Shard:
-		return fmt.Sprintf("shard/%s/%d", t.Shard.GetGroup(), t.Shard.GetIndex())
+		return "shard/" + t.Shard.GetName()
 	case *workerv1alpha1.Destination_Backend:
 		return fmt.Sprintf("backend/%s/%d", t.Backend.GetNode(), t.Backend.GetSlot())
 	default:
@@ -196,6 +221,9 @@ type HandoffInterface struct {
 	Role    string
 	Name    string
 	Ifindex int32
+	// TenantSID is, for the NAT end of a pair serving a Local shard, the
+	// SID that names the claim's VPC on this node.
+	TenantSID string
 }
 
 // HandoffReporter is implemented by a module that creates interfaces for a
