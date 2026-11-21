@@ -79,6 +79,10 @@ LOCAL_ADDR=fd20:80:ff01::1:0:0
 ENVOY_IMAGE=envoyproxy/envoy@sha256:127e33c48c60be9a148cf9256d52e734ceda28aa344145023933116c7e524beb
 ENVOY_TAG=envoyproxy/envoy:v1.32.3
 VRF_IMAGE=galactic-vrf:lab
+# This checkout's galactic-controller, which certifies a proxy attachment's
+# node from its pod (#1439); the lab's runs for the case only.
+CTRL_IMAGE=galactic-controller:lab-1439
+CTRL_DEPLOY=galactic-controller
 WORKER_BIN=/opt/galactic-worker/galactic-worker
 ADV=bgpadvertisements.galactic.datumapis.com
 N=5
@@ -193,6 +197,7 @@ volatile kernel "$(docker exec "${NODE}" uname -r)"
 # Cleanup ---------------------------------------------------------------------
 
 WORKER_STARTED=0
+CTRL_SWAPPED=0
 MOVED=0
 BACKENDS_STARTED=0
 # The ns80 attachments this run gave addresses carry this annotation, so a
@@ -270,8 +275,23 @@ cleanup() {
     restore_worker_scopes
   fi
   rig_stop
+  restore_controller
   restore_checks
   finish
+}
+
+# restore_controller puts dfw's galactic-controller back on the image it ran
+# before the case and removes the case's image from the nodes.
+restore_controller() {
+  local n
+  [ "${CTRL_SWAPPED}" = 1 ] || return 0
+  kd -n galactic-system set image "deployment/${CTRL_DEPLOY}" "${CTRL_CONTAINER}=${CTRL_ORIG}" >/dev/null
+  record restore "galactic-controller is back on ${CTRL_ORIG}" yes \
+    "$(kd -n galactic-system rollout status "deployment/${CTRL_DEPLOY}" --timeout=180s \
+      >>"${OUT}/logs/controller-rollout.log" 2>&1 && echo yes || echo no)"
+  for n in $(kd get nodes -o jsonpath='{.items[*].metadata.name}' </dev/null); do
+    docker exec "${n}" crictl rmi "${CTRL_IMAGE}" >/dev/null 2>&1 || true
+  done
 }
 
 # restore_worker_scopes hands the stopped Worker's scopes back on NODE, which
@@ -345,7 +365,7 @@ restore_checks() {
   # Everything patched or restarted is back to its deployed spec and ready.
   if [ -d "${BASE_DIR}" ]; then
     deployed_state "${d}"
-    for f in ns80-deployments ns80-vpcattachments galactic-system-daemonsets; do
+    for f in ns80-deployments ns80-vpcattachments galactic-system-daemonsets galactic-system-deployments; do
       record restore "${f} match the deployed spec" yes \
         "$(diff -u "${BASE_DIR}/${f}.json" "${d}/${f}.json" >"${OUT}/logs/diff-${f}.txt" && echo yes || echo no)"
     done
@@ -386,6 +406,9 @@ deployed_state() {
     >"${d}/ns80-vpcattachments.json"
   kd -n galactic-system get daemonsets -o json </dev/null |
     jq -S '[.items[] | {name: .metadata.name, template: .spec.template}]' >"${d}/galactic-system-daemonsets.json"
+  kd -n galactic-system get deployments -o json </dev/null |
+    jq -S '[.items[] | {name: .metadata.name, replicas: .spec.replicas, template: .spec.template}]' \
+    >"${d}/galactic-system-deployments.json"
 }
 has_image() { docker exec "${NODE}" crictl inspecti "$1" >/dev/null 2>&1; }
 if [ "${MODE}" != down ]; then
@@ -397,6 +420,13 @@ if [ "${MODE}" != down ]; then
 fi
 if [ "${MODE}" = down ]; then
   BACKENDS_STARTED=1
+  # An up run left this checkout's controller: put the lab's back.
+  if [ "$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null)" = "${CTRL_IMAGE}" ]; then
+    CTRL_CONTAINER=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].name}')
+    CTRL_ORIG=galactic-controller:latest
+    CTRL_SWAPPED=1
+  fi
   if [ -n "$(docker exec "${NODE}" pgrep -f "^${WORKER_BIN}" || true)" ]; then
     WORKER_STARTED=1
   fi
@@ -419,6 +449,21 @@ docker save "${ENVOY_TAG}" | docker exec -i "${NODE}" ctr --namespace k8s.io ima
 if ! docker exec "${NODE}" crictl inspecti "${ENVOY_IMAGE}" >/dev/null 2>&1; then
   volatile envoy-image "not found by digest after import; pulled by the kubelet"
 fi
+
+echo "--- galactic-controller from this checkout ---"
+docker build --network=host -t "${CTRL_IMAGE}" -f "${REPO}/containers/galactic-controller/Dockerfile" "${REPO}" \
+  >"${OUT}/logs/build-controller.log" 2>&1
+for n in $(kd get nodes -o jsonpath='{.items[*].metadata.name}' </dev/null); do
+  docker save "${CTRL_IMAGE}" | docker exec -i "${n}" ctr --namespace k8s.io images import - >/dev/null
+done
+CTRL_CONTAINER=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].name}')
+CTRL_ORIG=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].image}')
+volatile controller-image "${CTRL_ORIG} replaced by ${CTRL_IMAGE} for the case"
+CTRL_SWAPPED=1
+kd -n galactic-system set image "deployment/${CTRL_DEPLOY}" "${CTRL_CONTAINER}=${CTRL_IMAGE}" >/dev/null
+record setup "this checkout's galactic-controller runs in dfw" yes \
+  "$(kd -n galactic-system rollout status "deployment/${CTRL_DEPLOY}" --timeout=180s \
+    >"${OUT}/logs/controller-rollout.log" 2>&1 && echo yes || echo no)"
 
 echo "--- Worker on ${NODE} ---"
 cat >"${OUT}/configs/allowlist.yaml" <<EOF
@@ -501,10 +546,38 @@ docker cp "${stage}/envoy-socket" "${DFW}:${FIXTURE_DIR}"
 rm -rf "${stage}"
 STAGE=""
 apply_k "${DFW}" "${FIXTURE_DIR}/dfw/" >"${OUT}/logs/apply.log"
-for v in 80 81; do
-  kd -n "${NS}" patch vpcattachment "proxy-${v}" --subresource=status --type=merge \
-    -p "{\"status\":{\"vpc\":\"${v}\",\"vpcAttachment\":\"e${v}\",\"node\":\"${NODE}\"}}" >/dev/null
+# name_proxy_pod POD records POD as the proxy attachments' pod, as NSO does in
+# production: galactic-controller then certifies their node from the pod's
+# spec.nodeName. A replacement pod is named on the same attachments.
+name_proxy_pod() {
+  local v
+  for v in 80 81; do
+    kd -n "${NS}" patch vpcattachment "proxy-${v}" --subresource=status --type=merge \
+      -p "{\"status\":{\"vpc\":\"${v}\",\"vpcAttachment\":\"e${v}\",\"podName\":\"$1\"}}" >/dev/null
+  done
+}
+# certified_nodes prints both proxy attachments' status.node.
+certified_nodes() {
+  kd -n "${NS}" get vpcattachments -l galactic.datumapis.com/proxy=envoy -o json </dev/null |
+    jq -r '[.items[] | .status.node // "none"] | sort | join(",")'
+}
+first_pod=""
+for i in $(seq 1 60); do
+  first_pod=$(kd -n "${NS}" get pods -l app=envoy -o json </dev/null |
+    jq -r '[.items[] | select(.metadata.deletionTimestamp == null and (.spec.nodeName // "") != "")]
+      | first | .metadata.name // empty')
+  [ -n "${first_pod}" ] && break
+  sleep 2
 done
+name_proxy_pod "${first_pod}"
+certified=""
+for i in $(seq 1 30); do
+  certified=$(certified_nodes)
+  [ "${certified}" = "${NODE},${NODE}" ] && break
+  sleep 2
+done
+record setup "galactic-controller certifies both proxy attachments on ${NODE} from their pod" \
+  "${NODE},${NODE}" "${certified}"
 
 # The sjc mirror stands in for a single control plane: dfw's cluster gets
 # sjc's per-pod EndpointSlice of each VPC's guest, SID annotation and all,
@@ -998,10 +1071,15 @@ for v in 80 81; do
   OLD_HOST_IDX[${v}]=$(docker exec "${NODE}" ip -j link show dev "${HOST_END[${v}]}" | jq -r '.[0].ifindex')
 done
 kd -n "${NS}" rollout restart deployment/envoy >/dev/null
-first="" new="" ready=no
+first="" new="" ready=no named=""
 for i in $(seq 1 "${REPLACE_TIMEOUT}"); do
   new=$(kd -n "${NS}" get pods -l app=envoy -o json </dev/null | jq -r --arg old "${OLD}" '[.items[]
     | select(.metadata.name != $old and .metadata.deletionTimestamp == null)] | first | .metadata.name // empty')
+  if [ -n "${new}" ] && [ "${named}" != "${new}" ]; then
+    # NSO names the replacement on the same attachments.
+    name_proxy_pod "${new}"
+    named=${new}
+  fi
   if [ -n "${new}" ]; then
     m=$(kd -n "${NS}" exec "${new}" -c client -- curl -s -g 'http://[::1]:9182/metrics' </dev/null 2>/dev/null || true)
     printf '%s\n' "${m}" >"${OUT}/logs/replace/metrics-${i}.txt"
