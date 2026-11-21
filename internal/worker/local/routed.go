@@ -124,11 +124,11 @@ func movePodEnd(r routedWant, podNS netns.NsHandle) (routedLink, error) {
 	if err != nil {
 		return routedLink{}, fmt.Errorf("local: look up new routed link %s: %w", r.host, err)
 	}
-	peer, err := netlink.VethPeerIndex(l.(*netlink.Veth))
-	if err != nil {
-		return routedLink{}, fmt.Errorf("local: read routed link peer: %w", err)
+	// IFLA_LINK is the pod end's ifindex in the pod's namespace.
+	if l.Attrs().ParentIndex <= 0 {
+		return routedLink{}, fmt.Errorf("local: routed link %s reports no peer", r.host)
 	}
-	return routedLink{host: l, podIndex: peer}, nil
+	return routedLink{host: l, podIndex: l.Attrs().ParentIndex}, nil
 }
 
 // enslave enslaves l to vrfIdx.

@@ -53,6 +53,24 @@ func (r *rig) read(vpc string) module.State {
 	return st
 }
 
+// TestSteadyStateRoot checks that a ready VPC whose links nothing changes
+// reads Ready, and plans no writes, on every pass. A transient failure to
+// confirm a pair's peer once read the pair as not created yet, and planned
+// to recreate it; under CPU stress that took a few hundred passes to show,
+// so without stress this test catches it only by chance.
+func TestSteadyStateRoot(t *testing.T) {
+	r := readyRig(t, "steady")
+	for i := range 200 {
+		for _, v := range r.vpcs {
+			claims := r.claims(v)
+			wantReady(t, r.read(v.vpc), claims)
+			if !r.planEmpty(v.vpc, claims) {
+				t.Fatalf("pass %d: VPC %s: a plan would write again", i, v.vpc)
+			}
+		}
+	}
+}
+
 // TestUntrustedEntryRoot checks that a packet that is not claimed, or claims
 // a handoff it was not given, enters none: metadata with a wrong magic, as a
 // sender without the dispatcher could forge it at best; metadata naming a TAP
