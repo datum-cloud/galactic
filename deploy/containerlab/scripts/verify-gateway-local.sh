@@ -299,6 +299,11 @@ lab_preconditions() {
       precondition "lab container ${c} is not running (task deploy)"
   done
   command -v go >/dev/null || precondition "no go toolchain: scripts/worker-fabric.sh builds Worker"
+  # worker-fabric.sh builds Worker on this host, which needs the generated
+  # eBPF bindings; task deploy builds its images in containers and leaves
+  # none in the checkout.
+  [ -n "$(ls "${REPO_DIR}"/internal/plumbing/ebpf/prog/*_bpfel.go 2>/dev/null)" ] ||
+    precondition "no generated eBPF bindings in ${REPO_DIR}: run task build:ebpf there"
   command -v jq >/dev/null || precondition "no jq on this host"
   sudo -n true 2>/dev/null || precondition "sudo needs a password: Worker's lt_stats and public_uplink_table are read with the host's bpftool"
   sudo -n bpftool version >/dev/null 2>&1 || precondition "no bpftool on this host"
