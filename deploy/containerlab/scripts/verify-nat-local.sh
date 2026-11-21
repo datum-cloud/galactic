@@ -599,7 +599,7 @@ fi
 
 log "3. hashed mode, flow hash: flows leave from ${EDGE} (Local) and dfw-worker3 (Fabric)"
 kc -n galactic-system set env daemonset/galactic-cni -c credential-refresh \
-  GALACTIC_CNI_EGRESS_MODE=hashed GALACTIC_CNI_EGRESS_HASH=flow GALACTIC_CNI_EGRESS_PIN_IDLE=0s >/dev/null
+  GALACTIC_CNI_EGRESS_MODE=hashed GALACTIC_CNI_EGRESS_HASH=flow GALACTIC_CNI_EGRESS_PIN_IDLE=0 >/dev/null
 wait_mode hashed
 wait_true "${EDGE}'s class routes are not all on the shard groups after 120s" 120 groups_hold_routes
 if [ "${NAT_LOCAL_ONLY:-}" = hashed-switch ]; then
