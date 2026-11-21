@@ -991,14 +991,16 @@ func (m *masque) rowSharedCancel(t *testing.T) {
 // VRFs and attachments must survive. Which branch of collection keeps them
 // is covered by internal/gc's TestEdgeAttachmentKeepsVRF and
 // TestInUseVRFIsNotRemoved.
+//
+// With galactic-worker on the node, Worker owns the canary's scope, so
+// galactic-router's GC leaves the canary to Worker (docs/worker/ownership.md)
+// and Worker removes it once it has gone unused for --host-grace. The row
+// then waits for Worker's removal and fails if the router removed the
+// canary. A router pass sees the canary only when it runs inside the grace,
+// so the row checks the router's refusal when one appears; internal/gc's
+// TestWorkerOwnedVRFIsNotRemoved and internal/worker's
+// TestWorkerReclaimsOrphanedVRF prove it on every run.
 func (m *masque) rowMaintenance(t *testing.T) {
-	if m.l.edgeUsesWorker(t) {
-		// The row waits for galactic-router's GC to remove a canary VRF.
-		// With Worker on the node, Worker owns that VRF's scope, so the
-		// router's GC leaves it to Worker (docs/worker/ownership.md).
-		t.Skip("galactic-edge runs with --worker-socket; the row expects router GC, " +
-			"https://github.com/datum-cloud/galactic/issues/1476")
-	}
 	l, ctx := m.l, context.Background()
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		old := m.client(t, mt.tn, 2)
@@ -1057,7 +1059,20 @@ func (m *masque) rowMaintenance(t *testing.T) {
 	router := l.podOn(t, systemNS, "galactic-router", edgeNode1)
 	interval := l.gcInterval(t)
 	l.record(t, "galactic-router GC interval", interval)
-	d := interval + 90*time.Second
+	// window is how long the canary's collector may take to remove it.
+	// worker is the galactic-worker serving the node, packaged or bare.
+	worker, window := workerOnNode(t, edgeNode1), interval
+	if edge := l.edgeUsesWorker(t); (worker != nil) != edge || (worker != nil && !worker.socket) {
+		t.Fatalf("Worker on %s disagrees: process %t, socket %t, galactic-edge --worker-socket %t",
+			edgeNode1, worker != nil, worker != nil && worker.socket, edge)
+	}
+	var workerLogs func() (string, error)
+	if worker != nil {
+		window = worker.hostGrace(t)
+		l.record(t, "galactic-worker host grace", window)
+		workerLogs = m.workerLogs(t, worker)
+	}
+	d := window + 90*time.Second
 	started := time.Now()
 	runs := map[*masqueTenant]*probeRun{}
 	for _, mt := range []*masqueTenant{m.a, m.b} {
@@ -1070,21 +1085,36 @@ func (m *masque) rowMaintenance(t *testing.T) {
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		atts[mt] = l.waitServing(t, m.pod, mt.svc)
 	}
-	// The probes must outlast collection, which can take interval+30s
-	// from here.
-	if setup := time.Since(started); setup > d-interval-30*time.Second {
+	// The probes must outlast collection, which can take window+30s from
+	// here.
+	if setup := time.Since(started); setup > d-window-30*time.Second {
 		t.Fatalf("attachments took %v to serve, leaving the probes too little time to span a collection pass", setup)
 	}
 	since := time.Now().UTC().Format(time.RFC3339)
 	canary := plantCanaryVRF(t, edgeNode1)
 	planted := time.Now()
-	eventually(t, interval+30*time.Second, 2*time.Second, "a collection pass removed canary VRF "+canary,
-		func() (bool, error) {
-			logs, err := l.kubectl("-n", systemNS, "logs", router, "--since-time="+since)
-			return slices.ContainsFunc(strings.Split(logs, "\n"), func(line string) bool {
-				return strings.Contains(line, "GC: removed orphaned VRF") && strings.Contains(line, canary)
-			}), err
-		})
+	removed := func(line string) bool {
+		return strings.Contains(line, "GC: removed orphaned VRF") && strings.Contains(line, canary)
+	}
+	if worker == nil {
+		eventually(t, window+30*time.Second, 2*time.Second, "a collection pass removed canary VRF "+canary,
+			func() (bool, error) {
+				logs, err := l.kubectl("-n", systemNS, "logs", router, "--since-time="+since)
+				return slices.ContainsFunc(strings.Split(logs, "\n"), removed), err
+			})
+		l.record(t, "canary VRF collected by", "galactic-router GC")
+	} else {
+		eventually(t, window+30*time.Second, 2*time.Second, "galactic-worker removed canary VRF "+canary,
+			func() (bool, error) {
+				logs, err := workerLogs()
+				return slices.ContainsFunc(strings.Split(logs, "\n"), removed), err
+			})
+		l.record(t, "canary VRF collected by", "galactic-worker, PID "+worker.pid)
+		if _, err := nodeExec(edgeNode1, "ip", "link", "show", canary); err == nil {
+			t.Errorf("canary VRF %s is still on %s after galactic-worker logged its removal", canary, edgeNode1)
+		}
+		m.routerLeftCanary(t, router, since, canary)
+	}
 	l.record(t, "canary VRF collected after", time.Since(planted).Round(time.Second))
 	for _, mt := range []*masqueTenant{m.a, m.b} {
 		vrf := fmt.Sprintf("G%09sV", atts[mt].Status.VPC)
@@ -1108,6 +1138,54 @@ func (m *masque) rowMaintenance(t *testing.T) {
 		m.requireAnswered(t, "VPC "+mt.tn.vpc+" across garbage collection", p.wait(l, t), d,
 			m.workload(t, mt.tn, 1).addr)
 	}
+}
+
+// workerLogs returns a reader of what w logs from now on: the tail of its
+// log file when it runs bare, or its pod's log since now.
+func (m *masque) workerLogs(t *testing.T, w *workerProc) func() (string, error) {
+	t.Helper()
+	if w.logFile != "" {
+		size, err := nodeExec(edgeNode1, "stat", "-c", "%s", w.logFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		off, err := strconv.ParseInt(size, 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		from := "+" + strconv.FormatInt(off+1, 10)
+		return func() (string, error) { return nodeExec(edgeNode1, "tail", "-c", from, w.logFile) }
+	}
+	pod := m.l.podOn(t, systemNS, workerComm, edgeNode1)
+	since := time.Now().UTC().Format(time.RFC3339)
+	return func() (string, error) {
+		return m.l.kubectl("-n", systemNS, "logs", pod, "-c", workerComm, "--since-time="+since)
+	}
+}
+
+// routerLeftCanary checks galactic-router's log since since for the canary
+// galactic-worker owns. Removing it there would make the router a second
+// writer of Worker's scope. GC's refusal appears only when a router pass ran
+// inside Worker's grace, so the row records whether it did.
+func (m *masque) routerLeftCanary(t *testing.T, router, since, canary string) {
+	t.Helper()
+	logs, err := m.l.kubectl("-n", systemNS, "logs", router, "--since-time="+since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused := false
+	for _, line := range strings.Split(logs, "\n") {
+		switch {
+		case !strings.Contains(line, canary):
+		case strings.Contains(line, "GC: removed orphaned VRF"):
+			t.Errorf("galactic-router's GC removed canary VRF %s from galactic-worker's scope: %s", canary, line)
+		case strings.Contains(line, "GC: left VRF to the galactic-worker that owns its VPC"):
+			refused = true
+		default:
+			t.Logf("galactic-router on canary VRF %s: %s", canary, line)
+		}
+	}
+	m.l.record(t, "galactic-router GC refused the canary", refused)
 }
 
 const (
