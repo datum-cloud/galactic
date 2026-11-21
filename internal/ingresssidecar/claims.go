@@ -104,11 +104,13 @@ type claimState struct {
 	// refused is the reason Worker last refused a call, until one succeeds.
 	refused string
 	// wired is true once the pod end is configured for the current status.
-	wired    bool
-	wireErr  error
-	podEnd   string
-	hostLL   netip.Addr
-	localSet []netip.Addr
+	wired   bool
+	wireErr error
+	// vrfMissingLogged is true once the wait for the VPC's VRF was logged.
+	vrfMissingLogged bool
+	podEnd           string
+	hostLL           netip.Addr
+	localSet         []netip.Addr
 }
 
 // Claims keeps one Worker socket claim per VPC the proxy serves, and wires
@@ -353,6 +355,10 @@ func (c *Claims) ensureLocked(ctx context.Context, vpc string, w wantedClaim) er
 		}
 		return fmt.Errorf("%s claim for VPC %s: %w", op, vpc, err)
 	}
+	if op != "reassert" {
+		c.log.Info("Worker accepted the claim", "operation", op, "vpc", vpc, "attachment", w.key.GetAttachmentUid(),
+			"generation", s.gen, "destinations", len(w.spec.GetDestinations()))
+	}
 	s.refused, s.spec = "", proto.Clone(w.spec).(*workerv1alpha1.ClaimSpec)
 	if st != nil {
 		s.status = st
@@ -424,8 +430,14 @@ func (c *Claims) wireLocked(vpc string, s *claimState) {
 	local = slices.Compact(local)
 	if err := c.link.Configure(vpc, podEnd, s.gateway, hostLL, local); err != nil {
 		s.wireErr = err
-		if !errors.Is(err, errVRFMissing) {
+		switch {
+		case !errors.Is(err, errVRFMissing):
 			c.log.Error("configure the routed link's pod end", "vpc", vpc, "link", podEnd, "error", err)
+		case !s.vrfMissingLogged:
+			// The Store creates the VRF with the VPC's first route; say
+			// once that the pod end waits for it.
+			s.vrfMissingLogged = true
+			c.log.Info("the routed link's pod end waits for the VPC's VRF", "vpc", vpc, "link", podEnd)
 		}
 		return
 	}
@@ -433,7 +445,7 @@ func (c *Claims) wireLocked(vpc string, s *claimState) {
 		c.log.Info("configured the routed link's pod end", "vpc", vpc, "link", podEnd,
 			"localBackends", len(local))
 	}
-	s.wired, s.podEnd, s.hostLL, s.localSet = true, podEnd, hostLL, local
+	s.wired, s.podEnd, s.hostLL, s.localSet, s.vrfMissingLogged = true, podEnd, hostLL, local, false
 }
 
 // claimStateOf returns the worker_claims state and reason of s.
