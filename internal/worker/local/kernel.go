@@ -111,6 +111,11 @@ type Kernel struct {
 	LinkMTU int
 	// Shards is egress_local_shard, or nil when the uSID datapath has none.
 	Shards LocalShards
+	// NodeLocator returns this node's SRv6 locator, its Block and Node-ID,
+	// or the invalid prefix while it has none. The source SID a routed
+	// link's egress datapath encapsulates from is derived from it; when it
+	// is nil, Local uses the one node_src_addr_table already holds.
+	NodeLocator func() (netip.Prefix, error)
 	// edge is the edge-link host access; the pinned maps under PinDir when
 	// nil.
 	edge edgeHost
@@ -121,6 +126,9 @@ type Kernel struct {
 	routes  *egressroutemap.EgressRouteTable
 	rclose  interface{ Close() error }
 	progIDs map[string]ebpf.ProgramID
+	// blockers are, by routed link host end ifindex, the program that
+	// stayed ahead of the guard when Local last moved it to the head.
+	blockers map[int]ebpf.ProgramID
 	// receivers are the devices local_rx was last attached to.
 	receivers map[string]struct{}
 	// swept is set once a stale local_rx left by an earlier Worker on a

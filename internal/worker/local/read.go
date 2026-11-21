@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"slices"
 
+	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
@@ -32,6 +33,9 @@ type readResult struct {
 	// failedNeighbors is set when a destination's neighbor failed, which a
 	// neighbor event clears.
 	failedNeighbors bool
+	// blocked are the routed_link and socket claims whose routed link cannot
+	// carry their Fabric destinations.
+	blocked map[module.ClaimKey]module.Blocked
 }
 
 // check is one destination's evaluation, filled in order; the first failure
@@ -86,12 +90,19 @@ func (c *check) done() module.DestinationState {
 func lowerUp(l netlink.Link) bool { return l.Attrs().RawFlags&unix.IFF_LOWER_UP != 0 }
 
 // read reports every Local destination of claims, the claims of vpc m was
-// computed from, and the handoff interfaces of each. errs are the per-link
-// errors the last ensure recorded.
-func (k *Kernel) read(vpc, node string, claims []module.Claim, m *model, errs map[string]error) (readResult, error) {
-	out := readResult{state: module.State{}, handoffs: map[module.ClaimKey][]module.HandoffInterface{}}
+// computed from, the handoff interfaces of each, and the claims whose routed
+// link cannot carry their Fabric destinations. errs are the per-link errors
+// the last ensure recorded, and egressErrs why it left a routed link without
+// the egress datapath.
+func (k *Kernel) read(vpc, node string, claims []module.Claim, m *model,
+	errs, egressErrs map[string]error) (readResult, error) {
+	out := readResult{state: module.State{}, handoffs: map[module.ClaimKey][]module.HandoffInterface{},
+		blocked: map[module.ClaimKey]module.Blocked{}}
 	fail := func(reason, msg string) readResult {
 		for _, c := range claims {
+			if routedHandoff(c.Handoff) {
+				out.blocked[c.Key] = module.Blocked{Reason: reason, Message: msg}
+			}
 			st := map[string]module.DestinationState{}
 			for _, d := range c.Destinations {
 				st[d.ID] = module.DestinationState{Generation: c.Generation, Reason: reason, Message: msg}
@@ -153,7 +164,7 @@ func (k *Kernel) read(vpc, node string, claims []module.Claim, m *model, errs ma
 		case workerv1alpha1.Handoff_HANDOFF_VETH_PAIR:
 			handoffCheck = k.pairCheck(h, m, c, vrfIdx, objs, &out)
 		case workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK, workerv1alpha1.Handoff_HANDOFF_SOCKET:
-			handoffCheck = k.routedCheck(h, m, c, vrfIdx, objs, errs, &out)
+			handoffCheck = k.routedCheck(h, m, c, table, vrfIdx, objs, errs, egressErrs, &out)
 		default:
 			handoffCheck = func(ck *check, _ netlink.Link) {
 				ck.unprogrammed(workerv1alpha1.ReasonHookUnsupported, "the handoff kind has no Local mechanism")
@@ -387,11 +398,19 @@ func (k *Kernel) pairCheck(h *host, m *model, c module.Claim, vrfIdx int, objs *
 	}
 }
 
+// routedHandoff reports whether h is carried by a routed link.
+func routedHandoff(h workerv1alpha1.Handoff) bool {
+	return h == workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK || h == workerv1alpha1.Handoff_HANDOFF_SOCKET
+}
+
 // routedCheck checks a routed link: it exists from the VPC's VRF to the
 // owner's current pod with Local's guard, and has carrier, which it has once
-// the pod brings its end up.
-func (k *Kernel) routedCheck(h *host, m *model, c module.Claim, vrfIdx int, objs *localprog.Objects,
-	errs map[string]error, out *readResult) func(*check, netlink.Link) {
+// the pod brings its end up. It also records in out.blocked why the link
+// does not carry the egress datapath, which the claim's Fabric destinations
+// need and its Local destinations do not: the kernel routes those from the
+// link either way.
+func (k *Kernel) routedCheck(h *host, m *model, c module.Claim, table uint32, vrfIdx int,
+	objs *localprog.Objects, errs, egressErrs map[string]error, out *readResult) func(*check, netlink.Link) {
 	var r routedWant
 	for _, rw := range m.routed {
 		if rw.key == c.Key {
@@ -415,34 +434,50 @@ func (k *Kernel) routedCheck(h *host, m *model, c module.Claim, vrfIdx int, objs
 				LinkLocal: linkLocal(l)},
 			module.HandoffInterface{Role: workerv1alpha1.HandoffRolePod, Name: r.pod, Ifindex: int32(got.podIndex)})
 	}
-	return func(ck *check, _ netlink.Link) {
-		if podErr != nil {
-			ck.unprogrammed(workerv1alpha1.ReasonHandoffInterfaceMissing, podErr.Error())
-			return
+	// linkFailure is the first failure that leaves the link unprogrammed.
+	var linkReason, linkMsg string
+	switch {
+	case podErr != nil:
+		linkReason, linkMsg = workerv1alpha1.ReasonHandoffInterfaceMissing, podErr.Error()
+	case errs[r.host] != nil:
+		err := errs[r.host]
+		linkReason, linkMsg = workerv1alpha1.ReasonProgrammingFailed, err.Error()
+		if errors.Is(err, ErrPodNotFound) || errors.Is(err, ErrPodHostNetwork) {
+			linkReason = workerv1alpha1.ReasonHandoffInterfaceMissing
 		}
-		if err := errs[r.host]; err != nil {
-			reason := workerv1alpha1.ReasonProgrammingFailed
-			if errors.Is(err, ErrPodNotFound) || errors.Is(err, ErrPodHostNetwork) {
-				reason = workerv1alpha1.ReasonHandoffInterfaceMissing
-			}
-			ck.unprogrammed(reason, err.Error())
-			return
-		}
-		if len(r.addrs) == 0 {
-			ck.unprogrammed(workerv1alpha1.ReasonDestinationAddressUnknown,
-				"the claim's attachment records no IPv6 address for the routed link's pod end")
-			return
-		}
-		if !present || l.Attrs().MasterIndex != vrfIdx {
-			ck.unprogrammed(workerv1alpha1.ReasonPending, "the routed link is not created yet")
-			return
-		}
+	case len(r.addrs) == 0:
+		linkReason, linkMsg = workerv1alpha1.ReasonDestinationAddressUnknown,
+			"the claim's attachment records no IPv6 address for the routed link's pod end"
+	case !present || l.Attrs().MasterIndex != vrfIdx:
+		linkReason, linkMsg = workerv1alpha1.ReasonPending, "the routed link is not created yet"
+	default:
 		var gv localprog.LocalLtGuardValue
 		if err := objs.Maps.Guard.Lookup(uint32(l.Attrs().Index), &gv); err != nil {
-			ck.unprogrammed(workerv1alpha1.ReasonPending, "Local has not programmed the routed link's guard yet")
+			linkReason, linkMsg = workerv1alpha1.ReasonPending, "Local has not programmed the routed link's guard yet"
+		}
+	}
+	guarded := false
+	if linkReason == "" {
+		guarded = k.guarded(l.Attrs().Index)
+	}
+	switch {
+	case linkReason != "":
+		out.blocked[c.Key] = module.Blocked{Reason: linkReason, Message: linkMsg}
+	case !guarded:
+		out.blocked[c.Key] = module.Blocked{Reason: workerv1alpha1.ReasonHandoffHookMissing,
+			Message: "Local's guard is not on " + r.host}
+	default:
+		if msg := k.egressBlock(r, l, table, egressErrs[r.host]); msg != "" {
+			out.blocked[c.Key] = module.Blocked{Reason: workerv1alpha1.ReasonRoutedLinkEgressUnavailable,
+				Message: msg}
+		}
+	}
+	return func(ck *check, _ netlink.Link) {
+		if linkReason != "" {
+			ck.unprogrammed(linkReason, linkMsg)
 			return
 		}
-		if ok, err := k.filterCurrent(l.Attrs().Index, filterLinkGuard); err != nil || !ok {
+		if !guarded {
 			ck.notReady(true, true, workerv1alpha1.ReasonHandoffHookMissing,
 				"Local's guard is not on "+r.host)
 		}
@@ -451,6 +486,18 @@ func (k *Kernel) routedCheck(h *host, m *model, c module.Claim, vrfIdx int, objs
 				fmt.Sprintf("the routed link %s has no carrier: the pod has not brought its end up", r.host))
 		}
 	}
+}
+
+// guarded reports whether the routed link host end ifindex carries the
+// guard this Kernel loaded: on its tcx ingress, or as Local's clsact filter
+// on a kernel without tcx.
+func (k *Kernel) guarded(ifindex int) bool {
+	st, err := tcxGuardFn(k.objs.Programs.LinkGuard, ifindex)
+	if errors.Is(err, ebpf.ErrNotSupported) {
+		ok, ferr := k.filterCurrent(ifindex, filterLinkGuard)
+		return ferr == nil && ok
+	}
+	return err == nil && st.Attached
 }
 
 // linkLocal returns l's IPv6 link-local address once the kernel has assigned

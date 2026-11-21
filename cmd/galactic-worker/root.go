@@ -55,9 +55,12 @@ const (
 
  Find more information at: https://www.datum.net/docs`
 
-	defaultMetricsPort    = 9104
-	defaultHealthPort     = 9105
-	cacheSyncTimeout      = 2 * time.Minute
+	defaultMetricsPort = 9104
+	defaultHealthPort  = 9105
+	cacheSyncTimeout   = 2 * time.Minute
+	// nodeLocatorTimeout bounds one read of this node's locator for the
+	// Local module.
+	nodeLocatorTimeout    = 10 * time.Second
 	envNodeName           = "NODE_NAME"
 	socketGroupNoneOption = -1
 )
@@ -191,7 +194,14 @@ func run(o *options) error {
 	defer func() { _ = shards.Close() }()
 	localKernel := &local.Kernel{PinDir: o.pinDir, LocalPinDir: o.localPinDir, DispatchDir: o.dispatchDir,
 		Shards: shards,
-		Pods:   pods}
+		Pods:   pods,
+		// A routed link's egress datapath encapsulates from this node's
+		// source SID, derived from its locator.
+		NodeLocator: func() (netip.Prefix, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), nodeLocatorTimeout)
+			defer cancel()
+			return nodelocator.Prefix(ctx, mgr.GetClient(), o.namespace, o.nodeName)
+		}}
 	defer func() { _ = localKernel.Close() }()
 	// Routed links and sockets need capabilities only a placement that
 	// enables them grants; without them those capabilities report why.

@@ -48,27 +48,30 @@ var ErrNoEnforcement = errors.New("traffic policy is on but this node cannot enf
 // back from the link before returning, so a caller that brings the link up
 // only after it returns never carries an unchecked packet.
 func RegisterHostLink(pinDir string, vrfTableID uint32, ifindex uint32, ifname string, addr netip.Addr) error {
-	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	return RegisterHostLinkKind(pinDir, vrfTableID, ifindex, ifname, addr, tpmap.KindTenant)
+}
+
+// RegisterHostLinkKind is RegisterHostLink with the link's traffic policy
+// kind. tpmap.KindTenant writes a tenant row as RegisterHostLink describes.
+// tpmap.KindInfra writes an infra row, which the datapath never evaluates,
+// replacing any tenant row the ifindex had; addr is then unused, and the
+// kernel's traffic policy preflight is not required. Any other kind is an
+// error.
+func RegisterHostLinkKind(pinDir string, vrfTableID uint32, ifindex uint32, ifname string, addr netip.Addr,
+	kind uint32) error {
+	if kind != tpmap.KindTenant && kind != tpmap.KindInfra {
+		return fmt.Errorf("register host link %q: unknown traffic policy kind %d", ifname, kind)
+	}
+	key, err := hostLinkVRFKey(pinDir, vrfTableID)
 	if err != nil {
-		return fmt.Errorf("open pinned eBPF uSID maps: %w", err)
+		return err
 	}
-	defer func() { _ = closer.Close() }()
-	entries, err := registry.VRF.List()
-	if err != nil {
-		return fmt.Errorf("list eBPF vrf_table: %w", err)
+	var active bool
+	if kind == tpmap.KindInfra {
+		err = putHostLinkInfra(pinDir, ifindex)
+	} else {
+		active, err = putHostLinkPolicy(pinDir, ifindex, addr)
 	}
-	var found bool
-	var key usidmap.VRFKey
-	argument := uint16(math.MaxUint16)
-	for _, e := range entries {
-		if e.VRFTableID == vrfTableID && e.Argument < argument {
-			key, argument, found = e.VRFKey, e.Argument, true
-		}
-	}
-	if !found {
-		return fmt.Errorf("%w: table %d", ErrVRFNotRegistered, vrfTableID)
-	}
-	active, err := putHostLinkPolicy(pinDir, ifindex, addr)
 	if err != nil {
 		return err
 	}
@@ -101,6 +104,158 @@ func RegisterHostLink(pinDir string, vrfTableID uint32, ifindex uint32, ifname s
 		return verifyEnforcement(ifname)
 	}
 	return nil
+}
+
+// hostLinkVRFKey returns the vrf_table key a host link in Linux VRF table
+// vrfTableID registers under: the table's entry with the lowest Argument. It
+// returns ErrVRFNotRegistered when the table has none.
+func hostLinkVRFKey(pinDir string, vrfTableID uint32) (usidmap.VRFKey, error) {
+	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
+	if err != nil {
+		return usidmap.VRFKey{}, fmt.Errorf("open pinned eBPF uSID maps: %w", err)
+	}
+	defer func() { _ = closer.Close() }()
+	entries, err := registry.VRF.List()
+	if err != nil {
+		return usidmap.VRFKey{}, fmt.Errorf("list eBPF vrf_table: %w", err)
+	}
+	var found bool
+	var key usidmap.VRFKey
+	argument := uint16(math.MaxUint16)
+	for _, e := range entries {
+		if e.VRFTableID == vrfTableID && e.Argument < argument {
+			key, argument, found = e.VRFKey, e.Argument, true
+		}
+	}
+	if !found {
+		return usidmap.VRFKey{}, fmt.Errorf("%w: table %d", ErrVRFNotRegistered, vrfTableID)
+	}
+	return key, nil
+}
+
+// putHostLinkInfra writes ifindex's infra traffic policy row, removing a
+// tenant row the ifindex had first. A node without the policy maps has none
+// to write.
+func putHostLinkInfra(pinDir string, ifindex uint32) error {
+	maps, err := tpmap.OpenPinned(pinDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("open pinned traffic policy maps: %w", err)
+	}
+	defer maps.Close()
+	var row prog.UsidTpIfaceValue
+	if err := maps.Interfaces.Lookup(ifindex, &row); err == nil && row.Kind == tpmap.KindInfra {
+		return nil
+	} else if err == nil {
+		if err := maps.RemoveInterface(ifindex); err != nil {
+			return err
+		}
+	}
+	return maps.PutInfra(ifindex)
+}
+
+// HostLinkRegistered reports whether ifindex, named ifname, carries
+// everything RegisterHostLinkKind writes for it under Linux VRF table
+// vrfTableID with traffic policy kind: its ifindex_vrf_table row naming the
+// table's vrf_table key, its ifindex_egress_kind_table row, a traffic policy
+// row of kind, the egress chain on its tc ingress and tp_deliver on its tc
+// egress. A table with no vrf_table entry reports false.
+func HostLinkRegistered(pinDir string, vrfTableID uint32, ifindex uint32, ifname string, kind uint32) (bool, error) {
+	key, err := hostLinkVRFKey(pinDir, vrfTableID)
+	if errors.Is(err, ErrVRFNotRegistered) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	table, closer, err := ifindexvrfmap.OpenPinned(pinDir)
+	if err != nil {
+		return false, fmt.Errorf("open pinned eBPF ifindex_vrf_table: %w", err)
+	}
+	row, ok, err := table.Get(ifindex)
+	_ = closer.Close()
+	if err != nil || !ok || row.Block != key.Block || row.Argument != key.Argument {
+		return false, err
+	}
+	kinds, kindCloser, err := ifindexvrfmap.OpenPinnedEgressKind(pinDir)
+	if err != nil {
+		return false, fmt.Errorf("open pinned eBPF ifindex_egress_kind_table: %w", err)
+	}
+	_, ok, err = kinds.Get(ifindex)
+	_ = kindCloser.Close()
+	if err != nil || !ok {
+		return false, err
+	}
+	maps, err := tpmap.OpenPinned(pinDir)
+	if err != nil {
+		return false, fmt.Errorf("open pinned traffic policy maps: %w", err)
+	}
+	var tp prog.UsidTpIfaceValue
+	err = maps.Interfaces.Lookup(ifindex, &tp)
+	maps.Close()
+	if errors.Is(err, ebpf.ErrKeyNotExist) || (err == nil && tp.Kind != kind) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read tp_iface_table[%d]: %w", ifindex, err)
+	}
+	if ok, err := attach.HasDeliver(ifname); err != nil || !ok {
+		return false, err
+	}
+	return attach.HasEgressChain(ifname)
+}
+
+// HostLinkPresent reports whether ifindex, named ifname, carries any row or
+// program RegisterHostLinkKind writes.
+func HostLinkPresent(pinDir string, ifindex uint32, ifname string) (bool, error) {
+	if ok, err := attach.HasAnyEgress(ifname); err != nil || ok {
+		return ok, err
+	}
+	if table, closer, err := ifindexvrfmap.OpenPinned(pinDir); err == nil {
+		_, ok, err := table.Get(ifindex)
+		_ = closer.Close()
+		if err != nil || ok {
+			return ok, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if kinds, closer, err := ifindexvrfmap.OpenPinnedEgressKind(pinDir); err == nil {
+		_, ok, err := kinds.Get(ifindex)
+		_ = closer.Close()
+		if err != nil || ok {
+			return ok, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	maps, err := tpmap.OpenPinned(pinDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer maps.Close()
+	var tp prog.UsidTpIfaceValue
+	err = maps.Interfaces.Lookup(ifindex, &tp)
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// DetachHostLink removes the egress programs RegisterHostLinkKind attached
+// to ifname and then every row UnregisterHostLink removes for ifindex. Call
+// it while the caller can still prove the ifindex is its own. A link that no
+// longer exists, and absent rows, are not errors.
+func DetachHostLink(pinDir string, ifindex uint32, ifname string) error {
+	if err := attach.DetachEgress(ifname); err != nil {
+		return fmt.Errorf("detach the egress datapath from %q: %w", ifname, err)
+	}
+	return UnregisterHostLink(pinDir, ifindex)
 }
 
 // putHostLinkPolicy writes ifindex's traffic policy row and addr as its
