@@ -22,6 +22,7 @@ import (
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/edge/maintenance"
+	"go.datum.net/galactic/internal/ownership"
 	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
@@ -230,6 +231,18 @@ func TestInUseVRFIsNotRemoved(t *testing.T) {
 	res = RemoveOrphanedVRFs(context.Background(), []string{intf.GenerateInterfaceNameVRF("a")}, unknown)
 	if res.Errors != 1 {
 		t.Fatalf("remove without a fence = %+v, want one error", res)
+	}
+}
+
+// TestWorkerOwnedVRFIsNotRemoved removes a VRF whose scope a galactic-worker
+// owns: the fence refuses, nothing runs, and the refusal is neither a removal
+// nor an error. Worker reclaims the VRF itself (docs/worker/ownership.md).
+func TestWorkerOwnedVRFIsNotRemoved(t *testing.T) {
+	edge := &edgeUsers{vpcs: map[string]struct{}{},
+		err: fmt.Errorf("%w: VPC a", ownership.ErrWorkerOwned)}
+	res := RemoveOrphanedVRFs(context.Background(), []string{intf.GenerateInterfaceNameVRF("a")}, edge)
+	if res.Errors != 0 || res.OrphanedVRFsRemoved != 0 || len(edge.reclaimed) != 0 {
+		t.Fatalf("remove = %+v, reclaims %v; want the VRF left to its galactic-worker", res, edge.reclaimed)
 	}
 }
 
