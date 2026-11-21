@@ -802,6 +802,36 @@ capture() {
   cap_wait
 }
 
+# diagnose W writes the routing state of both VPCs on both sides of the
+# routed links to logs/W/diag/: the pod's links, addresses, routes and
+# neighbors; dfw-worker's host VRF routes and neighbors, the host ends and
+# their tc filters; each VPC's egress_route_table rows; Worker's
+# advertisements; and Envoy's cluster stats.
+diagnose() {
+  local d="${OUT}/logs/$1/diag" v
+  mkdir -p "${d}"
+  in_pod "${PPID_POD}" ip -d link >"${d}/pod-links.txt" 2>&1
+  in_pod "${PPID_POD}" ip -6 addr >"${d}/pod-addrs.txt" 2>&1
+  in_pod "${PPID_POD}" ip -6 route show table all >"${d}/pod-routes.txt" 2>&1
+  in_pod "${PPID_POD}" ip -6 neigh >"${d}/pod-neigh.txt" 2>&1
+  in_pod "${PPID_POD}" ss -tnaie >"${d}/pod-sockets.txt" 2>&1
+  stats >"${d}/envoy-stats.txt" 2>&1
+  metrics >"${d}/sidecar-metrics.txt" 2>&1
+  for v in 80 81; do
+    docker exec "${NODE}" ip -6 route show vrf "${VRF[${v}]}" >"${d}/host-vrf-${v}-routes.txt" 2>&1
+    docker exec "${NODE}" ip -6 neigh show vrf "${VRF[${v}]}" >"${d}/host-vrf-${v}-neigh.txt" 2>&1
+    if [ -n "${HOST_END[${v}]}" ]; then
+      docker exec "${NODE}" ip -d link show dev "${HOST_END[${v}]}" >"${d}/host-end-${v}.txt" 2>&1
+      docker exec "${NODE}" tc filter show dev "${HOST_END[${v}]}" ingress >"${d}/host-end-${v}-tc.txt" 2>&1
+    fi
+    if sudo -n true 2>/dev/null; then
+      "${SCRIPT_DIR}/worker-fabric.sh" dump "${NODE}" "${v}" >"${d}/egress-${v}.txt" 2>&1
+    fi
+  done
+  advertisements 80 >"${d}/advertisements-80.json" 2>&1
+  advertisements 81 >"${d}/advertisements-81.json" 2>&1
+}
+
 # counts W POINT prints POINT's request and reply counts per path as JSON.
 counts() {
   python3 -I "${SCRIPT_DIR}/envoy-pcap.py" --gateway "${GW}" --nonces "${OUT}/logs/$1/nonces.tsv" \
@@ -1005,9 +1035,15 @@ done
 if [ "${MODE}" = probe ]; then
   window probe
   N=1
+  capture probe
   for p in "${PATHS[@]}"; do
     fresh probe "${p}"
   done
+  cap_stop
+  # A probe that fails keeps what a diagnosis needs.
+  if [ "${FAILED}" != 0 ]; then
+    diagnose probe
+  fi
   exit 0
 fi
 
