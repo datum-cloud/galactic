@@ -105,6 +105,9 @@ type Kernel struct {
 	LocalPinDir string
 	// DispatchDir is the XDP dispatcher's pin directory.
 	DispatchDir string
+	// TCXAhead reports the first tcx ingress program on an interface, which
+	// runs before local_rx; nil means attach.TCXIngressAhead.
+	TCXAhead func(ifindex int) (ebpf.ProgramID, string, error)
 	// Pods opens a routed link owner's pod network namespace.
 	Pods PodNetns
 	// LinkMTU is the MTU of the links Local creates; DefaultLinkMTU when 0.
@@ -224,6 +227,14 @@ func (k *Kernel) program(name string) *ebpf.Program {
 
 // filterCurrent reports whether ifindex carries the Local filter name with
 // the program this Kernel loaded.
+// tcxAhead is TCXAhead, or attach.TCXIngressAhead when it is nil.
+func (k *Kernel) tcxAhead(ifindex int) (ebpf.ProgramID, string, error) {
+	if k.TCXAhead != nil {
+		return k.TCXAhead(ifindex)
+	}
+	return attach.TCXIngressAhead(ifindex)
+}
+
 func (k *Kernel) filterCurrent(ifindex int, name string) (bool, error) {
 	got, id, ok, err := attach.LocalFilter(ifindex)
 	if err != nil || !ok {
@@ -655,16 +666,24 @@ type receiver struct {
 	name string
 	idx  int
 	mtu  int
+	// reply is the ifindex a recorded flow's replies leave through: the
+	// bond for a bond member, which owns the node's address and routes,
+	// and the device itself otherwise (lt_rx).
+	reply int
 	// slotErr is nil when a live public slot covers the device, or the
 	// device it receives through.
 	slotErr error
 }
 
-// receiverDevices returns the devices local_rx belongs on: for each
-// interface whose XDP dispatcher has the public role, the device its traffic
-// reaches tc on. That is its bond master when it is a bond member, and the
-// VLAN devices above that when there are any, since native XDP takes no VLAN
-// device and the dispatcher runs on the lower one (contract amendment).
+// receiverDevices returns the devices local_rx belongs on: each interface
+// whose XDP dispatcher has the public role, a bond member included, so
+// local_rx runs at that interface's tc ingress, before the bond hands the
+// packet to its master. A cluster CNI attaches to a bond master through tcx,
+// which the kernel runs before every clsact filter, and would keep local_rx
+// from ever seeing the packet there (#1438). Where VLAN devices sit above the
+// interface, or above its bond, they are the receivers instead, since native
+// XDP takes no VLAN device and the dispatcher runs on the lower one
+// (contract amendment).
 func (k *Kernel) receiverDevices(h *host) ([]receiver, error) {
 	in, err := xdpdispatch.Inspect(k.DispatchDir)
 	if errors.Is(err, xdpdispatch.ErrNoDispatcher) {
@@ -685,23 +704,28 @@ func (k *Kernel) receiverDevices(h *host) ([]receiver, error) {
 			continue
 		}
 		slotErr := in.Claimed(ifx, xdpdispatch.SlotGatewayLB)
-		target := l
+		lower := l
 		if m := h.byIdx[l.Attrs().MasterIndex]; m != nil && m.Type() == linkBond {
-			target = m
+			lower = m
 		}
 		var vlans []netlink.Link
 		for _, c := range h.all {
-			if c.Type() == linkVLAN && c.Attrs().ParentIndex == target.Attrs().Index {
+			if c.Type() == linkVLAN && c.Attrs().ParentIndex == lower.Attrs().Index {
 				vlans = append(vlans, c)
 			}
 		}
 		if len(vlans) == 0 {
-			vlans = []netlink.Link{target}
+			vlans = []netlink.Link{l}
 		}
 		for _, d := range vlans {
+			reply := d.Attrs().Index
+			if d == l {
+				reply = lower.Attrs().Index
+			}
 			r := byIdx[d.Attrs().Index]
 			if r == nil {
-				r = &receiver{name: d.Attrs().Name, idx: d.Attrs().Index, mtu: d.Attrs().MTU, slotErr: slotErr}
+				r = &receiver{name: d.Attrs().Name, idx: d.Attrs().Index, mtu: d.Attrs().MTU, reply: reply,
+					slotErr: slotErr}
 				byIdx[d.Attrs().Index] = r
 			} else if slotErr == nil {
 				r.slotErr = nil
@@ -714,6 +738,67 @@ func (k *Kernel) receiverDevices(h *host) ([]receiver, error) {
 	}
 	slices.SortFunc(out, func(a, b receiver) int { return strings.Compare(a.name, b.name) })
 	return out, nil
+}
+
+// leftReceivers returns every device an earlier Worker may have left
+// local_rx on: any outside a VRF, a bond member included, since one can be a
+// receiving device.
+func leftReceivers(h *host) map[string]struct{} {
+	prev := map[string]struct{}{}
+	for _, l := range h.all {
+		if m := h.byIdx[l.Attrs().MasterIndex]; (m != nil && m.Type() == linkVRF) ||
+			l.Type() == linkTunTap || l.Type() == linkVRF {
+			continue
+		}
+		if name, _, ok, err := attach.LocalFilter(l.Attrs().Index); err == nil && ok && name == filterRx {
+			prev[l.Attrs().Name] = struct{}{}
+		}
+	}
+	return prev
+}
+
+// ensureReplyRow writes r's lt_rx row unless it is current.
+func (k *Kernel) ensureReplyRow(m *ebpf.Map, r receiver, dry bool) error {
+	key := uint32(r.idx) //nolint:gosec // an ifindex
+	var cur localprog.LocalLtRxValue
+	if err := m.Lookup(key, &cur); err == nil && int(cur.ReplyIfindex) == r.reply {
+		return nil
+	}
+	if dry {
+		return &dirtyError{detail: fmt.Sprintf("lt_rx row of %s is not current", r.name), planned: true}
+	}
+	v := localprog.LocalLtRxValue{ReplyIfindex: uint32(r.reply)} //nolint:gosec // an ifindex
+	if err := m.Put(key, v); err != nil {
+		return fmt.Errorf("write lt_rx row of %s: %w", r.name, err)
+	}
+	return nil
+}
+
+// pruneReplyRows deletes every lt_rx row but those of rs while want, and
+// every row otherwise.
+func (k *Kernel) pruneReplyRows(m *ebpf.Map, rs []receiver, want, dry bool) error {
+	keep := map[uint32]bool{}
+	if want {
+		for _, r := range rs {
+			keep[uint32(r.idx)] = true //nolint:gosec // an ifindex
+		}
+	}
+	keys, err := u32Keys(m)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if keep[key] {
+			continue
+		}
+		if dry {
+			return &dirtyError{detail: fmt.Sprintf("lt_rx row of ifindex %d is stale", key), planned: true}
+		}
+		if err := m.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return fmt.Errorf("delete lt_rx row of ifindex %d: %w", key, err)
+		}
+	}
+	return nil
 }
 
 // ensureReceivers attaches local_rx to every receiving device when want, and
@@ -751,16 +836,7 @@ func (k *Kernel) ensureReceivers(want, dry bool) error {
 	swept := k.swept
 	k.mu.Unlock()
 	if !swept {
-		// An earlier Worker may have left local_rx anywhere outside a VRF.
-		prev = map[string]struct{}{}
-		for _, l := range h.all {
-			if l.Attrs().MasterIndex != 0 || l.Type() == linkTunTap || l.Type() == linkVRF {
-				continue
-			}
-			if name, _, ok, err := attach.LocalFilter(l.Attrs().Index); err == nil && ok && name == filterRx {
-				prev[l.Attrs().Name] = struct{}{}
-			}
-		}
+		prev = leftReceivers(h)
 	}
 	now := map[string]struct{}{}
 	for _, r := range rs {
@@ -777,6 +853,12 @@ func (k *Kernel) ensureReceivers(want, dry bool) error {
 			}
 			return err
 		}
+		if err := k.ensureReplyRow(objs.Maps.Rx, r, dry); err != nil {
+			return err
+		}
+	}
+	if err := k.pruneReplyRows(objs.Maps.Rx, rs, want, dry); err != nil {
+		return err
 	}
 	for name := range prev {
 		if _, ok := now[name]; ok {

@@ -215,6 +215,22 @@ struct {
 	__type(value, struct lt_flow_value);
 } lt_flow SEC(".maps");
 
+// lt_rx_value is a receiving device local_rx runs on, keyed by its ifindex:
+// the device a recorded flow's replies leave through. A bond member's replies
+// leave through its bond, which owns the node's address and routes; a member
+// has neither. A device with no row replies through itself.
+struct lt_rx_value {
+	__u32 reply_ifindex;
+	__u32 pad;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);
+	__type(key, __u32);
+	__type(value, struct lt_rx_value);
+} lt_rx SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, LT_STAT_COUNT);
@@ -560,7 +576,10 @@ int local_rx(struct __sk_buff *skb)
 	lt_ports(skb, ip6, &fk.peer_port, &fk.local_port);
 	__builtin_memcpy(fk.local, ip6->daddr, 16);
 	__builtin_memcpy(fk.peer, ip6->saddr, 16);
-	fv.rx_ifindex = skb->ifindex;
+	__u32 rx_if = skb->ifindex;
+	struct lt_rx_value *rv = bpf_map_lookup_elem(&lt_rx, &rx_if);
+
+	fv.rx_ifindex = rv ? rv->reply_ifindex : rx_if;
 
 	if (!lt_fits(skb, tap)) {
 		lt_count(LT_STAT_RX_TOO_BIG);

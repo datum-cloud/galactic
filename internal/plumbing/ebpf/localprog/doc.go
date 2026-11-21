@@ -13,4 +13,4 @@
 // packet to local_rx.
 package localprog
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -Wno-unused-function -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type lt_tap_value -type lt_link_value -type lt_guest_key -type lt_guest_value -type lt_pair_value -type lt_guard_value -type lt_flow_key -type lt_flow_value Local local.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cflags "-O2 -g -Wall -Wno-unused-function -idirafter /usr/include/x86_64-linux-gnu -idirafter /usr/include/aarch64-linux-gnu" -target bpfel,bpfeb -type lt_tap_value -type lt_link_value -type lt_guest_key -type lt_guest_value -type lt_pair_value -type lt_guard_value -type lt_flow_key -type lt_flow_value -type lt_rx_value Local local.c
