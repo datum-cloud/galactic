@@ -238,3 +238,30 @@ func TestAuthenticatorOverUnixSocket(t *testing.T) {
 		}
 	}
 }
+
+// TestAllowlistEgressShardClaims grants naming an EgressShard as a claim's
+// attachment only to a ServiceAccount the allowlist marks.
+func TestAllowlistEgressShardClaims(t *testing.T) {
+	a, err := ParseAllowlist([]byte(`serviceAccounts:
+  - serviceAccount: galactic-system/galactic-nat
+    capabilities: [local.veth_pair, fabric.srv6]
+    egressShardClaims: true
+  - serviceAccount: galactic-system/galactic-gateway
+    capabilities: [local.tap]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.EgressShardClaims("galactic-system/galactic-nat") {
+		t.Error("galactic-nat may not name an EgressShard")
+	}
+	for _, sa := range []string{"galactic-system/galactic-gateway", "galactic-system/unlisted"} {
+		if a.EgressShardClaims(sa) {
+			t.Errorf("%s may name an EgressShard", sa)
+		}
+	}
+	var none *Allowlist
+	if none.EgressShardClaims("galactic-system/galactic-nat") {
+		t.Error("a nil allowlist grants EgressShard claims")
+	}
+}

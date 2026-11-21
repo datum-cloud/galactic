@@ -783,6 +783,11 @@ tasks:
     cmds:
       - LAB={{.LAB}} ./scripts/verify-nat-active-active.sh
 
+  "verify:nat-local-shard":
+    desc: NAT66/NAT64 through dfw-worker2's own shard (Local) and dfw-worker3's (Fabric) for the same VPC; needs task destroy and task deploy after (resources/nat-local/)
+    cmds:
+      - ./scripts/verify-nat-local.sh
+
   "verify:nat-sharding":
     desc: Verify every edge node's EgressShard is programmed and advertised
     cmds:

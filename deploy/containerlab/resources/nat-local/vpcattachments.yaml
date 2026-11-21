@@ -1,0 +1,30 @@
+# Created before publish-attachments.sh, which then only writes status: the
+# Local pair returns only to the addresses an attachment records.
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: vpc-a-edge
+  namespace: ns80
+spec:
+  vpc:
+    name: "80"
+  interface:
+    name: eth0
+    mode: Netns
+    addresses:
+      - fd20:80:ff01::3:0:0/96
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: VPCAttachment
+metadata:
+  name: vpc-b-edge
+  namespace: ns80
+spec:
+  vpc:
+    name: "81"
+  interface:
+    name: eth0
+    mode: Netns
+    addresses:
+      - fd20:80:ff01::3:0:0/96

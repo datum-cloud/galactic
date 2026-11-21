@@ -82,7 +82,7 @@ func (metaAuth) Authenticate(ctx context.Context) (auth.Caller, error) {
 		return auth.Caller{}, refusal.New(codes.PermissionDenied, workerv1alpha1.ReasonCapabilityNotAllowed,
 			"not listed", nil)
 	}
-	c := auth.Caller{ServiceAccount: v[0], Capabilities: caps}
+	c := auth.Caller{ServiceAccount: v[0], Capabilities: caps, EgressShardClaims: v[0] == natSA}
 	if pod := md.Get(podMD); len(pod) == 1 {
 		c.PodUID = pod[0]
 	}

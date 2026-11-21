@@ -51,6 +51,9 @@ type Caller struct {
 	PodName        string
 	// Capabilities are the capabilities the allowlist grants.
 	Capabilities []string
+	// EgressShardClaims reports that the allowlist lets the caller name an
+	// EgressShard as a veth_pair claim's attachment.
+	EgressShardClaims bool
 }
 
 // Allowed reports whether the caller may use capability.
@@ -162,6 +165,7 @@ func (a *Authenticator) Authenticate(ctx context.Context) (Caller, error) {
 			"ServiceAccount "+c.ServiceAccount+" is not in the allowlist", nil)
 	}
 	c.Capabilities = caps
+	c.EgressShardClaims = a.Allowlist.EgressShardClaims(c.ServiceAccount)
 	return c, nil
 }
 

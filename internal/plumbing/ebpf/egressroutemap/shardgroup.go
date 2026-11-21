@@ -226,6 +226,13 @@ func (s ShardState) Active() bool { return s.Alive && !s.Draining }
 type GroupResult struct {
 	// Changed reports that Apply published a new snapshot.
 	Changed bool
+	// LocalView reports that the group has a local view, published for the
+	// VPCs with an egress_local_shard row: a local candidate exists and the
+	// table has a local view store.
+	LocalView bool
+	// LocalChanged reports that Apply published a new local view, or
+	// disabled the one it had.
+	LocalChanged bool
 	// Generation is the group's publication count after Apply.
 	Generation uint32
 	// Shards is every candidate, ordered by base SID.
@@ -295,6 +302,10 @@ type GroupStore interface {
 // cannot meet a pin still holding it.
 type ShardGroupTable struct {
 	store GroupStore
+	// local, when set, holds each group's local view
+	// (egress_shard_local_groups): the same members, slots and generations,
+	// built as if this node's own shard resolved. Nil publishes none.
+	local GroupStore
 
 	mu        sync.Mutex
 	highWater [MaxShardGroups]uint32
@@ -304,6 +315,13 @@ type ShardGroupTable struct {
 // OpenPinnedShardGroupTable; tests pass a fake.
 func NewShardGroupTable(store GroupStore) *ShardGroupTable {
 	return &ShardGroupTable{store: store}
+}
+
+// WithLocalView makes g publish each group's local view into local, and
+// returns g. Without it Apply publishes the base view alone.
+func (g *ShardGroupTable) WithLocalView(local GroupStore) *ShardGroupTable {
+	g.local = local
+	return g
 }
 
 // BaseShardSID returns sid with its Argument and Slot cleared: the identity a
@@ -504,9 +522,10 @@ func (g *ShardGroupTable) Apply(groupID uint32, policy GroupPolicy, candidates [
 	hold := policy.Class.NAT64 && anyPrimaryAlive(wanted, resolved)
 
 	var (
-		value    prog.UsidEgressShardGroupValue
-		result   = GroupResult{Generation: current.Generation}
-		backends []maglev.Backend
+		value       prog.UsidEgressShardGroupValue
+		result      = GroupResult{Generation: current.Generation}
+		backends    []maglev.Backend
+		generations = make(map[netip.Addr]uint32, len(wanted))
 	)
 	for _, c := range wanted {
 		slot := assignment[c.sid]
@@ -538,6 +557,7 @@ func (g *ShardGroupTable) Apply(groupID uint32, policy GroupPolicy, candidates [
 			member.Flags |= shardFlagHeld
 		}
 		value.Shards[slot] = member
+		generations[c.sid] = member.Generation
 
 		state := ShardState{
 			SID: c.sid, Slot: slot, Generation: member.Generation, Alive: alive,
@@ -558,16 +578,128 @@ func (g *ShardGroupTable) Apply(groupID uint32, policy GroupPolicy, candidates [
 	}
 	value.NextSlotGeneration = alloc.next
 	value.Generation = current.Generation
-	if value == current {
+	if value != current {
+		value.Generation = current.Generation + 1
+		if err := g.store.Publish(groupID, value); err != nil {
+			return result, fmt.Errorf("egressroutemap: publish shard group %d: %w", groupID, err)
+		}
+		result.Generation = value.Generation
+		result.Changed = true
+	}
+	if g.local == nil {
 		return result, nil
 	}
-	value.Generation = current.Generation + 1
-	if err := g.store.Publish(groupID, value); err != nil {
-		return result, fmt.Errorf("egressroutemap: publish shard group %d: %w", groupID, err)
+	view, changed, err := g.applyLocalView(groupID, policy, wanted, assignment, generations, resolved, alloc.next)
+	result.LocalView, result.LocalChanged = view, changed
+	if err != nil {
+		return result, err
 	}
-	result.Generation = value.Generation
-	result.Changed = true
 	return result, nil
+}
+
+// applyLocalView publishes groupID's local view: the members, slots and
+// generations Apply just gave the base view, with each local candidate
+// resolved as alive. It has no link or L2 addresses, since the datapath
+// never encapsulates toward it, and the NAT64 standby hold counts it as a
+// primary that resolved. With no local candidate the local view is disabled,
+// so the datapath reads the base view. It reports whether a local view is
+// published and whether anything changed. Called with g.mu held.
+func (g *ShardGroupTable) applyLocalView(
+	groupID uint32, policy GroupPolicy, wanted []candidate, assignment map[netip.Addr]int,
+	generations map[netip.Addr]uint32, resolved map[netip.Addr]resolution, nextGeneration uint32,
+) (bool, bool, error) {
+	current, _, err := g.local.Load(groupID)
+	if err != nil {
+		return false, false, fmt.Errorf("egressroutemap: read local view of shard group %d: %w", groupID, err)
+	}
+	hasLocal := false
+	for _, c := range wanted {
+		hasLocal = hasLocal || c.local
+	}
+	if !hasLocal {
+		if current.Flags&groupFlagEnabled == 0 {
+			return false, false, nil
+		}
+		disabled := disabledValue(current, nextGeneration)
+		disabled.Generation = current.Generation + 1
+		if err := g.local.Publish(groupID, disabled); err != nil {
+			return false, false, fmt.Errorf("egressroutemap: disable local view of shard group %d: %w", groupID, err)
+		}
+		return false, true, nil
+	}
+
+	resolvedHere := func(c candidate) bool { return c.local || resolved[c.sid].err == nil }
+	hold := false
+	if policy.Class.NAT64 {
+		for _, c := range wanted {
+			if !c.standby && resolvedHere(c) {
+				hold = true
+			}
+		}
+	}
+	var (
+		value    prog.UsidEgressShardGroupValue
+		backends []maglev.Backend
+	)
+	for _, c := range wanted {
+		slot := assignment[c.sid]
+		member := prog.UsidEgressShardMember{Sid: c.sid.As16(), Generation: generations[c.sid]}
+		held := hold && c.standby && resolvedHere(c)
+		alive := resolvedHere(c) && !held
+		if alive {
+			member.Flags |= shardFlagAlive
+			if !c.local {
+				hop := resolved[c.sid].hop
+				member.LinkIfindex = uint32(hop.link) //nolint:gosec // a kernel ifindex
+				copy(member.Dmac[:], hop.dmac)
+				copy(member.Smac[:], hop.smac)
+			}
+		}
+		if c.draining {
+			member.Flags |= shardFlagDraining
+		}
+		if c.local {
+			member.Flags |= shardFlagLocal
+		}
+		if c.standby && policy.Class.NAT64 {
+			member.Flags |= shardFlagStandby
+		}
+		if held {
+			member.Flags |= shardFlagHeld
+		}
+		value.Shards[slot] = member
+		if alive && !c.draining {
+			backends = append(backends, shardBackend{sid: c.sid, slot: slot})
+		}
+	}
+	if err := fillGroupValue(&value, policy, len(wanted), backends); err != nil {
+		return true, false, err
+	}
+	value.NextSlotGeneration = nextGeneration
+	value.Generation = current.Generation
+	if value == current {
+		return true, false, nil
+	}
+	value.Generation = current.Generation + 1
+	if err := g.local.Publish(groupID, value); err != nil {
+		return true, false, fmt.Errorf("egressroutemap: publish local view of shard group %d: %w", groupID, err)
+	}
+	return true, true, nil
+}
+
+// disabledValue is current with no members and traffic off, keeping its
+// class and generation counter.
+func disabledValue(current prog.UsidEgressShardGroupValue, nextGeneration uint32) prog.UsidEgressShardGroupValue {
+	disabled := prog.UsidEgressShardGroupValue{
+		Generation:         current.Generation,
+		NextSlotGeneration: max(current.NextSlotGeneration, nextGeneration),
+		ClassKind:          current.ClassKind,
+		ClassPrefix:        current.ClassPrefix,
+	}
+	for i := range disabled.Maglev {
+		disabled.Maglev[i] = shardSlotNone
+	}
+	return disabled
 }
 
 // Close marks groupID as being retired, for the move back to ordered mode. The
@@ -620,17 +752,27 @@ func (g *ShardGroupTable) Disable(groupID uint32) (bool, error) {
 	if err != nil || !ok {
 		return false, err
 	}
-	disabled := prog.UsidEgressShardGroupValue{
-		Generation:         current.Generation,
-		NextSlotGeneration: max(current.NextSlotGeneration, g.highWater[groupID]),
-		ClassKind:          current.ClassKind,
-		ClassPrefix:        current.ClassPrefix,
+	changed := false
+	// The local view goes first: a packet that still reads it while the
+	// base view is being disabled is placed as before, never on a member
+	// the base view has already dropped.
+	if g.local != nil {
+		lv, _, err := g.local.Load(groupID)
+		if err != nil {
+			return false, fmt.Errorf("egressroutemap: read local view of shard group %d: %w", groupID, err)
+		}
+		if lv.Flags&groupFlagEnabled != 0 {
+			ld := disabledValue(lv, g.highWater[groupID])
+			ld.Generation = lv.Generation + 1
+			if err := g.local.Publish(groupID, ld); err != nil {
+				return false, fmt.Errorf("egressroutemap: disable local view of shard group %d: %w", groupID, err)
+			}
+			changed = true
+		}
 	}
-	for i := range disabled.Maglev {
-		disabled.Maglev[i] = shardSlotNone
-	}
+	disabled := disabledValue(current, g.highWater[groupID])
 	if disabled == current {
-		return false, nil
+		return changed, nil
 	}
 	disabled.Generation = current.Generation + 1
 	if err := g.store.Publish(groupID, disabled); err != nil {
