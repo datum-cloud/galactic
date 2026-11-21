@@ -95,12 +95,13 @@ func TestKernelLocal_AttachesNativePinnedAndPrunes(t *testing.T) {
 		t.Fatalf("newKernelLocal: %v", err)
 	}
 
-	nat, tenant := addVeth(t, "gn0", "gt0")
+	nat, tenant := addVeth(t, testNATEnd, testTenantEnd)
 	if peer, err := vethPeer(nat, netlink.LinkByIndex); err != nil || peer.Attrs().Index != tenant.Attrs().Index {
 		t.Fatalf("vethPeer(gn0) = %v, %v; want gt0", peer, err)
 	}
 	sid := netip.MustParseAddr("fc00:0:1:1:123::")
-	target := localTarget{VPC: "A", NATName: "gn0", NATIfindex: nat.Attrs().Index, TenantName: "gt0", TenantSID: sid}
+	target := localTarget{VPC: "A", NATName: testNATEnd, NATIfindex: nat.Attrs().Index, TenantName: testTenantEnd,
+		TenantSID: sid}
 	if err := k.Program(target); err != nil {
 		t.Fatalf("Program: %v", err)
 	}
@@ -128,7 +129,7 @@ func TestKernelLocal_AttachesNativePinnedAndPrunes(t *testing.T) {
 	if err := netlink.LinkDel(nat); err != nil {
 		t.Fatalf("delete pair: %v", err)
 	}
-	nat2, _ := addVeth(t, "gn0", "gt0")
+	nat2, _ := addVeth(t, testNATEnd, testTenantEnd)
 	target2 := target
 	target2.NATIfindex = nat2.Attrs().Index
 	if err := k.Program(target2); err != nil {
@@ -152,6 +153,12 @@ func TestKernelLocal_AttachesNativePinnedAndPrunes(t *testing.T) {
 		t.Error("NAT end still runs the program after Prune")
 	}
 }
+
+// testNATEnd and testTenantEnd name a test pair's two ends.
+const (
+	testNATEnd    = "gn0"
+	testTenantEnd = "gt0"
+)
 
 // testWorkerSocket is a Worker socket path; nothing listens on it.
 const testWorkerSocket = "/run/worker.sock"
@@ -275,8 +282,8 @@ func TestSettleLocalDelivery_RemovesPinnedState(t *testing.T) {
 		ParentIndex: lower.Attrs().Index}, VlanId: 42}); err != nil {
 		t.Fatalf("add VLAN: %v", err)
 	}
-	nat, _ := addVeth(t, "gn0", "gt0")
-	target := localTarget{VPC: "A", NATName: "gn0", NATIfindex: nat.Attrs().Index, TenantName: "gt0",
+	nat, _ := addVeth(t, testNATEnd, testTenantEnd)
+	target := localTarget{VPC: "A", NATName: testNATEnd, NATIfindex: nat.Attrs().Index, TenantName: testTenantEnd,
 		TenantSID: netip.MustParseAddr("fc00:0:1:1:123::")}
 	if err := k.Program(target); err != nil {
 		t.Fatalf("Program: %v", err)
@@ -350,7 +357,7 @@ const xdpAttachedDrv = 1
 func TestVethPeer(t *testing.T) {
 	link := func(idx, peer, netnsid int) netlink.Link {
 		attrs := netlink.NewLinkAttrs()
-		attrs.Name, attrs.Index, attrs.ParentIndex, attrs.NetNsID = "gn0", idx, peer, netnsid
+		attrs.Name, attrs.Index, attrs.ParentIndex, attrs.NetNsID = testNATEnd, idx, peer, netnsid
 		return &netlink.Veth{LinkAttrs: attrs}
 	}
 	links := map[int]netlink.Link{10: link(10, 9, -1), 11: link(11, 12, -1)}
