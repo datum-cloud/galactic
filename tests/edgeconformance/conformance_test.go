@@ -1443,7 +1443,6 @@ func rowGC(t *testing.T, l *lab, a *side) {
 	l.reachable(t, a, computeNode)
 }
 
-// gcInterval reads galactic-router's GC interval from its DaemonSet.
 // edgeAgentDaemonSet is galactic-edge's DaemonSet in systemNS.
 const edgeAgentDaemonSet = "galactic-edge"
 
@@ -1466,6 +1465,7 @@ func (l *lab) edgeUsesWorker(t *testing.T) bool {
 	return false
 }
 
+// gcInterval reads galactic-router's GC interval from its DaemonSet.
 func (l *lab) gcInterval(t *testing.T) time.Duration {
 	t.Helper()
 	var ds appsv1.DaemonSet
