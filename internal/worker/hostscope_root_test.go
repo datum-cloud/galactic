@@ -677,6 +677,72 @@ func TestHostScopeTwoVPCsSameGuestIP(t *testing.T) {
 	f.probeSockets("reclaim the unused VPC")
 }
 
+// TestWorkerReclaimsOrphanedVRF plants a bare VRF in the host namespace, as
+// the MASQUE conformance row's canary does: no claim, no BGPVRFInstance, no
+// link and a table Galactic never allocates. Worker takes its scope, so
+// galactic-router's GC leaves it to Worker, and Worker removes it through
+// the real Kernel.Reclaim once it has gone unused for HostGrace.
+func TestWorkerReclaimsOrphanedVRF(t *testing.T) {
+	const vpc = "vpcC"
+	f := newHostFixture(t)
+	e := f.e
+	e.start()
+	e.idle()
+
+	name := intf.GenerateInterfaceNameVRF(vpc)
+	f.in(func() error {
+		l := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: name}, Table: 0xffff0}
+		if err := netlink.LinkAdd(l); err != nil {
+			return err
+		}
+		return netlink.LinkSetUp(l)
+	})
+	present := func() bool {
+		var ok bool
+		f.in(func() error {
+			_, err := vrf.TableID(vpc)
+			if errors.Is(err, vrf.ErrNotFound) {
+				return nil
+			}
+			ok = err == nil
+			return err
+		})
+		return ok
+	}
+	// The link event Worker subscribes to in production.
+	e.w.HostChanged(vpc)
+	e.idle()
+	if r := e.fenceOwner(vpc); r.Owner != e.w.Owner() {
+		t.Fatalf("scope owner = %q, want this Worker", r.Owner)
+	}
+
+	// Within the grace, galactic-router's GC refuses the Worker-owned scope
+	// and Worker keeps the VRF.
+	f.in(func() error {
+		res := gc.RunGC(context.Background(), f.k8s, hsNamespace, node, f.guard)
+		if res.Errors != 0 || res.OrphanedVRFsRemoved != 0 {
+			return fmt.Errorf("GC pass = %+v, want the VRF left to Worker", res)
+		}
+		return nil
+	})
+	time.Sleep(2 * e.cfg.HostGrace)
+	e.idle()
+	if !present() {
+		t.Fatal("the VRF went before its grace passed")
+	}
+
+	// Past the grace, Worker reclaims it.
+	e.clock.Advance(time.Hour)
+	e.eventually("Worker reclaimed the orphaned VRF", func() bool { return !present() })
+	e.idle()
+	e.w.mu.Lock()
+	_, tracked := e.w.scopes[vpc]
+	e.w.mu.Unlock()
+	if tracked {
+		t.Fatal("scope still tracked after Worker reclaimed its VRF")
+	}
+}
+
 // TestAttachWithWorkerDown attaches a workload while no Worker runs, first on
 // a scope an earlier incarnation owned and then on one it left between Fence
 // and Adopt. Both ADDs succeed, the second once a Worker takes the scope
