@@ -191,10 +191,14 @@ tr1_routes() {
 }
 # tr1_via GATEWAY FAMILY counts tr1's next hops toward GATEWAY among them.
 tr1_via() {
-  local a routes
-  if [ "$2" = 6 ]; then read -r a _ <<<"${UPLINK6[$1]}"; else read -r a _ <<<"${UPLINK4[$1]}"; fi
+  # tr1 learns the IPv6 site prefix with link-local next hops (via fe80::...
+  # dev bondN), so match the next hop's device, tr1's bond toward the edge
+  # node, rather than the edge node's global address. IPv4 next hops carry
+  # the same device.
+  local d routes
+  if [ "$2" = 6 ]; then read -r _ d <<<"${UPLINK6[$1]}"; else read -r _ d <<<"${UPLINK4[$1]}"; fi
   routes=$(tr1_routes "$2")
-  grep -cE "via ${a//./\\.}( |\$)" <<<"${routes}" || true
+  grep -cE "via [^ ]+ dev ${d}( |\$)" <<<"${routes}" || true
 }
 
 case "${1:-}" in
