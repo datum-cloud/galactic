@@ -25,6 +25,10 @@
 # so this check leaves the lab needing task destroy and task deploy. It
 # restores the egress mode, the drain and galactic-nat's manifest, and stops
 # Worker, on exit.
+#
+# NAT_LOCAL_ONLY=hashed-switch runs the setup and then only the switch to
+# hashed mode, through galactic-cni's rollout and the groups taking every
+# route, before the usual clean-up: a quick probe of that switch.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -567,6 +571,9 @@ wait_true "remote-host's UDP echo servers on port ${ECHO_PORT} are not both list
 
 # --- 2. ordered: the local shard --------------------------------------------------------
 
+# The probe goes straight to the hashed-mode switch.
+if [ "${NAT_LOCAL_ONLY:-}" != hashed-switch ]; then
+
 log "2. ordered mode: every family and protocol leaves from ${EDGE}'s own shard"
 for g in "${GUESTS[@]}"; do tuple_from "${g}" "${L6}" >/dev/null; done
 fwd0=$(nat_metric_sum 'galactic_nat_local_packets_total{stat="forward"}')
@@ -586,6 +593,7 @@ ret1=$(nat_metric_sum 'galactic_nat_local_packets_total{stat="return"}')
 [ "${fwd1%.*}" -gt "${fwd0%.*}" ] && [ "${ret1%.*}" -gt "${ret0%.*}" ] ||
   die "galactic-nat counted no Local forwards (${fwd0}->${fwd1}) or returns (${ret0}->${ret1})"
 echo "    Local forwards ${fwd0}->${fwd1}, returns ${ret0}->${ret1}"
+fi
 
 # --- 3. hashed: local and remote shards -------------------------------------------------
 
@@ -594,6 +602,10 @@ kc -n galactic-system set env daemonset/galactic-cni -c credential-refresh \
   GALACTIC_CNI_EGRESS_MODE=hashed GALACTIC_CNI_EGRESS_HASH=flow GALACTIC_CNI_EGRESS_PIN_IDLE=0s >/dev/null
 wait_mode hashed
 wait_true "${EDGE}'s class routes are not all on the shard groups after 120s" 120 groups_hold_routes
+if [ "${NAT_LOCAL_ONLY:-}" = hashed-switch ]; then
+  log "PASS (probe): galactic-cni rolled out hashed mode while Worker served ${EDGE}, and the groups hold every route"
+  exit 0
+fi
 for g in "${GUESTS[@]}"; do
   expect tcp6 "${g}" 24 "${L6}" "${R6}"
   [ "$(wc -l <"${STATE}/seen")" -eq 2 ] || die "${g}'s NAT66 flows used one shard: $(cat "${STATE}/seen")"
