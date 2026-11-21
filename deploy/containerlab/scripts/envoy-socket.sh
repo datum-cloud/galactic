@@ -327,7 +327,9 @@ restore_checks() {
   done
   record restore "the rig container is gone" yes "$(docker inspect "${RIG}" >/dev/null 2>&1 && echo no || echo yes)"
   # Worker and Local on the node.
-  record restore "no Worker process on ${NODE}" "" "$(oneline "$(docker exec "${NODE}" pgrep -f galactic-worker || true)")"
+  # Anchored to the binary the case starts: the node runs other processes,
+  # in every pod, whose command lines can mention galactic-worker.
+  record restore "no Worker process on ${NODE}" "" "$(oneline "$(docker exec "${NODE}" pgrep -f "^${WORKER_BIN}" || true)")"
   out=$("${SCRIPT_DIR}/worker-fabric.sh" scopes "${NODE}" 2>/dev/null || true)
   printf '%s\n' "${out}" >"${OUT}/logs/scopes-after.txt"
   record restore "no Worker-owned fence record on ${NODE}" 0 "$(grep -c 'galactic-worker:' <<<"${out}" || true)"
