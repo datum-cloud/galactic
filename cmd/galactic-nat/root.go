@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/config"
 	"go.datum.net/galactic/internal/controller"
@@ -53,6 +54,7 @@ func runCmd(cfg *config.NATConfig) error {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(cloudv1alpha1.AddToScheme(scheme))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
@@ -153,6 +155,12 @@ func runCmd(cfg *config.NATConfig) error {
 	// otherwise never turn ready and would block the DaemonSet's rollout. The
 	// EgressShard's Programmed condition reports that instead.
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+
+	if cfg.WorkerSocket != "" && cfg.DatapathEnabled {
+		if err := startLocalDelivery(ctx, cfg, mgr); err != nil {
+			return fmt.Errorf("start local shard delivery: %w", err)
+		}
+	}
 
 	// Register EgressShard controller.
 	if err := (&controller.EgressShardReconciler{
@@ -262,6 +270,12 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().String("nat-proc-sys-path", config.DefaultProcSysPath,
 		"Procfs sysctl root to write the datapath's forwarding sysctls under, such as a writable mount "+
 			"of the host's /proc/sys/net at <path>/net")
+	cmd.Flags().String("worker-socket", "",
+		"Galactic Worker's socket. When set, this shard serves the tenants on its own node through each "+
+			"VPC's local veth pair, which it claims from Worker; empty serves them over the fabric only")
+	cmd.Flags().String("worker-token-file", "",
+		"The projected ServiceAccount token presented to Galactic Worker (default "+
+			"/var/run/secrets/galactic-worker/token)")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	logOpts.BindFlags(cmd.PersistentFlags())

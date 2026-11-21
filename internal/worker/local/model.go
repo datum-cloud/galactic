@@ -106,6 +106,9 @@ type model struct {
 	// collisions are the claims whose links would take another claim's
 	// names, with that claim.
 	collisions map[module.ClaimKey]module.ClaimKey
+	// shard is the Local NAT shard the VPC's tenants may take, through the
+	// pair of the first claim in key order that names one.
+	shard *shardWant
 }
 
 // Empty reports whether the scope wants no Local state.
@@ -165,7 +168,13 @@ func desire(vpc string, claims []module.Claim) *model {
 				continue
 			}
 			m.pairs[p.tenant] = p
-			for _, d := range c.Destinations {
+			for _, d := range expandShards(c.Destinations) {
+				if d.Shard != nil {
+					if m.shard == nil {
+						m.shard = &shardWant{key: c.Key, sid: d.Shard.SID, pair: p.tenant}
+					}
+					continue
+				}
 				if d.HostInterface == "" {
 					continue
 				}
@@ -196,4 +205,23 @@ func desire(vpc string, claims []module.Claim) *model {
 		t.guests = slices.Compact(t.guests)
 	}
 	return m
+}
+
+// expandShards returns dests with each Local shard destination followed by
+// one destination per attachment the shard serves, so a shard's tenants get
+// the rows that steer their flows into the pair and authorize the pair's
+// return to their addresses.
+func expandShards(dests []module.Destination) []module.Destination {
+	var out []module.Destination
+	for _, d := range dests {
+		out = append(out, d)
+		if d.Shard == nil {
+			continue
+		}
+		for _, t := range d.Shard.Tenants {
+			out = append(out, module.Destination{ID: d.ID + "/" + t.UID, Mode: d.Mode, VPC: d.VPC, Node: d.Node,
+				Addresses: t.Addresses, HostInterface: t.HostInterface})
+		}
+	}
+	return out
 }

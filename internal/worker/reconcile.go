@@ -18,6 +18,7 @@ import (
 
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 	"go.datum.net/galactic/internal/ownership"
+	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/worker/module"
 	"go.datum.net/galactic/internal/worker/sources"
 	"go.datum.net/galactic/internal/worker/store"
@@ -431,9 +432,9 @@ func (w *Worker) resolve(ctx context.Context, vpc string, claims []claim) (
 		if e.releasing {
 			continue
 		}
-		att, ok, err := w.d.Sources.Attachment(ctx, e.key.AttachmentUID)
+		att, ok, err := w.claimAttachment(ctx, e.key)
 		if err != nil {
-			return nil, nil, fmt.Errorf("read attachment %s: %w", e.key.AttachmentUID, err)
+			return nil, nil, err
 		}
 		if !ok || att.VPC != vpc || att.Node != w.cfg.Node || !att.Admitted {
 			if err := w.withdraw(e.key, e.gen, store.WithdrawClaim, workerv1alpha1.ReasonAuthorizationRevoked); err != nil {
@@ -527,10 +528,13 @@ func edgeLinkDestination(k module.ClaimKey, own netip.Prefix, att sources.Attach
 func (w *Worker) resolveDestination(ctx context.Context, vpc string, own netip.Prefix,
 	pref workerv1alpha1.Mode, d *workerv1alpha1.Destination,
 	locator func(string) (netip.Prefix, error), de *destEval) (module.Destination, error) {
+	if sh, isShard := d.GetTarget().(*workerv1alpha1.Destination_Shard); isShard {
+		return w.resolveShard(ctx, vpc, own, pref, d, sh.Shard, de)
+	}
 	t, ok := d.GetTarget().(*workerv1alpha1.Destination_Attachment)
 	if !ok {
 		de.reason = workerv1alpha1.ReasonDestinationKindUnsupported
-		de.msg = "shard and backend destinations are resolved by later Tasks (#1437, #1438)"
+		de.msg = "backend destinations are resolved by a later Task (#1438)"
 		return module.Destination{}, nil
 	}
 	att, found, err := w.d.Sources.Attachment(ctx, t.Attachment.GetUid())
@@ -569,6 +573,86 @@ func (w *Worker) resolveDestination(ctx context.Context, vpc string, own netip.P
 	de.mode, de.resolved = mode, true
 	return module.Destination{ID: de.id, Ref: d, Mode: mode, VPC: att.VPC, Node: att.Node, Locator: loc,
 		Addresses: slices.Clone(att.Addresses), HostInterface: att.HostInterface}, nil
+}
+
+// claimAttachment returns the trusted record of claim k's attachment. A
+// claim whose attachment is an EgressShard, which admission allowed only
+// for the NAT shard, gets a record that authorizes it while the shard still
+// runs on this node and the VPC still has an admitted VPCAttachment here,
+// and none otherwise.
+func (w *Worker) claimAttachment(ctx context.Context, k module.ClaimKey) (sources.Attachment, bool, error) {
+	att, ok, err := w.d.Sources.Attachment(ctx, k.AttachmentUID)
+	if err != nil {
+		return sources.Attachment{}, false, fmt.Errorf("read attachment %s: %w", k.AttachmentUID, err)
+	}
+	if ok {
+		return att, true, nil
+	}
+	es, ok, err := w.d.Sources.EgressShardByUID(ctx, k.AttachmentUID)
+	if err != nil {
+		return sources.Attachment{}, false, fmt.Errorf("read EgressShard %s: %w", k.AttachmentUID, err)
+	}
+	if !ok {
+		return sources.Attachment{}, false, nil
+	}
+	msg, err := w.shardAuthority(ctx, k, es)
+	if err != nil {
+		return sources.Attachment{}, false, fmt.Errorf("read the VPCAttachments of %s: %w", k.VPC, err)
+	}
+	return sources.Attachment{UID: es.UID, Kind: sources.KindEgressShard, VPC: k.VPC, Node: es.Node,
+		Admitted: msg == ""}, true, nil
+}
+
+// resolveShard resolves a shard destination from its EgressShard: Local when
+// the shard runs on this node, and Fabric otherwise, toward the shard SID's
+// own locator. A shard's locator is never a node's router locator, so the
+// own-locator rule that resolves an attachment does not apply; the shard's
+// node does. A shard that is not ready does not resolve. A Local shard
+// carries the admitted attachments of the VPC on this node, whose flows its
+// veth pair serves.
+func (w *Worker) resolveShard(ctx context.Context, vpc string, own netip.Prefix,
+	pref workerv1alpha1.Mode, d *workerv1alpha1.Destination, ref *workerv1alpha1.ShardRef,
+	de *destEval) (module.Destination, error) {
+	es, found, err := w.d.Sources.EgressShard(ctx, ref.GetName())
+	if err != nil {
+		return module.Destination{}, fmt.Errorf("read EgressShard %s: %w", ref.GetName(), err)
+	}
+	switch {
+	case !found:
+		de.reason, de.msg = workerv1alpha1.ReasonDestinationNotFound, "the EgressShard does not exist"
+		return module.Destination{}, nil
+	case !es.Ready:
+		de.reason, de.msg = workerv1alpha1.ReasonShardNotReady,
+			"the EgressShard reports no SID, or is not Programmed and Ready"
+		return module.Destination{}, nil
+	case !own.IsValid():
+		de.reason, de.msg = workerv1alpha1.ReasonLocatorUnknown, "this node has no SRv6 locator yet"
+		return module.Destination{}, nil
+	}
+	mode := workerv1alpha1.Mode_MODE_FABRIC
+	if es.Node == w.cfg.Node {
+		mode = workerv1alpha1.Mode_MODE_LOCAL
+	}
+	if (pref == workerv1alpha1.Mode_MODE_LOCAL || pref == workerv1alpha1.Mode_MODE_FABRIC) && pref != mode {
+		de.mode = mode
+		de.reason, de.msg = workerv1alpha1.ReasonModeUnavailable,
+			"the shard resolves to "+modeName(mode)+", not the requested mode"
+		return module.Destination{}, nil
+	}
+	target := &module.ShardTarget{Name: es.Name, SID: es.SID}
+	if mode == workerv1alpha1.Mode_MODE_LOCAL {
+		tenants, err := w.d.Sources.VPCAttachments(ctx, vpc, w.cfg.Node)
+		if err != nil {
+			return module.Destination{}, fmt.Errorf("read the VPCAttachments of %s: %w", vpc, err)
+		}
+		for _, t := range tenants {
+			target.Tenants = append(target.Tenants, module.ShardTenant{UID: t.UID,
+				HostInterface: t.HostInterface, Addresses: slices.Clone(t.Addresses)})
+		}
+	}
+	de.mode, de.resolved = mode, true
+	return module.Destination{ID: de.id, Ref: d, Mode: mode, VPC: vpc, Node: es.Node,
+		Locator: netip.PrefixFrom(es.SID, uformat.LocatorBits).Masked(), Shard: target}, nil
 }
 
 func modeName(m workerv1alpha1.Mode) string {
@@ -660,7 +744,8 @@ func (w *Worker) report(evals []*claimEval, state map[workerv1alpha1.Mode]module
 		c.status.HandoffInterfaces = nil
 		for _, h := range handoffs[e.key] {
 			c.status.HandoffInterfaces = append(c.status.HandoffInterfaces,
-				&workerv1alpha1.HandoffInterface{Role: h.Role, Name: h.Name, Ifindex: h.Ifindex})
+				&workerv1alpha1.HandoffInterface{Role: h.Role, Name: h.Name, Ifindex: h.Ifindex,
+					TenantSid: h.TenantSID})
 		}
 		w.publish(c)
 	}

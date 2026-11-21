@@ -869,6 +869,14 @@ type RefreshResult struct {
 	// Removed is the shard group sentinels deleted in hashed mode because
 	// their route's class is no longer configured.
 	Removed int
+	// LocalNAT is the class routes rewritten to a PassThroughLocalNAT entry,
+	// in ordered mode, because their table's egress_local_shard row makes
+	// this node's own shard the first usable one.
+	LocalNAT int
+	// LocalRestored is the PassThroughLocalNAT class routes rewritten back
+	// to a shard SID or a group sentinel, because their table lost its row
+	// or a shard ahead of the local one resolves.
+	LocalRestored int
 	// GroupRoutes counts, by group ID, the sentinels egress_route_table holds
 	// once the sweep's writes are done: those left in place and those just
 	// written. Valid only when Refresh returns no error.
@@ -894,6 +902,56 @@ type refreshConfig struct {
 	// tenantRouteTables are tables whose tenant routes another writer
 	// re-resolves.
 	tenantRouteTables map[uint32]struct{}
+	// localShards, when set, is egress_local_shard's rows by VRF table. Nil
+	// leaves every PassThroughLocalNAT entry alone and places nothing on
+	// this node's own shard.
+	localShards map[uint32]uformat.LocatorKey
+}
+
+// WithLocalShards hands the sweep egress_local_shard's rows. In ordered
+// mode, a class route in a table with a row goes to the first configured
+// shard that is usable, where the row's shard counts as usable; when that is
+// the row's shard, the route becomes a PassThroughLocalNAT entry carrying the
+// tenant's Argument, which local_link_rx sends into the VPC's pair. A
+// PassThroughLocalNAT class route carrying an Argument is the sweep's own: it
+// is rewritten back to a shard SID once its table has no row, or a shard
+// ahead of the local one resolves, and onto the class's group in hashed
+// mode. A row whose shard SID is not a well-formed uSID is ignored. A table
+// with no row is swept exactly as without this option.
+func WithLocalShards(rows map[uint32]LocalShard) RefreshOption {
+	return func(c *refreshConfig) {
+		c.localShards = make(map[uint32]uformat.LocatorKey, len(rows))
+		for table, row := range rows {
+			if key, err := uformat.LocatorKeyFromAddr(row.ShardSID); err == nil {
+				c.localShards[table] = key
+			}
+		}
+	}
+}
+
+// localClassRoute builds the PassThroughLocalNAT entry for a class route,
+// with the tenant's Argument where a sentinel keeps it, in SID bytes 8 and 9.
+// usid_egress and local_link_rx read neither for a pass-through.
+func localClassRoute(argument uint16) prog.UsidEgressRouteValue {
+	var value prog.UsidEgressRouteValue
+	value.Sid[0] = byte(PassThroughLocalNAT)
+	value.Sid[8] = byte(argument>>8) & 0x0F
+	value.Sid[9] = byte(argument)
+	return value
+}
+
+// localClassArgument returns the Argument a PassThroughLocalNAT class route
+// the sweep wrote carries, and false for any other entry: another owner's, or
+// one with no Argument, such as an entry Galactic Worker wrote itself.
+func localClassArgument(key prog.UsidEgressRouteKey, value prog.UsidEgressRouteValue) (uint16, bool) {
+	if value.LinkIfindex != 0 || PassThroughOwner(value.Sid[0]) != PassThroughLocalNAT {
+		return 0, false
+	}
+	if _, ok := ClassForRoute(keyPrefix(key)); !ok {
+		return 0, false
+	}
+	argument := uint16(value.Sid[8]&0x0F)<<8 | uint16(value.Sid[9])
+	return argument, argument != 0
 }
 
 // WithoutTenantRoutes leaves the tenant routes of tables alone: in each, the
@@ -1039,7 +1097,12 @@ func (t *EgressRouteTable) Refresh(
 	for iter.Next(&key, &value) {
 		result.Scanned++
 		if value.LinkIfindex == 0 {
-			continue // pass-through: nothing was resolved, nothing to refresh
+			// A pass-through: nothing was resolved, nothing to refresh,
+			// unless it is one of the sweep's own local class routes.
+			if update, ok := t.refreshPassThrough(key, value, foreignTableIDs, cfg, shards, &result); ok {
+				updates = append(updates, pending{key: key, value: update})
+			}
+			continue
 		}
 		if _, foreign := foreignTableIDs[key.TableId]; foreign {
 			result.Skipped++
@@ -1078,17 +1141,14 @@ func (t *EgressRouteTable) Refresh(
 			}
 		}
 
-		if cfg.groupFor != nil {
-			if fields, err := decodeSID(sid); err == nil && shards.isShard(fields) {
-				if groupID, ok := cfg.groupFor(keyPrefix(key)); ok {
-					updates = append(updates, pending{key: key, value: groupSentinel(groupID, fields.Argument)})
-					result.Grouped++
-					result.GroupRoutes[groupID]++
-					slog.Info("egressroutemap: refresh: egress route moved onto an egress shard group",
-						"table", key.TableId, "fromSid", sid, "group", groupID)
-					continue
-				}
-			}
+		if update, ok := grouped(key, sid, cfg, shards, &result); ok {
+			updates = append(updates, pending{key: key, value: update})
+			continue
+		}
+
+		if update, ok := orderedLocal(key, sid, cfg, shards, &result); ok {
+			updates = append(updates, pending{key: key, value: update})
+			continue
 		}
 
 		target, next, err := shards.resolve(sid)
@@ -1195,6 +1255,14 @@ func (t *EgressRouteTable) refreshSentinel(
 		return groupSentinel(target, argument), true
 	}
 
+	if _, class := ClassForRoute(keyPrefix(key)); class && argument != 0 &&
+		shards.localFirst(cfg.localShards, key.TableId) {
+		result.Ungrouped++
+		result.LocalNAT++
+		slog.Info("egressroutemap: refresh: egress route moved off the egress shard group onto this node's own shard",
+			"table", key.TableId, "group", groupID)
+		return localClassRoute(argument), true
+	}
 	target, next, err := shards.resolveArgument(argument)
 	if err != nil {
 		result.Unresolved++
@@ -1212,6 +1280,141 @@ func (t *EgressRouteTable) refreshSentinel(
 	slog.Info("egressroutemap: refresh: egress route moved off the egress shard group onto one shard",
 		"table", key.TableId, "group", groupID, "toSid", target, "toLink", next.link)
 	return updated, true
+}
+
+// refreshPassThrough decides what a pass-through entry becomes: nothing,
+// unless it is one of the sweep's own PassThroughLocalNAT class routes in a
+// table this namespace owns, which refreshLocalClassRoute decides.
+func (t *EgressRouteTable) refreshPassThrough(
+	key prog.UsidEgressRouteKey, value prog.UsidEgressRouteValue, foreignTableIDs map[uint32]struct{},
+	cfg refreshConfig, shards *shardSelector, result *RefreshResult,
+) (prog.UsidEgressRouteValue, bool) {
+	if cfg.localShards == nil {
+		return prog.UsidEgressRouteValue{}, false
+	}
+	argument, ours := localClassArgument(key, value)
+	if !ours {
+		return prog.UsidEgressRouteValue{}, false // another writer's pass-through
+	}
+	if _, foreign := foreignTableIDs[key.TableId]; foreign {
+		result.Skipped++
+		return prog.UsidEgressRouteValue{}, false
+	}
+	return t.refreshLocalClassRoute(key, argument, cfg, shards, result)
+}
+
+// grouped returns the sentinel a hashed-mode entry toward a configured shard
+// becomes when its prefix's class has a group.
+func grouped(
+	key prog.UsidEgressRouteKey, sid net.IP, cfg refreshConfig, shards *shardSelector, result *RefreshResult,
+) (prog.UsidEgressRouteValue, bool) {
+	if cfg.groupFor == nil {
+		return prog.UsidEgressRouteValue{}, false
+	}
+	fields, err := decodeSID(sid)
+	if err != nil || !shards.isShard(fields) {
+		return prog.UsidEgressRouteValue{}, false
+	}
+	groupID, ok := cfg.groupFor(keyPrefix(key))
+	if !ok {
+		return prog.UsidEgressRouteValue{}, false
+	}
+	result.Grouped++
+	result.GroupRoutes[groupID]++
+	slog.Info("egressroutemap: refresh: egress route moved onto an egress shard group",
+		"table", key.TableId, "fromSid", sid, "group", groupID)
+	return groupSentinel(groupID, fields.Argument), true
+}
+
+// orderedLocal returns the PassThroughLocalNAT entry an ordered-mode class
+// route toward a configured shard becomes when its table's row makes this
+// node's own shard the first usable one. Only a route carrying a tenant
+// Argument moves: the Argument is all that brings it back to a shard SID
+// later.
+func orderedLocal(
+	key prog.UsidEgressRouteKey, sid net.IP, cfg refreshConfig, shards *shardSelector, result *RefreshResult,
+) (prog.UsidEgressRouteValue, bool) {
+	if cfg.groupFor != nil {
+		return prog.UsidEgressRouteValue{}, false
+	}
+	fields, err := decodeSID(sid)
+	if err != nil || !shards.isShard(fields) || fields.Argument == 0 {
+		return prog.UsidEgressRouteValue{}, false
+	}
+	if _, class := ClassForRoute(keyPrefix(key)); !class || !shards.localFirst(cfg.localShards, key.TableId) {
+		return prog.UsidEgressRouteValue{}, false
+	}
+	result.LocalNAT++
+	slog.Info("egressroutemap: refresh: egress route moved onto this node's own shard",
+		"table", key.TableId, "fromSid", sid)
+	return localClassRoute(fields.Argument), true
+}
+
+// refreshLocalClassRoute decides what one of the sweep's PassThroughLocalNAT
+// class routes becomes. In hashed mode it moves onto its class's group when
+// one serves it, and is left alone otherwise. In ordered mode it stays while
+// its table's row makes the local shard the first usable one, and otherwise
+// goes back to the first configured shard that resolves; when none does it is
+// counted unresolved and left alone, still steering into the pair.
+func (t *EgressRouteTable) refreshLocalClassRoute(
+	key prog.UsidEgressRouteKey, argument uint16, cfg refreshConfig, shards *shardSelector, result *RefreshResult,
+) (prog.UsidEgressRouteValue, bool) {
+	if cfg.groupFor != nil {
+		groupID, ok := cfg.groupFor(keyPrefix(key))
+		if !ok {
+			return prog.UsidEgressRouteValue{}, false
+		}
+		result.Grouped++
+		result.LocalRestored++
+		result.GroupRoutes[groupID]++
+		slog.Info("egressroutemap: refresh: egress route moved off this node's own shard onto an egress shard group",
+			"table", key.TableId, "group", groupID)
+		return groupSentinel(groupID, argument), true
+	}
+	if shards.localFirst(cfg.localShards, key.TableId) {
+		return prog.UsidEgressRouteValue{}, false
+	}
+	target, next, err := shards.resolveArgument(argument)
+	if err != nil {
+		result.Unresolved++
+		slog.Warn("egressroutemap: refresh: leaving egress route on this node's own shard, no configured shard resolves",
+			"table", key.TableId, "err", err)
+		return prog.UsidEgressRouteValue{}, false
+	}
+	updated := prog.UsidEgressRouteValue{LinkIfindex: uint32(next.link)} //nolint:gosec // a kernel ifindex
+	copy(updated.Sid[:], target.To16())
+	copy(updated.Dmac[:], next.dmac)
+	copy(updated.Smac[:], next.smac)
+	result.LocalRestored++
+	result.Reselected++
+	slog.Info("egressroutemap: refresh: egress route moved off this node's own shard",
+		"table", key.TableId, "toSid", target, "toLink", next.link)
+	return updated, true
+}
+
+// localFirst reports whether tableID has an egress_local_shard row whose
+// shard comes before every configured shard that resolves, in preference
+// order. A table with no row, or whose row names no configured shard, is
+// false.
+func (s *shardSelector) localFirst(rows map[uint32]uformat.LocatorKey, tableID uint32) bool {
+	local, ok := rows[tableID]
+	if !ok {
+		return false
+	}
+	for _, shard := range s.shards {
+		key, err := uformat.NewLocatorKey(shard.Block, shard.NodeID)
+		if err == nil && key == local {
+			return true
+		}
+		addr, err := uformat.Encode(shard)
+		if err != nil {
+			continue
+		}
+		if s.lookup(addr, net.IP(addr.AsSlice())).err == nil {
+			return false
+		}
+	}
+	return false
 }
 
 // nextHop is one resolveLinkAndL2Fn answer.

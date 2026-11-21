@@ -1,0 +1,70 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-a-edge
+  namespace: ns80
+  labels:
+    app: vpc-a-edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vpc-a-edge
+  template:
+    metadata:
+      labels:
+        app: vpc-a-edge
+      annotations:
+        v1.multus-cni.io/default-network: ns80/vpc-a-edge
+    spec:
+      # The combined placement: an edge node that runs a NAT shard also
+      # hosts a guest.
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker2
+      tolerations:
+        - key: galactic.datumapis.com/nat
+          operator: Equal
+          value: enabled
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: guest
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guest-b-edge
+  namespace: ns80
+  labels:
+    app: vpc-b-edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vpc-b-edge
+  template:
+    metadata:
+      labels:
+        app: vpc-b-edge
+      annotations:
+        v1.multus-cni.io/default-network: ns80/vpc-b-edge
+    spec:
+      # The combined placement: an edge node that runs a NAT shard also
+      # hosts a guest.
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker2
+      tolerations:
+        - key: galactic.datumapis.com/nat
+          operator: Equal
+          value: enabled
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: guest
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
