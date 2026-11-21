@@ -13,7 +13,10 @@ interface are implemented by
 `fabric.srv6` and `fabric.routes`, and is the only writer of the tenant routes
 of every VPC Worker owns. The Local module
 ([#1435](https://github.com/datum-cloud/galactic/issues/1435)) serves the
-`local.*` capabilities.
+`local.*` capabilities, and
+[#1437](https://github.com/datum-cloud/galactic/issues/1437) resolves shard
+destinations and lets a VPC's tenants egress through their node's own NAT
+shard ([Local NAT shards](contract.md#local-nat-shards)).
 [#1439](https://github.com/datum-cloud/galactic/issues/1439) moves the Envoy
 sidecar onto Worker: the galactic-vrf sidecar holds a `local.socket` claim per
 VPC, and Worker publishes the return advertisement for the claim's addresses
@@ -65,7 +68,7 @@ PR. "Confirmed" means the product owner approved the decision on the date given.
 | D17 | Comparison against the main base on the same host, using the MASQUE benchmark method                                                                                                     | Proposed             | [Qualification](qualification.md#comparison-method)         |
 | D18 | Numeric limits, including 1024 claims per caller                                                                                                                                         | Confirmed 2026-11-18 | [Qualification](qualification.md#limits)                    |
 | D19 | The session ID travels in the `x-galactic-worker-session` metadata key; a call without a live session is `FAILED_PRECONDITION`/`NoSession`                                               | Accepted             | [Contract](contract.md#sessions-restart-and-stale-deletion) |
-| D20 | Shard and backend destinations report `DestinationKindUnsupported` until #1437 and #1438 add their resolvers inside Worker                                                               | Accepted             | [Contract](contract.md#claims)                              |
+| D20 | Backend destinations report `DestinationKindUnsupported` until #1438 adds their resolver; #1437 resolves shards (D30-D33)                                                                | Accepted             | [Contract](contract.md#claims)                              |
 | D21 | The peer check maps `SO_PEERCRED` to a pod by the cgroup path, so Worker needs `hostPID` and the host `/proc`                                                                            | Accepted             | [Contract](contract.md#transport-identity-and-access)       |
 | D22 | The allowlist is a YAML file passed with `--allowlist`                                                                                                                                   | Accepted             | [Contract](contract.md#transport-identity-and-access)       |
 | D23 | Worker takes a scope over with `Takeover`, which fences and adopts under one lock, so no crash leaves a scope refusing CNI writes                                                        | Accepted             | [Ownership](ownership.md#bootstrap-adoption-and-transfer)   |
@@ -75,6 +78,10 @@ PR. "Confirmed" means the product owner approved the decision on the date given.
 | D27 | Local handoffs as #1444 proved them: native XDP on the veth peer, VLAN and checksum limits, per-path policy, Local pass-through                                                          | Proposed             | [Contract](contract.md#local-handoffs)                      |
 | D28 | Local owns its handoff links and tc filters, after CNI's; status lists them; fragments to a TAP are refused                                                                              | Accepted             | [Contract](contract.md#the-local-module)                    |
 | D29 | A routed link's pod end uses its attachment's addresses as `/128` routes; resolvers write steering entries                                                                               | Proposed             | [Contract](contract.md#the-local-module)                    |
+| D30 | NAT names its EgressShard as a `veth_pair` claim's attachment, if allowlisted, shards only, and the VPC has an attachment on the node                                                    | Accepted             | [Contract](contract.md#claims)                              |
+| D31 | `ShardRef.name` names the EgressShard; a request that sets `group` or `index` is `MalformedSpec`                                                                                         | Accepted             | [Contract](contract.md#claims)                              |
+| D32 | A shard resolves by its node, toward its own SID's locator; its EgressShard is the trusted source                                                                                        | Accepted             | [Contract](contract.md#resolution)                          |
+| D33 | Amends D28: `usid_egress` selects a Local shard only for a VPC with an `egress_local_shard` row; others keep today's path                                                                | Accepted             | [Contract](contract.md#local-nat-shards)                    |
 | D34 | `galactic-worker handback` relinquishes a stopped Worker's scopes to a `galactic-handback:` label; only it makes them reclaimable                                                        | Accepted             | [Ownership](ownership.md#handing-scopes-back)               |
 | D35 | Combined placement is a `node=edge` node with the service opt-ins and pinned guests; no new label                                                                                        | Accepted             | [Labels](../operations/node-labels.md#combined-placement)   |
 | D36 | Operators read Worker's state with `galactic-worker inspect` through `kubectl exec`, and its gauges; no network endpoint serves it                                                       | Accepted             | [Operations](operations.md#read-the-diagnostics)            |

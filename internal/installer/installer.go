@@ -1266,6 +1266,7 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	egressRouteRefreshTicker := time.NewTicker(egressRouteRefreshInterval)
 	defer egressRouteRefreshTicker.Stop()
 	go ebpfState.egressGroup.run(ctx)
+	go ebpfState.egressGroup.watchLocalShards(ctx)
 	ebpfState.egressGroup.kick()
 
 	for {

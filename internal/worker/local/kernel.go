@@ -109,6 +109,8 @@ type Kernel struct {
 	Pods PodNetns
 	// LinkMTU is the MTU of the links Local creates; DefaultLinkMTU when 0.
 	LinkMTU int
+	// Shards is egress_local_shard, or nil when the uSID datapath has none.
+	Shards LocalShards
 	// edge is the edge-link host access; the pinned maps under PinDir when
 	// nil.
 	edge edgeHost
@@ -124,6 +126,9 @@ type Kernel struct {
 	// swept is set once a stale local_rx left by an earlier Worker on a
 	// device that is no longer a receiver has been looked for.
 	swept bool
+	// ifindexVRF and nodeSrc are galactic-cni's pinned
+	// ifindex_vrf_table and node_src_addr_table, for a pair's tenant SID.
+	ifindexVRF, nodeSrc *ebpf.Map
 }
 
 // Close releases the Kernel's descriptors. Pinned maps and filters stay.
@@ -139,6 +144,12 @@ func (k *Kernel) Close() error {
 		errs = append(errs, k.rclose.Close())
 		k.rclose, k.routes = nil, nil
 	}
+	for _, m := range []*ebpf.Map{k.ifindexVRF, k.nodeSrc} {
+		if m != nil {
+			errs = append(errs, m.Close())
+		}
+	}
+	k.ifindexVRF, k.nodeSrc = nil, nil
 	return errors.Join(errs...)
 }
 
@@ -382,6 +393,9 @@ func (k *Kernel) ensurePair(h *host, p pairWant, vrfIdx int, dry bool) (pair, er
 		return got, err
 	}
 	if err := ensureFeatures(p.tenant, dry); err != nil {
+		return got, err
+	}
+	if err := ensureForwarding(p.nat, dry); err != nil {
 		return got, err
 	}
 	return got, k.ensurePairNAPI(got.tenant, dry)

@@ -178,6 +178,8 @@ var StatNames = []string{
 	"guard_pass",
 	"guard_drop",
 	"link_too_big",
+	"link_local_shard",
+	"link_local_shard_no_pair",
 }
 
 // Stats reads lt_stats by name, summed over CPUs.

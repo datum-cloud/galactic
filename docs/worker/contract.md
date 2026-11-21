@@ -36,12 +36,23 @@ reason `AttachmentClaimedByAnotherCaller`. Fabric state for a VPC is shared:
 any number of claims may resolve destinations through the same VPC.
 
 A destination names an attachment, a shard or a backend. Worker resolves
-attachment destinations. The shard resolver, from NAT's trusted source, is added
-inside Worker by [#1437](https://github.com/datum-cloud/galactic/issues/1437),
-and the backend resolver by
-[#1438](https://github.com/datum-cloud/galactic/issues/1438). Until then a shard
-or backend destination is accepted and reports `Resolved=False` with reason
+attachment and shard destinations; a shard is named by its EgressShard's name
+(`ShardRef.name`), and a request that sets the unused `group` or `index` gets
+`INVALID_ARGUMENT`/`MalformedSpec` (D31). The backend resolver is added by
+[#1438](https://github.com/datum-cloud/galactic/issues/1438). Until then a
+backend destination is accepted and reports `Resolved=False` with reason
 `DestinationKindUnsupported` (D20).
+
+The NAT shard has no VPCAttachment in the VPCs it serves, so its `veth_pair`
+claim may name its own EgressShard as `attachment_uid` (D30). Worker allows
+that only when the allowlist marks the caller with `egressShardClaims`
+(otherwise `PERMISSION_DENIED`/`CapabilityNotAllowed`), every destination is
+a shard and the handoff is `veth_pair` (otherwise
+`INVALID_ARGUMENT`/`MalformedSpec`), the EgressShard runs on this node, and
+the VPC has an admitted VPCAttachment on this node (otherwise
+`PERMISSION_DENIED`/`VPCNotAuthorized`). Worker checks the last two again on
+every reconcile and withdraws the claim with `AuthorizationRevoked` once
+either fails.
 
 The mode preference is `auto`, `local` or `fabric`. `auto` lets Worker resolve
 each destination. `local` and `fabric` restrict the result; a destination that
@@ -199,7 +210,12 @@ conditions and destinations, through `galactic-worker inspect`
 ### Resolution
 
 A destination whose locator is this node's locator resolves to Local; any other
-locator resolves to Fabric (D11). Worker never falls back from Local to Fabric:
+locator resolves to Fabric (D11). A shard destination resolves by its node
+instead (D32): its SID lives in the shard's own locator, which admission keeps
+distinct from every BGPRouter's locator, so it is never the node's locator. A
+shard whose EgressShard runs on this node resolves to Local, any other to
+Fabric toward the shard SID's locator, and one that reports no SID or is not
+Programmed and Ready reports `ShardNotReady`. Worker never falls back from Local to Fabric:
 sending a Local destination out of the uplink would hairpin it and change the
 return path the service depends on. A Local destination whose handoff is
 missing waits, as the [worked transitions](#worked-transitions) show.
@@ -215,6 +231,9 @@ Worker takes these facts only from the sources below, never from the request (D1
 | Authorized VPC           | `VPCAttachment.spec.vpc` for workload and service attachments, written by NSO; for a connector, an EdgeAttachment that is `Admitted`.                                                                                                                         |
 | Owner                    | The authenticated caller (D8), recorded with the claim's desired state.                                                                                                                                                                                       |
 | Backend SID              | The backend node's locator plus the slot the gateway encodes in the uSID, as `docs/gateway/architecture.md` describes.                                                                                                                                        |
+| Shard identity           | The EgressShard, in Worker's namespace: its node from `spec.targetRef`, its SID from `status.shardSID`, and readiness from its Programmed and Ready conditions, which galactic-nat writes for the identity its datapath translates with (D32).                |
+| Shard claim authority    | For a claim whose attachment is an EgressShard: the allowlist's `egressShardClaims`, the EgressShard's node, and an admitted VPCAttachment of the VPC on this node (D30).                                                                                     |
+| Tenant SID               | This node's source SID (`node_src_addr_table`) completed with the VPC's Argument (`ifindex_vrf_table` of one of its tenant interfaces), both pinned by galactic-cni.                                                                                          |
 | Interface traffic policy | TrafficPolicyBinding, resolved by the cell controller. Worker applies no policy of its own.                                                                                                                                                                   |
 | Destination addresses    | `VPCAttachment.spec.interface.addresses` (D26). An attachment whose guest manages its own addressing records none, and its destination reports `DestinationAddressUnknown`; taking those addresses from the attachment's advertised routes is follow-up work. |
 | Tenant routes            | galactic-router, from EVPN, through the [tenant route handoff](#tenant-route-handoff).                                                                                                                                                                        |
@@ -386,10 +405,9 @@ addresses a claim names. Every uplink discovery path skips a link Galactic
 creates per VPC, including the NAT end of a pair, which lives in the host's
 namespace outside any VRF (`attach.IsInternalLink`).
 
-A tenant's public flows enter a handoff only through `egress_route_table`. A
-`PassThroughLocalNAT` entry steers into the VPC's pair, and the shard resolver
-([#1437](https://github.com/datum-cloud/galactic/issues/1437)) writes it for a
-Local shard. A `local.tap` reply reaches `local_link_rx` only when its
+A tenant's public flows enter a pair through `egress_route_table` or through
+`usid_egress`'s choice of a Local shard; [Local NAT shards](#local-nat-shards)
+describes both. A `local.tap` reply reaches `local_link_rx` only when its
 destination has a pass-through entry, so replies to clients anywhere need
 either a default pass-through or a Local branch in `usid_egress`, which
 [#1438](https://github.com/datum-cloud/galactic/issues/1438) decides (D29).
@@ -405,6 +423,63 @@ receiving devices evicts older ones, whose replies then go to the kernel
 instead of the device they arrived on. `local_rx` stays on the receiving
 devices while any TAP is authorized, so a restarted Worker does not take it
 away before it has planned every scope.
+
+### Local NAT shards
+
+[#1437](https://github.com/datum-cloud/galactic/issues/1437) lets a VPC's
+tenants egress through the NAT shard on their own node, through the VPC's
+`veth_pair`, instead of crossing the underlay to a remote shard.
+
+galactic-nat makes one `veth_pair` claim per VPC with an admitted
+VPCAttachment on its node, naming its own EgressShard as both the attachment
+and the destination (D30). The shard destination resolves to Local and
+carries the VPC's attachments on this node: the Local module steers their
+flows into the claim's pair and authorizes the pair's return to their
+addresses. The NAT end reports `tenant_sid`, the SID that names the VPC on
+this node. galactic-nat attaches its program natively to the NAT end, outside
+the XDP dispatcher, whose single host mode may be generic, and keys the VPC's
+sessions by that SID, exactly as it keys a remote tenant's by the outer source.
+One session table serves both entries, and a reply whose saved SID has a pair
+returns into it, unencapsulated; any other is encapsulated as before.
+
+The Local module writes the VPC's `egress_local_shard` row, keyed by its VRF
+table, only while the pair has carrier, runs Local's return programs, and runs
+the shard's program natively on the NAT end; the destination reports
+`LocalShardIneligible` until then. The row gates both egress modes:
+
+- **Hashed (D33, amending D28).** Each shard group carries a second snapshot,
+  `egress_shard_local_groups`, in which a ready local shard is alive. Only for
+  a VPC with a row does `usid_egress` choose from it, and when it picks the
+  local member it hands the packet, unencapsulated, to `local_link_rx` through
+  `skb->cb`, which sends it into the pair on the PublicNAT path. A VPC with no
+  row chooses from the unchanged snapshot, exactly as before.
+- **Ordered.** galactic-cni's egress sweep writes a `PassThroughLocalNAT`
+  class route in a VPC with a row when the row's shard comes first among the
+  usable shards of its static list, and restores the shard's SID entry once
+  the row goes. The sweep reads the rows every second, so either change takes
+  about a second. CNI ADD still points a new VRF's class route at the first
+  shard that resolves, and the sweep then moves it.
+
+In either mode `local_link_rx` leaves Neighbor Discovery, and anything to a
+link-local or multicast address, to the host, as `usid_egress` does: a class
+route such as ordered mode's `::/0` must not take a guest's solicitation for
+its gateway into the pair.
+
+Drain, pins and NAT64 standby keep their rules: a draining local shard keeps
+its pins and takes no new tenants, and a local NAT64 standby is held while a
+primary is alive. A pin to the local shard holds only while the VPC keeps its
+row.
+
+Which established sessions survive:
+
+| Event                               | Sessions through the local shard                                                                                                                                                                                     | Other sessions        |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| The pair is recreated               | Survive when no packet of the tenant address crossed while the row was gone: the session key is the tenant SID, not the ifindex. A packet in that gap re-pins the address to a remote shard, which breaks its flows. | Unaffected            |
+| NAT's program leaves one VPC's pair | That VPC's are lost: its row goes, its tenants move to the remote shards, which translate them with another address.                                                                                                 | Unaffected, every VPC |
+| galactic-nat restarts               | Survive: the session table, the pair rows and the program's link (`/sys/fs/bpf/galactic-nat/links/`) are pinned, so the datapath keeps running.                                                                      | Survive               |
+| Worker restarts                     | Survive: rows and programs stay while Worker rebuilds its state.                                                                                                                                                     | Survive               |
+| The local shard drains              | Survive on their pins; new tenant addresses go to other shards.                                                                                                                                                      | Unaffected            |
+| The local shard stops being ready   | Lost: the shard leaves the groups, as a remote shard does.                                                                                                                                                           | Unaffected            |
 
 ### Envoy and the galactic-vrf sidecar
 
@@ -512,7 +587,9 @@ Status carries these reasons besides the ones above:
 | Reason                                             | Where                 | Meaning                                                                                                   |
 | -------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------- |
 | `Pending`                                          | Any condition         | Worker has not yet reconciled the generation                                                              |
-| `DestinationKindUnsupported`                       | `Resolved`            | A shard or backend destination, until #1437 or #1438 resolves it                                          |
+| `DestinationKindUnsupported`                       | `Resolved`            | A backend destination, until #1438 resolves it                                                            |
+| `ShardNotReady`                                    | `Resolved`            | The shard's EgressShard reports no SID, or is not Programmed and Ready                                    |
+| `LocalShardIneligible`                             | `Ready`               | The VPC's tenants do not take the Local shard yet; they keep the remote shards                            |
 | `DestinationNotFound`                              | `Resolved`            | The destination attachment no longer exists                                                               |
 | `LocatorUnknown`                                   | `Resolved`            | This node or the destination's node has no SRv6 locator yet                                               |
 | `ModeUnavailable`                                  | `Resolved`            | The destination resolves to a mode the preference excludes                                                |
@@ -604,6 +681,7 @@ D8 and D9 were confirmed on 2026-11-18.
   serviceAccounts:
     - serviceAccount: galactic-system/galactic-nat
       capabilities: [local.veth_pair, fabric.srv6]
+      egressShardClaims: true
     - serviceAccount: galactic-system/galactic-router
       capabilities: [fabric.routes]
     - serviceAccount: galactic-system/galactic-edge

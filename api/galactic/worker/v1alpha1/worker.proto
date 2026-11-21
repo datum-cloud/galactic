@@ -118,10 +118,15 @@ message AttachmentRef {
   string uid = 1;
 }
 
+// ShardRef names an egress translation shard.
 message ShardRef {
-  // group names the shard group.
+  // group and index are not used. A request that sets either is refused
+  // with INVALID_ARGUMENT/MalformedSpec; name the shard with name.
   string group = 1;
   uint32 index = 2;
+  // name is the EgressShard's name, in the namespace Worker reads
+  // EgressShards from.
+  string name = 3;
 }
 
 message BackendRef {
@@ -135,8 +140,8 @@ message BackendRef {
 message Destination {
   oneof target {
     AttachmentRef attachment = 1;
-    // shard is resolved by #1437. Until then it reports
-    // DestinationKindUnsupported.
+    // shard is an egress translation shard. It resolves to Local when the
+    // shard runs on this node and to Fabric otherwise.
     ShardRef shard = 2;
     // backend is resolved by #1438. Until then it reports
     // DestinationKindUnsupported.
@@ -296,6 +301,14 @@ message HandoffInterface {
   string name = 2;
   // ifindex is the interface index in its network namespace.
   int32 ifindex = 3;
+  // tenant_sid is set on the "nat" end of a veth pair whose claim has a
+  // Local shard destination. It is the SID that names the claim's VPC on
+  // this node: this node's source SID completed with the VPC's Argument,
+  // as usid_egress writes it into a packet it encapsulates. The NAT end's
+  // program keys the VPC's sessions by it, as it keys a remote tenant's by
+  // the outer source, and returns a reply for it into the pair. Empty until
+  // Worker has read the VPC's Argument.
+  string tenant_sid = 4;
   // link_local is the interface's IPv6 link-local address, set for a routed
   // link's host end once the kernel has assigned it. The pod routes the
   // destinations it reaches through the link to this address.
