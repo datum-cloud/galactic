@@ -68,6 +68,20 @@ Worker's allowlist, using the Deployment's namespace:
 - bpffs mounted at `/sys/fs/bpf` and `/run/galactic-worker` present on each
   node (both are `type: Directory` hostPaths).
 
+## Privileges
+
+The sidecar runs as root with every capability dropped except three:
+`NET_ADMIN` for the VRF devices, routes and tc attachments in the pod's
+network namespace, `BPF` to open and update the node's pinned uSID maps, and
+`SYS_ADMIN`, because attaching its egress program first opens the pinned
+programs already on the hook by ID, which the kernel allows only with
+`SYS_ADMIN`. Kubernetes refuses `allowPrivilegeEscalation: false` beside
+`SYS_ADMIN`, so the Component does not set it. The root filesystem is
+read-only; the VRF lock directory is an `emptyDir`. Its host mounts are
+bpffs and the Worker socket directory. `tests/manifests/galactic-vrf/privileges.yaml`
+records every grant, and `task test:manifests` fails when the rendered
+Component grants anything else.
+
 ## RBAC
 
 Read-only: `get`, `list` and `watch` on `endpointslices`, `vpcattachments`

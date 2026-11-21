@@ -64,9 +64,14 @@ spec:
             periodSeconds: 10
           # NET_ADMIN for the VRF devices, routes and tc attach in the pod's
           # netns; BPF to open and update the node's pinned uSID maps under
-          # /sys/fs/bpf. It loads no programs, so PERFMON is not needed.
-          # Root is required to write the hostPath bpffs and to connect to
-          # the Worker's root-owned socket.
+          # /sys/fs/bpf. SYS_ADMIN because attaching usid_egress first opens
+          # the pinned programs already on the hook by ID, which the kernel
+          # allows only with SYS_ADMIN. It loads no programs, so PERFMON is
+          # not needed. Root is required to write the hostPath bpffs and to
+          # connect to the Worker's root-owned socket. The API refuses
+          # allowPrivilegeEscalation: false beside SYS_ADMIN, which grants
+          # escalation anyway, so it is not set; the sidecar runs as root
+          # and runs no setuid program.
           securityContext:
             runAsUser: 0
             capabilities:
@@ -74,7 +79,7 @@ spec:
               add:
                 - NET_ADMIN
                 - BPF
-            allowPrivilegeEscalation: false
+                - SYS_ADMIN
             readOnlyRootFilesystem: true
           resources:
             requests:

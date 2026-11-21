@@ -64,9 +64,10 @@ COPY --from=builder /workspace/galactic-vrf /galactic-vrf
 
 # Never privileged -- per PR #851's explicit privilege split (this sidecar
 # creates VRF devices/routes; Envoy only binds to them). The
-# config/galactic-vrf Component grants NET_ADMIN and BPF, mounts /sys/fs/bpf
-# and /run/galactic-worker, and runs the container as root: root is needed to
-# write the hostPath bpffs and to connect to Worker's root-owned socket. The
+# config/galactic-vrf Component grants NET_ADMIN, BPF and SYS_ADMIN, mounts
+# /sys/fs/bpf and /run/galactic-worker, and runs the container as root: root
+# is needed to write the hostPath bpffs and to connect to Worker's root-owned
+# socket. The
 # USER below is the image's default for runs outside that Component.
 USER 65532:65532
 
