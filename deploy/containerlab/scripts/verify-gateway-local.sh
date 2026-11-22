@@ -113,6 +113,8 @@ declare -A B_NODE=([w1]=dfw-worker [w2]=dfw-worker2 [w3]=dfw-worker3 [w4]=dfw-wo
 declare -A B_ADDR=([w1]=fd20:80:ff01::1:0:0 [w2]=fd20:80:ff01::4:0:0 [w3]=fd20:80:ff01::5:0:0 [w4]=fd20:80:ff01::2:0:0)
 declare -A B_IFACE=([w1]=G000000080080H [w2]=G000000080088H [w3]=G000000080089H [w4]=G000000080084H)
 declare -A B_ATTACH=([w1]=vpc-a [w2]=gwlocal-w2 [w3]=gwlocal-w3 [w4]=vpc-a2)
+# The backends that are veth guests rather than TAP guests.
+declare -A B_VETH=([w1]=1 [w4]=1)
 declare -A VIP6=([w1]=2001:db8:6060:1::11 [w2]=2001:db8:6060:1::12 [w3]=2001:db8:6060:1::13
   [w4]=2001:db8:6060:1::14 [pool]=2001:db8:6060:1::10)
 declare -A VIP4=([w1]=198.51.100.11 [w2]=198.51.100.12 [w3]=198.51.100.13 [w4]=198.51.100.14
@@ -638,8 +640,10 @@ rule_advs() {
 }
 
 local_rx_devs() { # NODE -> "dev:pref" for each device carrying local_rx
+  # local_rx runs on the interfaces the XDP dispatcher runs on, a bond's
+  # members included (D49), so look on every bond and Ethernet device.
   local node=$1 dev out pref
-  for dev in bond0 bond1 bond2; do
+  for dev in $(docker exec "${node}" sh -c 'ls /sys/class/net' | grep -E '^(bond|eth)[0-9]+$'); do
     out=$(docker exec "${node}" tc filter show dev "${dev}" ingress 2>/dev/null || true)
     pref=$(awk '/galactic_local_rx/ {for (i = 1; i < NF; i++) if ($i == "pref") {print $(i + 1); exit}}' <<<"${out}")
     [ -z "${pref}" ] || echo "${dev}:${pref}"
@@ -862,7 +866,9 @@ cell() {
   ANSWER_NAME=""
   for try in 1 2; do
     pick_port
-    docker exec "${node}" timeout 8 tcpdump -i "${iface}" -nn -l -c 2 "ip6 and port ${PORT_PICKED}" >"${tap}" 2>&1 &
+    # Enough packets for the request, a UDP sender's empty datagram and the
+    # reply; the timeout ends a capture that sees fewer.
+    docker exec "${node}" timeout 8 tcpdump -i "${iface}" -nn -l -c 8 "ip6 and port ${PORT_PICKED}" >"${tap}" 2>&1 &
     local tpid=$!
     docker exec "${CLIENT_HOST}" timeout 8 tcpdump -i eth1 -nn -l -c 1 \
       "dst port ${PORT_PICKED} and src port ${PORT}" >"${cli}" 2>&1 &
@@ -897,7 +903,12 @@ cell() {
   fi
   t=$(cat "${tap}")
   n=$(grep -cF -- "IP6 ${seen}.${sport} > ${addr}.${PORT}:" <<<"${t}" || true)
-  [ "${n}" -ge 1 ] || { ok=0 why="${why} tap-no-request"; }
+  # galactic-cni delivers to a veth guest with bpf_redirect_peer, which no
+  # capture on the host end sees (baseline: "peer redirect"); the guest's
+  # answer naming the client shows the request arrived.
+  if [ -z "${B_VETH[${b}]:-}" ]; then
+    [ "${n}" -ge 1 ] || { ok=0 why="${why} tap-no-request"; }
+  fi
   n=$(grep -cF -- "IP6 ${addr}.${PORT} > ${seen}.${sport}:" <<<"${t}" || true)
   [ "${n}" -ge 1 ] || { ok=0 why="${why} tap-no-reply"; }
   c=$(cat "${cli}")
