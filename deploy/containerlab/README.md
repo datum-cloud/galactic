@@ -506,6 +506,9 @@ deploy/containerlab/
 - `jq`
 - Host kernel with SRv6 support
 
+Deployment timings, registry prerequisites, reset limits and acceptance commands
+are documented in [Lab lifecycle](docs/lifecycle.md).
+
 ## Quick start
 
 ```bash
@@ -516,8 +519,9 @@ task deploy   # build all images, apply host sysctls, deploy lab end-to-end
 To tear down and start fresh:
 
 ```bash
-task destroy  # remove all lab containers and Kind clusters
-task clean    # destroy + delete built images and lab artifacts
+task reset    # restore a compatible deploy checkpoint without rebuilding clusters
+task destroy  # remove clusters and containers, retain verified image-only caches
+task clean    # destroy + delete images, caches and lab artifacts
 task deploy
 ```
 
@@ -538,8 +542,9 @@ task deploy
 | `build:masque-authority`         | Build the MASQUE grant authority image (`containers/masque-authority`)                                                                      |
 | `deploy`                         | Build images, apply host sysctls, and deploy the lab                                                                                        |
 | `deploy:topology`                | Deploy the ContainerLab topology (transit routers)                                                                                          |
+| `reset`                          | Restore a compatible deploy checkpoint without rebuilding images or clusters; see [lifecycle](docs/lifecycle.md)                            |
 | `deploy:clusters`                | Create the three Kind clusters and export their kubeconfigs                                                                                 |
-| `deploy:images`                  | Load container images into Kind clusters                                                                                                    |
+| `deploy:images`                  | Publish images to the local registry, then pull them into Kind                                                                              |
 | `deploy:system`                  | Install BGP and VPC CRDs; apply the galactic-system namespace and shared RBAC¹                                                              |
 | `deploy:cni`                     | Install Cilium and Multus, then the galactic-cni DaemonSet                                                                                  |
 | `deploy:traffic-policy`          | Install the traffic policy CRDs and galactic-controller, and wait for its webhook (after `deploy:cert-manager`)                             |

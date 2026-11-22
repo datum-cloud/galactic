@@ -89,7 +89,8 @@ print("\n".join(sorted(members)))
 '
 }
 
-for site in dfw sjc iad; do
+deploy_site() {
+  local site=$1
   node=$(control_plane "${site}")
   echo "Installing fabric-router-controller on ${site}..."
   # ServiceAccount and RBAC only; the Deployment comes from the lab overlay,
@@ -122,4 +123,5 @@ for site in dfw sjc iad; do
     fi
     import_router "${conf}" "${router}" | "${keep}" | label_imported | apply_f "${node}" -
   done
-done
+}
+parallel_sites deploy_site dfw sjc iad

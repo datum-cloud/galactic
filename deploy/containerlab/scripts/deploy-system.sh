@@ -9,7 +9,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-for site in dfw sjc iad; do
+deploy_site() {
+  local site=$1
   node=$(control_plane "${site}")
   echo "Applying system to ${node}..."
 
@@ -24,6 +25,7 @@ for site in dfw sjc iad; do
   apply_f "${node}" /galactic/config/galactic-nat/rbac.yaml
   apply_f "${node}" /galactic/config/galactic-gateway/serviceaccount.yaml
   apply_f "${node}" /galactic/config/galactic-gateway/rbac.yaml
-done
+}
+parallel_sites deploy_site dfw sjc iad
 
 echo "Done."

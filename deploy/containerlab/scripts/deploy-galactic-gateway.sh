@@ -66,7 +66,8 @@ wait_bindings() {
   done
 }
 
-for site in dfw sjc iad; do
+deploy_site() {
+  local site=$1
   node=$(control_plane "${site}")
   echo "Applying galactic-gateway/${site} to ${node}..."
   copy_to "${node}" galactic-gateway
@@ -94,6 +95,7 @@ for site in dfw sjc iad; do
   wait_bindings "${node}" "${NS60_BINDINGS}" 60
   docker exec "${node}" kubectl -n galactic-system wait servicevipbinding \
     -l "${GENERATED_BINDINGS}" --for=condition=Bound --timeout=60s
-done
+}
+parallel_sites deploy_site dfw sjc iad
 
 echo "Done."

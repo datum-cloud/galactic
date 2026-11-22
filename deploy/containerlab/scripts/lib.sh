@@ -45,6 +45,8 @@ copy_to() {
 # kubectl apply -k refuses to load resource files from outside that root.
 copy_config() {
   local node="$1"
+  docker exec "${node}" mkdir -p /galactic
+  docker exec "${node}" rm -rf /galactic/config
   docker cp "${CONFIG_DIR}" "${node}:/galactic/config"
 }
 
@@ -156,3 +158,33 @@ pick_port() {
   PORTS_USED[${p}]=1
   PORT_PICKED=${p}
 }
+
+# parallel_sites FUNCTION SITE... runs independent sites, waits for every child,
+# and fails if any child fails. Each child retains errexit and isolated variables.
+parallel_sites() (
+  local fn=$1 site pid rc=0
+  shift
+  local -a pids=()
+  trap 'trap - INT TERM; for pid in "${pids[@]}"; do kill -TERM "${pid}" 2>/dev/null || true; done; wait; exit 130' INT TERM
+  for site in "$@"; do
+    (
+      # The outer worker records failures too. The inner shell retains
+      # errexit and leaves the site's EXIT trap available for cleanup.
+      set +e
+      started=$SECONDS
+      (set -e; "${fn}" "${site}")
+      status=$?
+      if [[ -n "${LAB_TIMING_DIR:-}" ]]; then
+        mkdir -p "${LAB_TIMING_DIR}" || exit 1
+        printf '%s\t%s\t%s\n' "${site}" "$((SECONDS-started))" "${status}" \
+          > "${LAB_TIMING_DIR}/$(basename "$0" .sh)-${site}.tsv" || exit 1
+      fi
+      exit "${status}"
+    ) &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "${pid}" || rc=1
+  done
+  exit "${rc}"
+)

@@ -18,10 +18,7 @@ source "${SCRIPT_DIR}/lib.sh"
 # root) rather than duplicated in the repo.
 GALACTIC_CNI_DIR=$(cd "${SCRIPT_DIR}/../../../config/galactic-cni" && pwd)
 
-CILIUM_VERSION="v0.18.8"
-# The Cilium release to install. The CLI's default, v1.18.2, exits on Linux 7.3.
-CILIUM_RELEASE="v1.20.4"
-MULTUS_VERSION="v4.2.3"
+source "${SCRIPT_DIR}/image-versions.sh"
 
 # Must match the podSubnet in node_files/{dfw,sjc,iad}/config.yaml.
 CILIUM_POD_CIDR_V6="fd00:100::/48"
@@ -30,7 +27,8 @@ CILIUM_POD_CIDR_V6_MASK_SIZE=64
 ARCH=amd64
 if [ "$(uname -m)" = "aarch64" ]; then ARCH=arm64; fi
 
-for site in dfw sjc iad; do
+deploy_site() {
+  local site=$1
   node=$(control_plane "${site}")
   echo "Installing galactic-cni on ${site}..."
 
@@ -121,6 +119,7 @@ for site in dfw sjc iad; do
 
   apply_k "${node}" "/galactic/resources/galactic-cni/${site}/"
   docker exec "${node}" kubectl -n galactic-system rollout status daemonset galactic-cni
-done
+}
+parallel_sites deploy_site dfw sjc iad
 
 echo "Done."
