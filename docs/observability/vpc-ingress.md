@@ -6,6 +6,13 @@ See [scraping and component ports](README.md#where-the-metrics-come-from) and [s
 ingress nodes. It runs in the ingress proxy's pod, so each sidecar exports its
 own copy of these.
 
+Most of the metrics below describe the sidecar's in-pod encapsulation, which
+runs only with `--in-pod-encapsulation`
+([configuration](../vrf/configuration.md)). Without it, the default since
+[#1487](https://github.com/datum-cloud/galactic/issues/1487), the sidecar does
+not serve the startup, sweep, datapath and node source metrics, and its
+Worker claims are reported by the `worker_*` metrics instead.
+
 | Metric                                                | Type      | Labels | Meaning                                                                                                                                              |
 | ----------------------------------------------------- | --------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `galactic_ingress_sidecar_vrf_active`                 | gauge     | none   | VRF devices the store tracks as installed, including those draining. Store state, not a kernel check                                                 |

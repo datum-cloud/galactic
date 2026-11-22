@@ -261,6 +261,24 @@ type HandoffReporter interface {
 	HandoffInterfaces(scope Scope) map[ClaimKey][]HandoffInterface
 }
 
+// Blocked is why a claim's handoff cannot carry some of its destinations.
+type Blocked struct {
+	Reason  string
+	Message string
+}
+
+// HandoffGate is implemented by a module whose handoff for a claim also
+// carries the claim's destinations of another mode, such as a routed link
+// that carries a pod's Fabric traffic into the node's egress datapath.
+// Worker reports a destination of such a claim not forward-ready while its
+// handoff is blocked for the destination's mode.
+type HandoffGate interface {
+	// HandoffBlocked returns, by claim of scope, why the claim's handoff
+	// cannot carry its destinations of mode, as of the module's last Read.
+	// A claim that is not in the map is not blocked.
+	HandoffBlocked(scope Scope, mode workerv1alpha1.Mode) map[ClaimKey]Blocked
+}
+
 // Registry is the set of modules Worker runs and the capability status it
 // reports.
 type Registry struct {

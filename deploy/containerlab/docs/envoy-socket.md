@@ -46,8 +46,12 @@ sidecar's session reports `local.socket` and `fabric.srv6` available.
 The lab runs galactic-controller from the integration branch, which does not
 yet certify a proxy attachment's node from its pod. For the case it builds
 this checkout's galactic-controller, sets it on dfw's Deployment, and puts the
-recorded image back in its cleanup; the restore rows check the Deployment
-matches its deployed spec again. The case records the Envoy pod in the proxy
+recorded image back in its cleanup. Before the swap it exports the deployed
+image from the node running it to `bin/envoy-socket/controller-deployed.tar`;
+the cleanup loads that copy onto every node, since the kubelet may prune the
+unused image meanwhile, and fails the run unless the controller is Ready on
+it again. The restore rows also check the Deployment matches its deployed
+spec. The case records the Envoy pod in the proxy
 attachments' `status.podName`, as NSO does, names a replacement pod on the same
 attachments, and checks that the controller certifies both on `dfw-worker`.
 
@@ -82,15 +86,12 @@ is not part of the run.
 
 ## Remote backends
 
-Remote backends are not supported yet
-([#1487](https://github.com/datum-cloud/galactic/issues/1487)). The sidecar's
-in-pod datapath sends their SRv6 packets out of the pod's `eth0` with the
-node's SID as the outer source, and dfw's primary CNI, Cilium, drops them at
-its source-address check. The run still sets up each VPC's remote backend,
-and the cleanup still checks it, but it sends no request to it: it records
-one `scope` row per remote path, and the `state` row for the remote node's
-route back, as skipped with that reason. The `fresh`, `reused`, `sockets`,
-`captures`, `move` and `replace` windows cover the local paths only.
+A remote backend's traffic crosses the routed link like a local one's, and
+the host egress datapath Worker attaches to the link's host end encapsulates
+it in SRv6 ([#1487](https://github.com/datum-cloud/galactic/issues/1487)).
+Nothing leaves through the pod's `eth0`, so dfw's primary CNI, Cilium, never
+sees it. The sidecar runs without its in-pod encapsulation, and the setup
+checks no in-pod encapsulation pair exists.
 
 `REMOTE` picks the remote backend of each VPC:
 
@@ -135,16 +136,17 @@ after, since Worker takes a destination's addresses only from there.
 
 ## Windows
 
-| Window     | Checks                                                                                                                                                                                                                                                     |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fresh`    | 5 requests per path, one `curl` each: every answer from the path's VPC and site, seen from the gateway; 5 new upstream connections per fresh cluster                                                                                                       |
-| `reused`   | 5 requests per path in one `curl`: the same, over one upstream connection (one source port, `upstream_cx_total` +1, `upstream_rq_total` +5)                                                                                                                |
-| `sockets`  | The pooled sockets in the pod: local address the gateway, bound device `G000000080V` or `G000000081V`, peer the path's backend                                                                                                                             |
-| `captures` | During `fresh` and `reused`: local requests and replies only on their VPC's routed link and guest, none through the encapsulation pair or on the physical members; nothing of one VPC on the other's link, pair or guest   |
-| `state`    | The pod VRF routes only the local backend through the link; the host VRF routes the gateway to the host end; one Worker advertisement per VPC for the gateway, naming the pod; the sidecar reports 2 ready claims (the remote node's route back is skipped, #1487) |
-| `move`     | With VPC 80's local guest gone, its pod VRF drops the local route, the host VRF keeps the gateway route, and VPC 81's local path answers; the route and path come back with the guest                                                                         |
-| `replace`  | A rollout: the new pod's claim state is recorded, the new pod becomes Ready, the links and advertisements follow it, every path answers, and `verify-ns80.sh` passes                                                                                       |
-| `cleanup`  | With the fixture gone: no Worker advertisement, no Local link and no gateway route on `dfw-worker`; Worker stops                                                                                                                                           |
+| Window     | Checks                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fresh`    | 5 requests per path, one `curl` each: every answer from the path's VPC and site, seen from the gateway; 5 new upstream connections per fresh cluster                                                                                                                                                                                                                                                                                                    |
+| `reused`   | 5 requests per path in one `curl`: the same, over one upstream connection (one source port, `upstream_cx_total` +1, `upstream_rq_total` +5)                                                                                                                                                                                                                                                                                                             |
+| `sockets`  | The pooled sockets in the pod: local address the gateway, bound device `G000000080V` or `G000000081V`, peer the path's backend                                                                                                                                                                                                                                                                                                                          |
+| `captures` | During `fresh` and `reused`: every request crosses its VPC's routed link and host end, and every reply its routed link (a remote reply may reach the pod end without passing the host end's capture, so that row is observed); local ones reach only their guest and never the physical members; remote ones leave and return in SRv6 on the physical members; nothing leaves through the pod's `eth0`; nothing of one VPC on the other's link or guest |
+| `state`    | The pod VRF's only routed-link route is a default through the link, sourced from the gateway; the host end carries the host egress datapath; the host VRF routes the gateway to the host end; one Worker advertisement per VPC for the gateway, naming the pod; the remote node routes the gateway back; the sidecar reports 2 ready claims                                                                                                             |
+| `spoof`    | Five echo requests sent with scapy over VPC 80's link from a source the attachment does not hold are seen leaving the pod end and arriving at the host end, and none leaves the node; the same five from the gateway leave the node in SRv6                                                                                                                                                                                                             |
+| `move`     | With VPC 80's local guest gone, the pod VRF keeps its default route, the host VRF keeps the gateway route, 80/local gets no answer and every other path answers; 80/local answers again once the guest is back                                                                                                                                                                                                                                          |
+| `replace`  | A rollout: the new pod's claim state is recorded, the new pod becomes Ready, the links and advertisements follow it, every path answers, and `verify-ns80.sh` passes                                                                                                                                                                                                                                                                                    |
+| `cleanup`  | With the fixture gone: no Worker advertisement, no Local link and no gateway route on `dfw-worker`; Worker stops                                                                                                                                                                                                                                                                                                                                        |
 
 Capture points: the routed links' pod ends (`pod80`, `pod81`), the sidecar's
 `ivs`/`ivp` pairs (`encap80`, `encap81`), the host ends (`host80`, `host81`),

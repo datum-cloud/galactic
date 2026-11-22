@@ -101,7 +101,7 @@ func TestRoutedLinkFaultsRoot(t *testing.T) {
 	host := linkName(a.vpc, "envoy-good", intf.LocalRoleRoutedHost)
 
 	// The guard goes: the link is down until it is back.
-	r.in(r.node, func() error { return attach.DetachLocal(host) })
+	r.in(r.node, func() error { return attach.DetachTCXGuard(host) })
 	wantState(t, r.read(a.vpc), claims[0], true, false, false, workerv1alpha1.ReasonHandoffHookMissing)
 	wantReady(t, r.reconcile(a.vpc, claims), claims[:1])
 

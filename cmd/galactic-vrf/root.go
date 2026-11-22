@@ -32,7 +32,7 @@ import (
 const (
 	appName = "galactic-vrf"
 
-	appDesc = `Galactic ingress sidecar: per-pod VPC backend VRF/SRv6 route lifecycle
+	appDesc = `Galactic ingress sidecar: per-pod VPC backend VRF and route lifecycle
 
  Find more information at: https://www.datum.net/docs`
 )
@@ -61,17 +61,73 @@ func newSidecarMetrics(cfg *config.VRFConfig) sidecarMetrics {
 		nodeSource:  ingresssidecar.NewNodeSourceMetrics(),
 		claims:      ingresssidecar.NewClaimMetrics(),
 	}
-	m.lifecycle.MustRegister()
-	m.datapath.MustRegister()
-	m.nodeSource.MustRegister()
+	// The startup, sweep, datapath and node source collectors describe the
+	// in-pod encapsulation's Store. Without it they would sit at their
+	// initial values, which the documented queries read as a stalled
+	// sidecar, so they are served only when it runs.
+	if cfg.InPodEncapsulation {
+		m.lifecycle.MustRegister()
+		m.datapath.MustRegister()
+		m.nodeSource.MustRegister()
+	}
 	return m
 }
 
-// runCmd is the application startup: it registers the ingress sidecar's
-// reconciler against a cluster-scoped EndpointSlice watch, then seeds the store
-// from live API state and runs its startup inventory and periodic sweep. Beside
-// it, the Worker claim runner holds one socket claim per VPC with Galactic
-// Worker and configures the routed link Worker gives each claim.
+// sidecarParts is what runCmd wires, as the configuration selects it.
+type sidecarParts struct {
+	// store runs the in-pod encapsulation: the EndpointSlice Store, its
+	// reconciler, its startup and sweep, and the node source address
+	// resolver.
+	store bool
+	// pruneInPodEncapsulation removes, once at start, the in-pod
+	// encapsulation an earlier sidecar left in the pod and the node's maps.
+	pruneInPodEncapsulation bool
+	// podLink configures the pod end of each claim's routed link.
+	podLink ingresssidecar.PodLink
+}
+
+// partsFor returns the parts cfg selects. With in-pod encapsulation the Store
+// creates each VPC's VRF and encapsulates traffic to backends on other nodes,
+// and the routed link carries only Local backends. Without it, the claims
+// path creates each VRF and sends all of its traffic over the routed link.
+func partsFor(cfg *config.VRFConfig) sidecarParts {
+	if cfg.InPodEncapsulation {
+		return sidecarParts{store: true, podLink: ingresssidecar.NewKernelPodLink()}
+	}
+	return sidecarParts{pruneInPodEncapsulation: true, podLink: ingresssidecar.NewRoutedPodLink()}
+}
+
+// setupStore registers the in-pod encapsulation's EndpointSlice reconciler
+// and node source address resolver with mgr, and returns the Store.
+func setupStore(mgr ctrl.Manager, cfg *config.VRFConfig, m sidecarMetrics) (*ingresssidecar.Store, error) {
+	backend := ingresssidecar.NewKernelBackend()
+	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, m.store)
+	store.SetConvergenceMetrics(m.convergence)
+	store.SetInputMetrics(m.inputs)
+	store.SetDatapathMetrics(m.datapath)
+	store.SetNodeSourceMetrics(m.nodeSource)
+
+	// This node's own SRv6 SID, the source usid_egress stamps into every
+	// outer header it pushes for a backend on another node. It is read from
+	// this node's BGPRouter: nothing visible inside Envoy's pod namespace,
+	// which is where this sidecar always runs, identifies the node's SID.
+	ingresssidecar.SetNodeSourceAddressResolver(
+		ingresssidecar.NewK8sNodeSourceAddressResolver(mgr.GetClient(), cfg.NodeName, cfg.Namespace),
+	)
+
+	if err := (&ingresssidecar.Reconciler{Store: store}).SetupWithManager(mgr); err != nil {
+		return nil, fmt.Errorf("setup EndpointSlice controller: %w", err)
+	}
+	return store, nil
+}
+
+// runCmd is the application startup. The Worker claim runner holds one
+// socket claim per VPC with Galactic Worker and configures the routed link
+// Worker gives each claim. With in-pod encapsulation, it also registers the
+// ingress sidecar's reconciler against a cluster-scoped EndpointSlice watch,
+// then seeds the store from live API state and runs its startup inventory and
+// periodic sweep. Without, it first prunes what an in-pod encapsulating
+// sidecar left behind.
 func runCmd(cfg *config.VRFConfig) error {
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -102,24 +158,16 @@ func runCmd(cfg *config.VRFConfig) error {
 	checkWatchPermissions(mgr)
 
 	m := newSidecarMetrics(cfg)
+	parts := partsFor(cfg)
 
-	backend := ingresssidecar.NewKernelBackend()
-	store := ingresssidecar.NewStore(backend, cfg.TeardownGracePeriod, m.store)
-	store.SetConvergenceMetrics(m.convergence)
-	store.SetInputMetrics(m.inputs)
-	store.SetDatapathMetrics(m.datapath)
-	store.SetNodeSourceMetrics(m.nodeSource)
-
-	// This node's own SRv6 SID, the source usid_egress stamps into every
-	// outer header it pushes for a backend on another node. It is read from
-	// this node's BGPRouter: nothing visible inside Envoy's pod namespace,
-	// which is where this sidecar always runs, identifies the node's SID.
-	ingresssidecar.SetNodeSourceAddressResolver(
-		ingresssidecar.NewK8sNodeSourceAddressResolver(mgr.GetClient(), cfg.NodeName, cfg.Namespace),
-	)
-
-	if err := (&ingresssidecar.Reconciler{Store: store}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup EndpointSlice controller: %w", err)
+	var store *ingresssidecar.Store
+	if parts.store {
+		if store, err = setupStore(mgr, cfg, m); err != nil {
+			return err
+		}
+	}
+	if parts.pruneInPodEncapsulation {
+		pruneInPodEncapsulation()
 	}
 
 	if err := ingresssidecar.RegisterClaimIndexes(ctx, mgr.GetFieldIndexer()); err != nil {
@@ -128,7 +176,7 @@ func runCmd(cfg *config.VRFConfig) error {
 	claimLog := slog.Default().With("component", "worker-claims")
 	inputs := &ingresssidecar.KubeClaimInputs{Reader: mgr.GetClient(), Namespace: cfg.PodNamespace,
 		Selector: selector, Node: cfg.NodeName, Log: claimLog}
-	podLink := ingresssidecar.NewKernelPodLink()
+	podLink := parts.podLink
 	runner := &ingresssidecar.ClaimsRunner{
 		Dial: func(ctx context.Context) (*workerclient.Client, error) {
 			return workerclient.Dial(ctx, workerclient.Options{SocketPath: cfg.WorkerSocket,
@@ -162,7 +210,9 @@ func runCmd(cfg *config.VRFConfig) error {
 	// controller's own reconciles have drained the workqueue that list
 	// fed, so on a busy node at boot the two race. Seeding uses the
 	// manager's uncached reader, which depends on neither.
-	go ingresssidecar.RunStartup(ctx, mgr.GetAPIReader(), store, cfg.SweepInterval, m.lifecycle)
+	if store != nil {
+		go ingresssidecar.RunStartup(ctx, mgr.GetAPIReader(), store, cfg.SweepInterval, m.lifecycle)
+	}
 
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("manager exited: %w", err)
@@ -177,6 +227,22 @@ func runCmd(cfg *config.VRFConfig) error {
 	// connections. The claim runner releases the Worker claims, so the
 	// proxy's next pod takes the routed links over at once.
 	return nil
+}
+
+// pruneInPodEncapsulation runs ingresssidecar.PruneInPodEncapsulation and
+// logs its outcome. A failure is not fatal: the routed link's default route,
+// which the claims path installs, is what carries the traffic.
+func pruneInPodEncapsulation() {
+	log := slog.Default().With("component", "in-pod-prune")
+	res, err := ingresssidecar.PruneInPodEncapsulation()
+	if res.Total() > 0 {
+		log.Info("removed the in-pod encapsulation an earlier sidecar left", "vethLinks", res.VethLinks,
+			"redirectRoutes", res.RedirectRoutes, "seg6Routes", res.Seg6Routes, "mapRows", res.MapRows)
+	}
+	if err != nil {
+		log.Warn("could not remove all of the in-pod encapsulation an earlier sidecar left; continuing",
+			"error", err)
+	}
 }
 
 // newRootCommand builds the root cobra command with all flags and the
@@ -234,6 +300,10 @@ func newRootCommand() *cobra.Command {
 		"Galactic Worker's unix socket (env "+config.EnvVRFWorkerSocket+")")
 	cmd.Flags().String("worker-token-file", "",
 		"The pod's projected token for Galactic Worker (env "+config.EnvVRFWorkerTokenFile+")")
+	cmd.Flags().Bool(config.FlagVRFInPodEncapsulation, config.DefaultVRFInPodEncapsulation,
+		"Encapsulate traffic to backends on other nodes inside the pod, watching EndpointSlices, and route only "+
+			"backends on this node over Worker's routed link (env "+config.EnvVRFInPodEncapsulation+"). Only for "+
+			"nodes whose CNI forwards pod-sourced SRv6; slated for removal")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	logOpts.BindFlags(cmd.PersistentFlags())

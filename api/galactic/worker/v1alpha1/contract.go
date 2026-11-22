@@ -164,6 +164,13 @@ const (
 	// enter a pod's network namespace for the link's pod end. Only a
 	// placement that enables routed links grants them.
 	ReasonRoutedLinkUnavailable = "RoutedLinkUnavailable"
+	// ReasonRoutedLinkEgressUnavailable is a Fabric destination of a
+	// routed_link or socket claim whose routed link does not carry the
+	// node's egress datapath, so the pod's traffic to it is not
+	// encapsulated: the link's source guard cannot run before that
+	// datapath, the kernel has no tcx, or the link could not be registered
+	// with it. The claim's Local destinations stay reachable.
+	ReasonRoutedLinkEgressUnavailable = "RoutedLinkEgressUnavailable"
 	// ReasonHandoffHookMissing is a Local destination whose handoff program
 	// is not on its hook: Worker's own tc program, or the program the
 	// client attaches to the NAT end of a veth pair.

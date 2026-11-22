@@ -363,19 +363,28 @@ func checkNotPreemptedOne(l netlink.Link, own map[ebpf.ProgramID]struct{}) error
 		return nil // nothing in front of clsact
 	}
 
-	first := ids[0]
-	if _, ours := own[first]; ours {
-		return nil
+	// Worker's routed-link guard runs at the head of tcx on purpose, ahead of
+	// the egress chain, and is loaded by Worker rather than this process, so
+	// it is recognised by name. Whatever runs first after it is judged as
+	// the head would be.
+	for _, id := range ids {
+		if _, ours := own[id]; ours {
+			return nil
+		}
+		// Best effort, and expected to fail without CAP_SYS_ADMIN or
+		// CAP_PERFMON. The id carries the report either way.
+		progName, nerr := programNameFn(id)
+		if nerr == nil && IsLocalGuardName(progName) {
+			continue
+		}
+		if nerr == nil {
+			return fmt.Errorf("tc program %q (id %d) runs ahead of this datapath "+
+				"(tcx precedes clsact), so traffic it consumes never reaches usid_egress",
+				progName, id)
+		}
+		return fmt.Errorf("an unidentified tc program (id %d) runs ahead of this datapath "+
+			"(tcx precedes clsact), so traffic it consumes never reaches usid_egress; "+
+			"run `bpftool prog show id %d` to name it", id, id)
 	}
-
-	// Best effort, and expected to fail without CAP_SYS_ADMIN or
-	// CAP_PERFMON. The id carries the report either way.
-	if progName, nerr := programNameFn(first); nerr == nil {
-		return fmt.Errorf("tc program %q (id %d) runs ahead of this datapath "+
-			"(tcx precedes clsact), so traffic it consumes never reaches usid_egress",
-			progName, first)
-	}
-	return fmt.Errorf("an unidentified tc program (id %d) runs ahead of this datapath "+
-		"(tcx precedes clsact), so traffic it consumes never reaches usid_egress; "+
-		"run `bpftool prog show id %d` to name it", first, first)
+	return nil
 }

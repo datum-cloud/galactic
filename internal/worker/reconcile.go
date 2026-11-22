@@ -180,7 +180,34 @@ func (w *Worker) Reconcile(ctx context.Context, vpc string) error {
 			}
 		}
 	}
-	return w.report(evals, state, handoffs)
+	return w.report(evals, state, handoffs, handoffBlocks(mods, scope))
+}
+
+// handoffBlocks returns, by mode and claim, why a module's handoff cannot
+// carry a claim's destinations of another mode.
+func handoffBlocks(mods []module.Module,
+	scope module.Scope) map[workerv1alpha1.Mode]map[module.ClaimKey]module.Blocked {
+	out := map[workerv1alpha1.Mode]map[module.ClaimKey]module.Blocked{}
+	for _, m := range mods {
+		g, ok := m.(module.HandoffGate)
+		if !ok {
+			continue
+		}
+		for _, mode := range []workerv1alpha1.Mode{workerv1alpha1.Mode_MODE_LOCAL, workerv1alpha1.Mode_MODE_FABRIC} {
+			if mode == m.Mode() {
+				continue
+			}
+			for k, b := range g.HandoffBlocked(scope, mode) {
+				if out[mode] == nil {
+					out[mode] = map[module.ClaimKey]module.Blocked{}
+				}
+				if _, seen := out[mode][k]; !seen {
+					out[mode][k] = b
+				}
+			}
+		}
+	}
+	return out
 }
 
 // planClaimedHost reports whether the canonical host state of vpc, which
@@ -853,7 +880,8 @@ func (w *Worker) reportFailure(evals []*claimEval, reason string, err error) {
 // report turns read-back into status, and deletes released claims whose
 // programmed state is gone.
 func (w *Worker) report(evals []*claimEval, state map[workerv1alpha1.Mode]module.State,
-	handoffs map[module.ClaimKey][]module.HandoffInterface) error {
+	handoffs map[module.ClaimKey][]module.HandoffInterface,
+	blocked map[workerv1alpha1.Mode]map[module.ClaimKey]module.Blocked) error {
 	present := func(k module.ClaimKey) bool {
 		for _, st := range state {
 			if len(st[k]) > 0 {
@@ -879,7 +907,7 @@ func (w *Worker) report(evals []*claimEval, state map[workerv1alpha1.Mode]module
 			continue
 		}
 		before := cloneCondition(readyCondition(c.status))
-		w.applyStatus(c, e, state)
+		w.applyStatus(c, e, state, blocked)
 		w.logReadyChange(c, before)
 		c.status.HandoffInterfaces = nil
 		for _, h := range handoffs[e.key] {
@@ -900,8 +928,11 @@ func (w *Worker) report(evals []*claimEval, state map[workerv1alpha1.Mode]module
 }
 
 // applyStatus computes a live claim's status from its evaluation and the
-// read-back. w.mu must be held.
-func (w *Worker) applyStatus(c *claim, e *claimEval, state map[workerv1alpha1.Mode]module.State) {
+// read-back. A programmed destination whose mode blocked names for the claim
+// is not forward-ready: the claim's handoff cannot carry it. w.mu must be
+// held.
+func (w *Worker) applyStatus(c *claim, e *claimEval, state map[workerv1alpha1.Mode]module.State,
+	blocked map[workerv1alpha1.Mode]map[module.ClaimKey]module.Blocked) {
 	st := c.status
 	st.ObservedGeneration = e.gen
 	st.Destinations = nil
@@ -943,8 +974,16 @@ func (w *Worker) applyStatus(c *claim, e *claimEval, state map[workerv1alpha1.Mo
 				ds.ForwardReady, ds.ReturnReady = got.ForwardReady, got.ReturnReady
 				if !got.Ready {
 					ds.Reason, ds.Message = got.Reason, got.Message
+				}
+				if b, ok := blocked[de.mode][e.key]; ok {
+					ds.Ready, ds.ForwardReady = false, false
+					if got.Ready {
+						ds.Reason, ds.Message = b.Reason, b.Message
+					}
+				}
+				if !ds.Ready {
 					ready = false
-					first(&yReason, &yMsg, got.Reason, de.id+": "+got.Message)
+					first(&yReason, &yMsg, ds.Reason, de.id+": "+ds.Message)
 				}
 			}
 		}
