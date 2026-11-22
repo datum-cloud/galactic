@@ -60,6 +60,11 @@ the sidecar's key range of the node's shared `vrf_table`,
 rows are never touched. A failure, such as maps it cannot open, is logged and
 startup continues.
 
+The prune removes every in-pod encapsulation row on the node, not only this
+pod's. Before turning in-pod encapsulation off on one sidecar, switch every
+sidecar on that node together. The Component's rollout (`maxSurge: 0`)
+replaces one proxy pod per node at a time.
+
 `--in-pod-encapsulation=true` keeps the earlier datapath: the sidecar watches
 EndpointSlices, creates each VPC's VRF with a default route into an in-pod
 SRv6 encapsulation (`usid_egress` on the `ivs<table>`/`ivp<table>` veth pair),
