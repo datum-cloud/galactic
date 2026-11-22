@@ -649,6 +649,22 @@ programmed Fabric destinations not forward-ready with
 attaches its guard at the head before it detaches the earlier one, so a
 restart leaves no unguarded moment.
 
+A program attached at the head after Worker's check runs before the guard
+until Worker's next pass, at most the 30 s resync interval
+(`DefaultResyncInterval`). Packets are still never encapsulated unguarded:
+the clsact filters, `usid_egress` among them, run only when the whole tcx
+chain returns NEXT, so a packet reaches them only after the guard, and a
+program that ends the chain early with PASS skips them too. Such a program
+can therefore expose only local tenants, through the host VRF's kernel
+routes, and only for that window. An operator sees it in three places. While
+the program precedes the guard, galactic-cni's health check logs a warning
+that a tc program runs ahead of the datapath (it does not fail the probe).
+When Worker moves the guard back, it records drift for the VPC ("the guard of
+... is not first on its tcx ingress"), which `galactic-worker inspect` shows.
+When it cannot, the claim's Fabric destinations report not forward-ready with
+`RoutedLinkEgressUnavailable` and a message that names the program, by ID,
+that runs first.
+
 A claim's Fabric destinations are forward-ready only once its routed link
 exists and carries the egress datapath. Until then they report the link's
 own reason, such as `Pending` or `HandoffInterfaceMissing`.
