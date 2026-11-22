@@ -44,13 +44,15 @@ func TestRestartKeepsReceiveHookRoot(t *testing.T) {
 				return err
 			}
 		}
-		l, err := netlink.LinkByName(r.rx)
-		if err != nil {
-			return err
-		}
-		name, _, ok, err := attach.LocalFilter(l.Attrs().Index)
-		if err != nil || !ok || name != filterRx {
-			t.Fatalf("local_rx on %s after a restart: %q %t %v", r.rx, name, ok, err)
+		for _, hook := range r.hooks {
+			l, err := netlink.LinkByName(hook)
+			if err != nil {
+				return err
+			}
+			name, _, ok, err := attach.LocalFilter(l.Attrs().Index)
+			if err != nil || !ok || name != filterRx {
+				t.Fatalf("local_rx on %s after a restart: %q %t %v", hook, name, ok, err)
+			}
 		}
 		return nil
 	})

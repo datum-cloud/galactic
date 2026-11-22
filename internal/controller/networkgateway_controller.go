@@ -32,10 +32,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	cloudv1alpha1 "go.datum.net/galactic/api/cloud/v1alpha1"
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/gateway"
+	"go.datum.net/galactic/internal/plumbing/srv6"
 )
 
 // GatewayEngine is the interface NetworkGatewayReconciler drives, satisfied by
@@ -135,6 +137,20 @@ type NetworkGatewayReconciler struct {
 	// NetworkGateways it trusts. With Scope.ProjectServices on, a
 	// NetworkGateway outside Scope.GatewayNamespace is ignored.
 	Scope ServiceScope
+
+	// LocalHandoff, when set, hands the backends on this node to their TAPs
+	// through Galactic Worker's Local handoff instead of encapsulating
+	// toward them, and its state is published in status.localBackends.
+	LocalHandoff LocalHandoff
+
+	// PublicPath, when set, reports the VIP families the gateway's public
+	// path does not cover on this node. Each such family's advertisements
+	// are withdrawn (D44).
+	PublicPath func() PublicPathState
+
+	// LocalEvents, when set, re-queues this node's NetworkGateway whenever
+	// the Local handoff's readiness or the public path changes.
+	LocalEvents <-chan event.GenericEvent
 
 	// Owned guards outlive failed removals; confirmed revisions are process-local
 	// so a restarted writer fences every owned address before recovery.
@@ -443,7 +459,7 @@ func (r *NetworkGatewayReconciler) reconcileGateway(ctx context.Context, req ctr
 		}
 		r.drain.reset()
 		gwCopy := gw.DeepCopy()
-		gwCopy.Status.BackendHealthFiltering = r.BackendHealth
+		r.stampStatus(gwCopy)
 		setGatewayCondition(gwCopy, metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
 			Status:  metav1.ConditionFalse,
@@ -463,7 +479,7 @@ func (r *NetworkGatewayReconciler) reconcileGateway(ctx context.Context, req ctr
 			r.syncReturnPath(ctx, gw.Namespace),
 		)
 		gwCopy := gw.DeepCopy()
-		gwCopy.Status.BackendHealthFiltering = r.BackendHealth
+		r.stampStatus(gwCopy)
 		gwCopy.Status.ObservedGeneration = gw.Generation
 		gwCopy.Status.Capabilities = nil
 		setGatewayCondition(gwCopy, metav1.Condition{
@@ -535,6 +551,7 @@ func (r *NetworkGatewayReconciler) reconcileServingGateway(ctx context.Context, 
 	if err := r.primeGroupedServing(ctx, addresses, desired, outcomes); err != nil {
 		return ctrl.Result{}, errors.Join(err, withdrawNodeAdvertisements(ctx, r.Client, gw.Namespace, r.NodeName))
 	}
+	r.syncLocalBackends(desired)
 	status, err := r.reconcileEngine(ctx, gw, desired)
 	if err != nil {
 		return ctrl.Result{}, errors.Join(fwdErr, err)
@@ -570,7 +587,7 @@ func (r *NetworkGatewayReconciler) reconcileServingGateway(ctx context.Context, 
 	advErr = errors.Join(advErr, addressErr)
 
 	gwCopy := gw.DeepCopy()
-	gwCopy.Status.BackendHealthFiltering = r.BackendHealth
+	r.stampStatus(gwCopy)
 	gwCopy.Status.Capabilities = r.servingCapabilities(leaseSupport)
 	gwCopy.Status.ObservedGeneration = gw.Generation
 	ready := readyConditionFor(status, advErr)
@@ -669,7 +686,7 @@ func (r *NetworkGatewayReconciler) reconcileEngine(
 	status, err := r.Engine.Reconcile(ctx, desired)
 	if err != nil {
 		gwCopy := gw.DeepCopy()
-		gwCopy.Status.BackendHealthFiltering = r.BackendHealth
+		r.stampStatus(gwCopy)
 		setGatewayCondition(gwCopy, metav1.Condition{
 			Type:    bgpv1alpha1.ConditionTypeReady,
 			Status:  metav1.ConditionFalse,
@@ -1032,7 +1049,8 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 		// The rule's IPv4 VIP is advertised only when this node loaded it over
 		// only its Bound backends, at least one (ipv4Loaded), and the rule
 		// loaded.
-		advertiseIPv4 := r.IPv4VIPs && o.ipv4 == ipv4Loaded
+		pp := r.publicPath()
+		advertiseIPv4 := r.advertisesIPv4(o, pp)
 		var publishErr error
 		var pending []string
 		switch {
@@ -1056,6 +1074,10 @@ func (r *NetworkGatewayReconciler) publishRuleOutcomes(
 
 		published := cond.Status == metav1.ConditionTrue && routerName != "" && publishErr == nil
 		adv := advertisedCondition(r.NodeName, cond.Status == metav1.ConditionTrue, routerName, publishErr, pending)
+		adv, aggErr := r.familyAdvertised(ctx, published, namespace, routerName, o.desired, pp, adv)
+		if aggErr != nil {
+			statusErrs = append(statusErrs, fmt.Errorf("networkRule %s: %w", o.rule.Name, aggErr))
+		}
 		ipv4 := ipv4ServedCondition(r.NodeName, o.rule, o.ipv4, cond.Status == metav1.ConditionTrue, published)
 		if err := r.setRuleConditions(ctx, o.rule, cond, adv, ipv4, departed); err != nil {
 			logger.Error(err, "update NetworkService conditions", "networkRule", o.rule.Name)
@@ -1182,7 +1204,7 @@ func (r *NetworkGatewayReconciler) uninstalledAdvertisements(
 	if advertiseIPv4 && len(v4) > 0 {
 		families = append(families, "v4")
 	}
-	if len(v6) > 0 {
+	if _, withdrawn := r.publicPath().withdrawn("v6"); len(v6) > 0 && !withdrawn {
 		families = append(families, "v6")
 	}
 	var pending []string
@@ -1743,6 +1765,7 @@ func buildDesiredRule(
 		vips       []netip.Addr
 		v6Backends []gateway.DesiredBackend
 		v4Backends []gateway.DesiredBackend
+		placed     []gateway.PlacedBackend
 	)
 	for _, f := range []struct {
 		family   addrFamily
@@ -1761,11 +1784,14 @@ func buildDesiredRule(
 			unbound = func(b ruleBackend) string { return bindings.unbound(rule, objNS, vip, b) }
 		}
 		var unhealthy func(ruleBackend) bool
-		if rule.Spec.HealthCheck != nil && health.apply {
+		// A rule without a healthCheck still leaves out a backend whose
+		// Local handoff is not ready (bindings.unhealthy).
+		if health.apply {
 			unhealthy = func(b ruleBackend) bool { return bindings.unhealthy(rule, objNS, vip, b) }
 		}
 		fam, err := resolveFamilyBackends(rule, attachments, sidIndex, owners, f.family, objNS, unbound, unhealthy)
 		unresolved = append(unresolved, fam.unresolved...)
+		placed = append(placed, fam.placed...)
 		rh.unhealthy = append(rh.unhealthy, fam.unhealthy...)
 		rh.noneHealthy = rh.noneHealthy || fam.noneHealthy
 		if err != nil {
@@ -1799,16 +1825,31 @@ func buildDesiredRule(
 	sort.Strings(rh.unhealthy)
 
 	return gateway.DesiredRule{
-		Key:          rule.Namespace + "/" + rule.Name,
-		VPCRef:       rule.Spec.VPCRef,
-		VIPAddresses: vips,
-		Protocol:     string(rule.Spec.Protocol),
-		Port:         port,
-		PortEnd:      rulePortEnd(rule),
-		Affinity:     string(rule.Spec.SessionAffinity),
-		Backends:     v6Backends,
-		IPv4Backends: v4Backends,
+		Key:            rule.Namespace + "/" + rule.Name,
+		VPCRef:         rule.Spec.VPCRef,
+		VIPAddresses:   vips,
+		Protocol:       string(rule.Spec.Protocol),
+		Port:           port,
+		PortEnd:        rulePortEnd(rule),
+		Affinity:       string(rule.Spec.SessionAffinity),
+		Backends:       v6Backends,
+		IPv4Backends:   v4Backends,
+		PlacedBackends: dedupePlaced(placed),
 	}, unresolved, ipv4, rh, nil
+}
+
+// dedupePlaced drops the second family's copy of each backend.
+func dedupePlaced(in []gateway.PlacedBackend) []gateway.PlacedBackend {
+	seen := make(map[netip.Addr]bool, len(in))
+	out := in[:0]
+	for _, b := range in {
+		if seen[b.USID] {
+			continue
+		}
+		seen[b.USID] = true
+		out = append(out, b)
+	}
+	return out
 }
 
 // unservedIPv4Family returns the ipv4Family of IPv4 VIPs left out because
@@ -1847,6 +1888,10 @@ type familyBackends struct {
 	// noneHealthy is set when every candidate backend is Unhealthy, so
 	// backends keeps them all.
 	noneHealthy bool
+
+	// placed is every resolved backend, before binding and health
+	// filtering.
+	placed []gateway.PlacedBackend
 }
 
 // resolveFamilyBackends returns rule's backends of family, each resolved to its
@@ -1900,6 +1945,8 @@ func resolveFamilyBackends(
 		}
 		r := resolved{rb: b, db: gateway.DesiredBackend{Address: b.addr, Port: b.port, USID: usid}}
 		all = append(all, r)
+		out.placed = append(out.placed, gateway.PlacedBackend{Node: b.node, AttachmentUID: string(b.uid),
+			VPC: b.vpc, Slot: srv6.BackendSlot(b.addr, b.port), USID: usid})
 		if unbound == nil {
 			continue
 		}
@@ -2050,12 +2097,25 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 		return nil
 	}
 	v4Prefixes, v6Prefixes := prefixesByFamily(desired.VIPAddresses)
+	pp := r.publicPath()
+	if _, ok := pp.withdrawn("v6"); ok {
+		// The public path does not cover IPv6 here (D44): withdraw this
+		// node's -v6 route now, so the VIP's other gateways take its
+		// clients.
+		v6Prefixes = nil
+		if err := r.withdrawFamilyAdvertisement(ctx, objNS, rule, "v6"); err != nil {
+			return err
+		}
+	}
+	if _, ok := pp.withdrawn("v4"); ok {
+		advertiseIPv4 = false
+	}
 	if !advertiseIPv4 {
 		// The gate is closed. Withdraw this node's -v4 route now rather than
 		// through the prune below, which waits for every other family's write
 		// to succeed.
 		v4Prefixes = nil
-		if err := r.withdrawIPv4Advertisement(ctx, objNS, rule); err != nil {
+		if err := r.withdrawFamilyAdvertisement(ctx, objNS, rule, "v4"); err != nil {
 			return err
 		}
 	}
@@ -2150,16 +2210,17 @@ func (r *NetworkGatewayReconciler) applyBGPAdvertisements(
 	return pruneRuleAdvertisements(ctx, r.Client, rule, objNS, r.NodeName, keep)
 }
 
-// withdrawIPv4Advertisement deletes the "-v4" advertisement this node made for
-// rule, if any. It deletes only an object isNodeAdvertisement accepts for this
-// node, so it never removes another node's route.
-func (r *NetworkGatewayReconciler) withdrawIPv4Advertisement(
-	ctx context.Context, objNS string, rule *bgpv1alpha1.NetworkService,
+// withdrawFamilyAdvertisement deletes the advertisement this node made for
+// rule's family ("v4" or "v6"), if any. It deletes only an object
+// isNodeAdvertisement accepts for this node, so it never removes another
+// node's route.
+func (r *NetworkGatewayReconciler) withdrawFamilyAdvertisement(
+	ctx context.Context, objNS string, rule *bgpv1alpha1.NetworkService, family string,
 ) error {
 	adv := &bgpv1alpha1.BGPAdvertisement{}
 	key := types.NamespacedName{
 		Namespace: objNS,
-		Name:      ruleKeyAdvertisementName(client.ObjectKeyFromObject(rule), objNS, r.NodeName, "v4"),
+		Name:      ruleKeyAdvertisementName(client.ObjectKeyFromObject(rule), objNS, r.NodeName, family),
 	}
 	if err := r.Get(ctx, key, adv); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -2285,7 +2346,33 @@ func (r *NetworkGatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(gatewayHealthFilteringChanged()),
 		)
 	}
+	if r.LocalEvents != nil {
+		// The Local handoff's readiness and the public path's coverage are
+		// published on this node's NetworkGateway and decide which VIP
+		// families it advertises.
+		b = b.WatchesRawSource(source.Channel(r.LocalEvents, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, _ client.Object) []ctrlreconcile.Request {
+				return r.nodeGatewayRequests(ctx)
+			}),
+		))
+	}
 	return b.Named("networkgateway").Complete(r)
+}
+
+// nodeGatewayRequests enqueues every NetworkGateway targeting this node.
+func (r *NetworkGatewayReconciler) nodeGatewayRequests(ctx context.Context) []ctrlreconcile.Request {
+	list := &bgpv1alpha1.NetworkGatewayList{}
+	if err := r.List(ctx, list); err != nil {
+		log.FromContext(ctx).Error(err, "list NetworkGateways for a Local handoff or public path change")
+		return nil
+	}
+	var out []ctrlreconcile.Request
+	for i := range list.Items {
+		if list.Items[i].Spec.TargetRef.Name == r.NodeName {
+			out = append(out, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+		}
+	}
+	return out
 }
 
 // backendAdvertisementPredicate passes only BGPAdvertisement events a pass can

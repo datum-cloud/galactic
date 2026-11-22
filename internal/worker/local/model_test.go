@@ -6,6 +6,7 @@ package local
 
 import (
 	"net/netip"
+	"reflect"
 	"strconv"
 	"testing"
 
@@ -81,6 +82,27 @@ func TestDesire(t *testing.T) {
 	}
 	if !desire("v", nil).empty() {
 		t.Error("no claims want state")
+	}
+}
+
+// TestDesireTreatsABackendAsItsAttachment checks that a local.tap claim's
+// backend destination wants exactly the state its VPCAttachment's would.
+func TestDesireTreatsABackendAsItsAttachment(t *testing.T) {
+	v6 := netip.MustParseAddr("fd20::1")
+	k := module.ClaimKey{VPC: "v", AttachmentUID: "backend-att"}
+	att := module.Destination{ID: "attachment/backend-att", HostInterface: "tapA",
+		Addresses: []netip.Addr{v6}}
+	backend := att
+	backend.ID = "backend/node-a/7"
+	backend.Backend = &module.BackendTarget{Slot: 7, Address: v6, Port: 8080, Bindings: []string{"b"}}
+	claim := func(d module.Destination) []module.Claim {
+		return []module.Claim{{Key: k, Handoff: workerv1alpha1.Handoff_HANDOFF_TAP,
+			Destinations: []module.Destination{d}}}
+	}
+	got, want := desire("v", claim(backend)), desire("v", claim(att))
+	if !got.tap || len(got.tenants) != 1 || !reflect.DeepEqual(got.tenants["tapA"], want.tenants["tapA"]) {
+		t.Fatalf("backend desire = %+v (tapA %+v), want the attachment's %+v", got, got.tenants["tapA"],
+			want.tenants["tapA"])
 	}
 }
 

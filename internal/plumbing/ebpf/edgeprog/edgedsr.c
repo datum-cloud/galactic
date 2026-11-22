@@ -15,7 +15,8 @@
 // It does no address or port rewriting at all. It picks a backend by consistent
 // hashing on the client's own address and port, then pushes an SRv6 outer
 // header addressed to that backend's worker node; the original packet travels
-// inside unmodified. The backend answers the client directly, so reply traffic
+// inside unmodified. A backend on this node itself is handed to Worker's Local
+// module instead, again unmodified (step 6). The backend answers the client directly, so reply traffic
 // never re-enters this program. That has three consequences:
 //
 //   - No connection table. The same hash table produces the same backend for
@@ -50,7 +51,16 @@
 //     Every gateway node computes the same index for the same flow from the
 //     same inputs, which is what makes this safe under anycast: a flow landing
 //     on a different node mid-connection still resolves to the same backend.
-//  6. Push a fresh 40-byte outer IPv6 header, Next Header 41 for an IPv6
+//  6. Look the backend's uSID up in edge_local_table, after the selection
+//     above so every node still picks the same backend. A row means the
+//     backend runs on this node behind Worker's Local local.tap handoff:
+//     write GLM2 metadata (localprog/local_meta.h) naming its TAP and uSID
+//     and return XDP_PASS. That verdict is final, the dispatcher never runs
+//     a later slot after it, and Worker's local_rx, at the receiving
+//     device's tc ingress, checks the uSID, translates the VIP and delivers
+//     to the TAP. A row whose TAP is 0, a handoff not Ready, is a counted
+//     drop: a Local backend is never encapsulated. No row: step 7.
+//  7. Push a fresh 40-byte outer IPv6 header, Next Header 41 for an IPv6
 //     packet and 4 for an IPv4 one, addressed to that backend's
 //     worker-node uSID, sourced from this node's encap_config_table entry,
 //     which is simply this node's SRv6-reachable address and is never compared
@@ -62,7 +72,7 @@
 //     Where the next hop has no neighbor entry, the encapsulated packet goes
 //     to the kernel instead, which resolves the neighbor and forwards it;
 //     see push_outer_header.
-//  7. A packet the route refuses for size, too big once the outer header is
+//  8. A packet the route refuses for size, too big once the outer header is
 //     on, is answered with an ICMPv6 Packet Too Big, or for an IPv4 packet
 //     with Don't Fragment set an ICMPv4 Fragmentation Needed, to the client
 //     instead of vanishing; see send_too_big6 and send_frag_needed4.
@@ -93,6 +103,7 @@ static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *) BPF_F
 static long (*bpf_map_update_elem)(void *map, const void *key, const void *value,
 				    __u64 flags) = (void *) BPF_FUNC_map_update_elem;
 static long (*bpf_xdp_adjust_head)(void *ctx, int delta) = (void *) BPF_FUNC_xdp_adjust_head;
+static long (*bpf_xdp_adjust_meta)(void *ctx, int delta) = (void *) BPF_FUNC_xdp_adjust_meta;
 static long (*bpf_fib_lookup)(void *ctx, struct bpf_fib_lookup *params, __s32 plen,
 			       __u32 flags) = (void *) BPF_FUNC_fib_lookup;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) BPF_FUNC_ktime_get_ns;
@@ -329,7 +340,29 @@ enum edge_drop_reason {
 	DROP_REASON_RETURN_HOP_LIMIT   = 9,
 	DROP_REASON_ICMP_RATE_LIMITED  = 10,
 	DROP_REASON_IPV4_FRAGMENT      = 11,
-	DROP_REASON_COUNT              = 12,
+	// The selected backend is Local on this node (edge_local_table) but its
+	// handoff is not Ready. A Local backend is never encapsulated instead.
+	DROP_REASON_LOCAL_UNAVAILABLE  = 12,
+	// bpf_xdp_adjust_meta refused room for the Local handoff's metadata.
+	DROP_REASON_ADJUST_META_FAILED = 13,
+	DROP_REASON_COUNT              = 14,
+};
+
+// struct edge_local_key is edge_local_table's key: a backend uSID exactly as
+// struct backend carries it.
+struct edge_local_key {
+	__u8 usid[16];
+};
+
+// struct edge_local_value is edge_local_table's value. tap_ifindex is the
+// tenant TAP Worker's Local module hands the backend's packets to on this
+// node, or 0 while that handoff is not Ready. generation is a monotonic
+// reading stamped by the control plane on every write, backing the same
+// crash-safe reconcile cutoff as vip_table's, and is never read here.
+struct edge_local_value {
+	__u32 tap_ifindex;
+	__u32 pad;
+	__u64 generation;
 };
 
 // ---------------------------------------------------------------------
@@ -418,6 +451,28 @@ struct {
 	__type(value, __u64);
 } drop_reasons SEC(".maps");
 
+// edge_local_table names the backends this gateway node serves itself, through
+// Worker's Local local.tap handoff rather than over the fabric. Keyed by the
+// backend uSID, which carries this node's locator, so only this node's own
+// backends ever have a row. Sized like vip_table: one row per Local backend,
+// and a node hosts far fewer backends than the gateway has VIPs.
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct edge_local_key);
+	__type(value, struct edge_local_value);
+} edge_local_table SEC(".maps");
+
+// local_handoffs counts the packets edge_lb handed to Worker's Local module
+// instead of encapsulating them; see lb_forward. Not drops, so they have
+// their own map rather than a drop_reasons bucket.
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} local_handoffs SEC(".maps");
+
 // neigh_fallbacks counts the encapsulated packets edge_lb passed to the kernel
 // because their next hop had no neighbor entry; see push_outer_header. They
 // are not drops, so they have their own map rather than a drop_reasons bucket.
@@ -455,10 +510,18 @@ struct {
 // goes on to the later slots, in practice the egress translation shard, which
 // shares these interfaces. The two claim disjoint traffic, a VIP destination
 // or source here and a shard SID or masquerade address there, so the order
-// they run in changes no verdict. Attached directly instead, with no
-// dispatcher on the node, these programs see an empty iface_roles and every
-// unclaimed packet passes to the kernel.
+// they run in changes no verdict. Every slot runs by tail call, which never
+// returns, so a verdict these programs return themselves is final: only
+// pass_unclaimed_lb and pass_unclaimed_return reach a later slot, and a
+// claimed packet's XDP_PASS (a Local handoff or a neighbor fallback) goes
+// straight to the kernel. Attached directly instead, with no dispatcher on the
+// node, these programs see an empty iface_roles and every unclaimed packet
+// passes to the kernel.
 #include "../xdpdispatch/dispatch.h"
+
+// The metadata ABI lb_forward hands a Local backend's packet to Worker's
+// local_rx with.
+#include "../localprog/local_meta.h"
 
 // pass_unclaimed_lb and pass_unclaimed_return are every exit for a packet the
 // gateway does not claim, from edge_lb and edge_return.
@@ -987,9 +1050,46 @@ static EDGE_ALWAYS_INLINE int send_frag_needed4(struct xdp_md *ctx, __u32 mtu)
 // Entry points.
 // ---------------------------------------------------------------------
 
+// local_handoff hands a claimed packet for a backend on this node to Worker's
+// Local module: it writes GLM2 metadata naming the backend's TAP and uSID and
+// returns XDP_PASS, a final verdict that no later dispatcher slot sees, and
+// local_rx at the receiving device's tc ingress delivers it. The packet itself
+// is unchanged; local_rx translates the VIP.
+//
+// A tap_ifindex of 0 is a Local backend whose handoff is not Ready. It is a
+// counted drop, never encapsulated instead: a Local backend has no fabric
+// path to fall back to.
+static EDGE_ALWAYS_INLINE int local_handoff(struct xdp_md *ctx, __u32 tap_ifindex, const __u8 usid[16],
+					     struct vip_stats_value *stats)
+{
+	if (tap_ifindex == 0) {
+		count_claimed_drop(DROP_REASON_LOCAL_UNAVAILABLE, stats);
+		return XDP_DROP;
+	}
+	if (bpf_xdp_adjust_meta(ctx, -GALACTIC_LOCAL_META_V2_LEN) != 0) {
+		count_claimed_drop(DROP_REASON_ADJUST_META_FAILED, stats);
+		return XDP_DROP;
+	}
+	struct galactic_local_meta *meta = (void *) (long) ctx->data_meta;
+	if ((void *) (meta + 1) > (void *) (long) ctx->data) {
+		count_claimed_drop(DROP_REASON_ADJUST_META_FAILED, stats);
+		return XDP_DROP;
+	}
+	meta->magic = GALACTIC_LOCAL_META_MAGIC_V2;
+	meta->tap_ifindex = tap_ifindex;
+	__builtin_memcpy(meta->backend_sid, usid, sizeof(meta->backend_sid));
+
+	__u32 key = 0;
+	__u64 *counter = bpf_map_lookup_elem(&local_handoffs, &key);
+	if (counter)
+		*counter += 1;
+	return XDP_PASS;
+}
+
 // lb_forward sends a claimed packet to the backend rule's Maglev table picks for
 // the client's address and source port, by pushing the outer header and
-// leaving over the interface its route selects. client is 16 bytes, an IPv4
+// leaving over the interface its route selects, or, for a backend on this
+// node, by handing it to Worker's Local module (local_handoff). client is 16 bytes, an IPv4
 // address in its IPv4-mapped form, and is read before the push, which
 // invalidates every pointer into the packet. outer_payload_len is the inner
 // packet's whole length and nexthdr its family, as push_outer_header takes
@@ -1026,6 +1126,15 @@ static EDGE_ALWAYS_INLINE int lb_forward(struct xdp_md *ctx, struct vip_value *r
 	EDGE_BARRIER_VAR(backend_idx);
 	backend_idx &= (EDGE_MAX_BACKENDS - 1);
 	struct backend *b = &rule->backends[backend_idx];
+
+	// Locality applies after the shared selection, so every gateway node still
+	// picks the same backend for the same flow. Only a backend on this node
+	// has a row.
+	struct edge_local_key lk;
+	__builtin_memcpy(lk.usid, b->usid, sizeof(lk.usid));
+	struct edge_local_value *local = bpf_map_lookup_elem(&edge_local_table, &lk);
+	if (local)
+		return local_handoff(ctx, local->tap_ifindex, lk.usid, stats);
 
 	__u32 cfg_key = 0;
 	struct encap_config *cfg = bpf_map_lookup_elem(&encap_config_table, &cfg_key);

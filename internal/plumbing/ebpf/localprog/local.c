@@ -19,7 +19,8 @@
 //   local_rx          tc ingress of a public receiving device, after
 //                     galactic-cni's filter. Delivers a packet a dispatcher
 //                     slot marked with galactic_local_meta to the TAP it
-//                     names (local.tap).
+//                     names (local.tap), translating a gateway VIP to its
+//                     backend first when the metadata is GLM2.
 //   local_link_rx     tc ingress of a tenant interface, after galactic-cni's
 //                     filters. Returns a local.tap reply out of the device the
 //                     flow arrived on, or sends a flow into the VPC's
@@ -97,6 +98,10 @@ enum lt_stat {
 	LT_STAT_LINK_TOO_BIG,
 	LT_STAT_LINK_LOCAL_SHARD,
 	LT_STAT_LINK_LOCAL_SHARD_NO_PAIR,
+	LT_STAT_RX_SID_MISMATCH,
+	LT_STAT_RX_NO_BINDING,
+	LT_STAT_RX_XLAT_REFUSED,
+	LT_STAT_RX_XLAT_FAILED,
 	LT_STAT_COUNT = 32,
 };
 
@@ -209,6 +214,22 @@ struct {
 	__type(key, struct lt_flow_key);
 	__type(value, struct lt_flow_value);
 } lt_flow SEC(".maps");
+
+// lt_rx_value is a receiving device local_rx runs on, keyed by its ifindex:
+// the device a recorded flow's replies leave through. A bond member's replies
+// leave through its bond, which owns the node's address and routes; a member
+// has neither. A device with no row replies through itself.
+struct lt_rx_value {
+	__u32 reply_ifindex;
+	__u32 pad;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 256);
+	__type(key, __u32);
+	__type(value, struct lt_rx_value);
+} lt_rx SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -323,22 +344,192 @@ static LT_INLINE int lt_fits(struct __sk_buff *skb, __u32 ifindex)
 	return lt_check_mtu(skb, ifindex, &mtu, 0, LT_MTU_CHK_SEGS) == 0;
 }
 
+// lt_sid is a GLM2 backend uSID decoded the way usid_ingress decodes an
+// outer destination.
+struct lt_sid {
+	__u64 block;
+	__u16 argument;
+	__u16 slot;
+};
+
+// lt_decode_sid decodes sid as usid_ingress decodes an outer destination and
+// reports whether it names this node (locator_table), an End.DT46 function
+// (function_table), a backend slot, and a VRF (vrf_table) whose Linux table is
+// table_id, the TAP's. This is the trust check on a GLM2 handoff: the slot
+// program names the TAP, and Worker checks that the backend it chose is one
+// this node serves in that TAP's VPC.
+static LT_INLINE int lt_decode_sid(const __u8 *sid, __u32 table_id, struct lt_sid *out)
+{
+	__u64 locator_key = read_be64(sid);
+
+	if (!bpf_map_lookup_elem(&locator_table, &locator_key))
+		return 0;
+
+	__u64 block = locator_key >> 16;
+	__u64 function_key = (block << 4) | (sid[8] >> 4);
+	struct function_value *fn = bpf_map_lookup_elem(&function_table, &function_key);
+
+	if (!fn || fn->behavior != BEHAVIOR_END_DT46)
+		return 0;
+
+	__u16 argument = ((__u16) (sid[8] & 0x0F) << 8) | sid[9];
+	__u16 slot = ((__u16) sid[10] << 8) | sid[11];
+
+	if (slot == 0)
+		return 0;
+
+	__u64 vrf_key = (block << 12) | argument;
+	struct vrf_value *vrf = bpf_map_lookup_elem(&vrf_table, &vrf_key);
+
+	if (!vrf || vrf->vrf_table_id != table_id)
+		return 0;
+	out->block = block;
+	out->argument = argument;
+	out->slot = slot;
+	return 1;
+}
+
+// lt_xlat_vip translates a GLM2 packet's VIP destination to the backend
+// address and port vip_xlat_table's ingress row for the SID's slot names, as
+// usid_ingress does after decapsulating: an IPv4 packet through
+// vip_siit_ingress, to an IPv6 packet from 64:ff9b::<client>, and an IPv6
+// packet through lookup_vip_xlat and apply_vip_xlat, skipping an IPv4-mapped
+// destination as usid_ingress does. It returns -1 after counting the drop, or
+// 0 with the packet translated.
+//
+// No MSS clamp, unlike usid_ingress: the client's segments reach the guest
+// unencapsulated, so the fabric's encapsulation overhead does not apply to
+// them, and the guest's SYN-ACK is clamped by usid_egress on its way out.
+static LT_INLINE int lt_xlat_vip(struct __sk_buff *skb, const struct lt_sid *sid)
+{
+	void *data = (void *) (long) skb->data;
+	void *end = (void *) (long) skb->data_end;
+	struct usid_ethhdr *eth = data;
+
+	if ((void *) (eth + 1) > end) {
+		lt_count(LT_STAT_RX_NOT_IPV6);
+		return -1;
+	}
+
+	if (eth->h_proto == LT_HTONS(USID_ETH_P_IP)) {
+		int rc = vip_siit_ingress(skb, sid->block, sid->argument, sid->slot);
+
+		switch (rc) {
+		case USID_SIIT_TRANSLATED:
+			break;
+		case USID_SIIT_PASS:
+			lt_count(LT_STAT_RX_NO_BINDING);
+			return -1;
+		case USID_SIIT_FRAGMENT:
+			lt_count(LT_STAT_RX_FRAGMENT);
+			return -1;
+		case USID_SIIT_UDP_NO_CHECKSUM:
+		case USID_SIIT_IPV4_BACKEND:
+		case USID_SIIT_TTL_EXCEEDED:
+			lt_count(LT_STAT_RX_XLAT_REFUSED);
+			return -1;
+		default:
+			lt_count(LT_STAT_RX_XLAT_FAILED);
+			return -1;
+		}
+		// bpf_skb_change_proto changes skb->protocol, not the Ethernet
+		// header, which the TAP's guest reads.
+		data = (void *) (long) skb->data;
+		end = (void *) (long) skb->data_end;
+		eth = data;
+		if ((void *) (eth + 1) > end) {
+			lt_count(LT_STAT_RX_XLAT_FAILED);
+			return -1;
+		}
+		eth->h_proto = LT_HTONS(LT_ETH_P_IPV6);
+		return 0;
+	}
+
+	struct usid_ip6hdr *ip6 = lt_ip6(skb);
+
+	if (!ip6) {
+		lt_count(LT_STAT_RX_NOT_IPV6);
+		return -1;
+	}
+	if (lt_fragment(skb, ip6)) {
+		lt_count(LT_STAT_RX_FRAGMENT);
+		return -1;
+	}
+	ip6 = lt_ip6(skb);
+	if (!ip6)
+		return -1;
+	end = (void *) (long) skb->data_end;
+
+	struct usid_l4ports *ports = (void *) (ip6 + 1);
+	__u8 proto = ip6->nexthdr;
+
+	if ((proto != USID_IPPROTO_TCP && proto != USID_IPPROTO_UDP) || usid_is_v4_mapped(ip6->daddr) ||
+	    (void *) (ports + 1) > end) {
+		lt_count(LT_STAT_RX_NO_BINDING);
+		return -1;
+	}
+
+	struct vip_xlat_value *vv = lookup_vip_xlat(sid->block, sid->argument, sid->slot, proto,
+						    USID_VIP_XLAT_DIR_INGRESS, ports->dest, ip6->daddr);
+
+	if (!vv) {
+		lt_count(LT_STAT_RX_NO_BINDING);
+		return -1;
+	}
+
+	__u32 csum_off = USID_L3_OFFSET + sizeof(struct usid_ip6hdr) +
+			 (proto == USID_IPPROTO_TCP ? USID_TCP_CSUM_OFFSET : USID_UDP_CSUM_OFFSET);
+	__u32 addr_off = USID_L3_OFFSET + USID_OFFSETOF(struct usid_ip6hdr, daddr);
+	__u32 port_off = USID_L3_OFFSET + (__u32) sizeof(struct usid_ip6hdr) + USID_OFFSETOF(struct usid_l4ports, dest);
+
+	if (apply_vip_xlat(skb, addr_off, port_off, csum_off, proto, ip6->daddr, ports->dest, vv)) {
+		lt_count(LT_STAT_RX_XLAT_FAILED);
+		return -1;
+	}
+	return 0;
+}
+
 // local_rx delivers a public packet a dispatcher slot program marked for a
 // tenant TAP. A packet without the metadata is not Local's and goes on to the
 // kernel unchanged. One naming a TAP no claim authorizes, an IPv6 fragment,
 // which a TAP guest was measured not to take, and one too big for the TAP are
 // dropped.
+//
+// GLM1 metadata delivers the IPv6 packet as it is. GLM2 metadata, the
+// gateway's, also names the backend uSID the gateway selected: the uSID must
+// name this node and the TAP's VRF (lt_decode_sid), and the VIP is translated
+// to that backend (lt_xlat_vip), IPv4 or IPv6, before the checks and the
+// policy decision below, so they see the packet the guest receives. The
+// guest's reply leaves through usid_egress's VIP branch, which translates it
+// back.
 SEC("tc")
 int local_rx(struct __sk_buff *skb)
 {
 	struct galactic_local_meta *meta = (void *) (long) skb->data_meta;
+	void *meta_end = (void *) (long) skb->data;
 	__u32 tap;
+	// Zeroed so every path defines it: clang keeps parts of it in registers
+	// across the two GLM2 branches, which the verifier does not correlate.
+	__u8 sid[16] = {};
+	int glm2;
 
-	if ((void *) (meta + 1) > (void *) (long) skb->data || meta->magic != GALACTIC_LOCAL_META_MAGIC) {
+	// The metadata is read before any helper call moves the packet.
+	if ((void *) meta + GALACTIC_LOCAL_META_V1_LEN > meta_end ||
+	    (meta->magic != GALACTIC_LOCAL_META_MAGIC && meta->magic != GALACTIC_LOCAL_META_MAGIC_V2)) {
 		lt_count(LT_STAT_RX_NO_META);
 		return TC_ACT_UNSPEC;
 	}
+	glm2 = meta->magic == GALACTIC_LOCAL_META_MAGIC_V2;
 	tap = meta->tap_ifindex;
+	if (glm2) {
+		// Only an XDP program writes metadata, so a short GLM2 is a broken
+		// writer, not a packet for the kernel.
+		if ((void *) (meta + 1) > meta_end) {
+			lt_count(LT_STAT_RX_SID_MISMATCH);
+			return TC_ACT_SHOT;
+		}
+		__builtin_memcpy(sid, meta->backend_sid, 16);
+	}
 
 	struct lt_tap_value *tv = bpf_map_lookup_elem(&lt_tap, &tap);
 
@@ -348,8 +539,20 @@ int local_rx(struct __sk_buff *skb)
 	}
 
 	__u8 nh[16];
+	__u32 table_id = tv->table_id;
 
 	__builtin_memcpy(nh, tv->nh, 16);
+
+	if (glm2) {
+		struct lt_sid decoded = {};
+
+		if (!lt_decode_sid(sid, table_id, &decoded)) {
+			lt_count(LT_STAT_RX_SID_MISMATCH);
+			return TC_ACT_SHOT;
+		}
+		if (lt_xlat_vip(skb, &decoded))
+			return TC_ACT_SHOT;
+	}
 
 	struct usid_ip6hdr *ip6 = lt_ip6(skb);
 
@@ -373,7 +576,10 @@ int local_rx(struct __sk_buff *skb)
 	lt_ports(skb, ip6, &fk.peer_port, &fk.local_port);
 	__builtin_memcpy(fk.local, ip6->daddr, 16);
 	__builtin_memcpy(fk.peer, ip6->saddr, 16);
-	fv.rx_ifindex = skb->ifindex;
+	__u32 rx_if = skb->ifindex;
+	struct lt_rx_value *rv = bpf_map_lookup_elem(&lt_rx, &rx_if);
+
+	fv.rx_ifindex = rv ? rv->reply_ifindex : rx_if;
 
 	if (!lt_fits(skb, tap)) {
 		lt_count(LT_STAT_RX_TOO_BIG);

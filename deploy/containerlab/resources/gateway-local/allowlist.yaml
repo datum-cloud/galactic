@@ -1,0 +1,12 @@
+# galactic-worker's allowlist on dfw-worker2 and dfw-worker3 for
+# verify:gateway-local: galactic-router hands it tenant routes, as on every
+# Worker node (scripts/worker-fabric.sh), and galactic-gateway claims a
+# local.tap handoff per backend attachment on its node. Worker runs with the
+# cluster's admin kubeconfig, so it needs no RBAC for the ServiceVIPBindings
+# it resolves backends from, and its --gateway-namespace default,
+# galactic-system, is where the lab's bindings are.
+serviceAccounts:
+  - serviceAccount: galactic-system/galactic-router
+    capabilities: [fabric.routes]
+  - serviceAccount: galactic-system/galactic-gateway
+    capabilities: [local.tap, fabric.srv6]

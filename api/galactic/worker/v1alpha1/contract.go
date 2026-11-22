@@ -112,6 +112,14 @@ const (
 	ReasonModeUnavailable            = "ModeUnavailable"
 	ReasonDestinationKindUnsupported = "DestinationKindUnsupported"
 	ReasonDestinationNotFound        = "DestinationNotFound"
+	// ReasonBackendNotBound is a backend destination with no ServiceVIPBinding
+	// on its node whose backend hashes to its slot, is Bound for its current
+	// generation and is not being deleted.
+	ReasonBackendNotBound = "BackendNotBound"
+	// ReasonBackendSlotConflict is a backend destination whose slot names
+	// more than one backend address and port on its node in the claim's
+	// VPC, so Worker cannot tell which backend the gateway's SID reaches.
+	ReasonBackendSlotConflict = "BackendSlotConflict"
 	// ReasonShardNotReady is a shard destination whose EgressShard reports
 	// no SID, or is not Programmed and Ready.
 	ReasonShardNotReady = "ShardNotReady"
@@ -190,6 +198,9 @@ const (
 	HandoffRoleHost = "host"
 	// HandoffRolePod is the routed link's end in the caller's pod.
 	HandoffRolePod = "pod"
+	// HandoffRoleTap is a tenant TAP a local.tap claim delivers to, once
+	// Local has authorized it for local_rx.
+	HandoffRoleTap = "tap"
 )
 
 // Route rejection reasons, carried in RejectedRoute.

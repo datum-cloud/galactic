@@ -1,0 +1,25 @@
+# Traffic policy for the edge guests, named after their VPCAttachments. ns80's
+# vpc-a and vpc-a2 keep their own bindings, which verify-gateway-local.sh
+# points at the same policies for its duration and back on exit.
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicyBinding
+metadata:
+  name: gwlocal-w2
+  namespace: ns80
+spec:
+  ingressPolicyRef:
+    name: gateway-local-ingress
+  egressPolicyRef:
+    name: gateway-local-egress
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: TrafficPolicyBinding
+metadata:
+  name: gwlocal-w3
+  namespace: ns80
+spec:
+  ingressPolicyRef:
+    name: gateway-local-ingress
+  egressPolicyRef:
+    name: gateway-local-egress

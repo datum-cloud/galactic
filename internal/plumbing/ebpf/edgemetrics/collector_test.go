@@ -455,6 +455,27 @@ func TestCollector_CollectsNeighFallbacks(t *testing.T) {
 	}
 }
 
+// TestCollector_CollectsLocalHandoffs covers the packets edge_lb handed to
+// Worker's Local module, counted apart from every drop, and the Local drop
+// reasons' labels.
+func TestCollector_CollectsLocalHandoffs(t *testing.T) {
+	vt := edgemap.NewVIPTable(
+		newFakeVIPTable(), newFakeStatsTable(), newFakeAddrTable(), newFakeReturnStatsTable())
+	drops := fakeDropReasons{edgeprog.DropReasonLocalUnavailable: 2, edgeprog.DropReasonAdjustMetaFailed: 1}
+	c := NewCollector(vt, drops, nil).WithLocalHandoffs(fakeDropReasons{0: 9})
+	metrics := collect(t, c)
+
+	if got := metricValue(findMetric(t, metrics, localHandoffsDesc, "", "")); got != 9 {
+		t.Errorf("local_handoffs_total = %v, want 9", got)
+	}
+	if got := metricValue(findMetric(t, metrics, dropsDesc, "reason", "local_unavailable")); got != 2 {
+		t.Errorf("drops_total{reason=local_unavailable} = %v, want 2", got)
+	}
+	if got := metricValue(findMetric(t, metrics, dropsDesc, "reason", "adjust_meta_failed")); got != 1 {
+		t.Errorf("drops_total{reason=adjust_meta_failed} = %v, want 1", got)
+	}
+}
+
 // TestCollector_CollectsReturnCounters covers #1377: the return counters are
 // keyed per listener, as the forward counters are, so two listeners sharing
 // one address report separate series. A listener that has not sourced a reply

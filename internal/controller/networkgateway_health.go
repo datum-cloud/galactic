@@ -83,7 +83,9 @@ func (r *NetworkGatewayReconciler) passHealthGate(ctx context.Context, namespace
 // the binding b's node writes for rule today (generatedBinding), not being
 // deleted, carries a status.health of Unhealthy for b's attachment and rule's
 // health check port. FailOpen keeps other decisions; FailClosed requires
-// a fresh Healthy result for the current service generation.
+// a fresh Healthy result for the current service generation. Whatever the
+// rule's healthCheck, b is left out while its Local handoff is not ready
+// (localHandoffNotReady).
 func (idx serviceBindings) unhealthy(
 	rule *bgpv1alpha1.NetworkService, objNS string, vip netip.Addr, b ruleBackend,
 ) bool {
@@ -93,6 +95,12 @@ func (idx serviceBindings) unhealthy(
 		return failClosedHealth(rule)
 	}
 	h := got.Status.Health
+	if localHandoffNotReady(h, b) {
+		return true
+	}
+	if rule.Spec.HealthCheck == nil {
+		return false
+	}
 	if failClosedHealth(rule) {
 		return h == nil || h.State != bgpv1alpha1.BackendHealthHealthy || h.AttachmentUID != b.uid ||
 			h.Port != ruleHealthCheckPort(rule) || h.ObservedGeneration != rule.Generation ||
@@ -100,6 +108,15 @@ func (idx serviceBindings) unhealthy(
 	}
 	return h != nil && h.State == bgpv1alpha1.BackendHealthUnhealthy &&
 		h.AttachmentUID == b.uid && h.Port == ruleHealthCheckPort(rule)
+}
+
+// localHandoffNotReady reports whether h is the decision galactic-router
+// publishes for backend b while the gateway on b's node reports its Local
+// handoff not ready. It applies whatever the rule's healthCheck, and names
+// the attachment alone: a Local handoff serves every port of it.
+func localHandoffNotReady(h *bgpv1alpha1.ServiceVIPBindingHealth, b ruleBackend) bool {
+	return h != nil && h.State == bgpv1alpha1.BackendHealthUnhealthy &&
+		h.Reason == bgpv1alpha1.BackendHealthReasonLocalHandoffNotReady && h.AttachmentUID == b.uid
 }
 
 // ruleHealth is what health did to one rule's backends in a pass.

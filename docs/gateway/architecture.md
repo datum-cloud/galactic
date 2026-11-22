@@ -1,19 +1,22 @@
 # Gateway architecture
 
-`galactic-gateway` provides anycast L4 ingress for VPC workloads. Every participating edge node derives the same backend table from Kubernetes resources and uses a stateless XDP program to select a backend. The gateway encapsulates traffic over SRv6; the backend node performs the VIP-to-backend translation and returns replies directly toward the client.
+`galactic-gateway` provides anycast L4 ingress for VPC workloads. Every participating edge node derives the same backend table from Kubernetes resources and uses a stateless XDP program to select a backend. The gateway encapsulates traffic over SRv6; the backend node performs the VIP-to-backend translation and returns replies directly toward the client. A backend on the gateway's own node is not encapsulated: Galactic Worker hands its packets to the backend's TAP ([Local handoff](#local-handoff)).
 
 Use [deployment](deployment.md) to install it, [configuration](configuration.md) to look up settings and API behavior, and [packet paths](packet-paths.md) for the full reconciliation and packet-processing sequences.
 
 ## Components and ownership
 
-| Component          | Owns                                                                                                                                        |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `galactic-gateway` | `NetworkGateway` and `NetworkService` reconciliation, Maglev tables, XDP attachment, per-rule `BGPAdvertisement` objects and gateway status |
-| `galactic-router`  | EVPN advertisement through embedded GoBGP, backend `ServiceVIPBinding` creation and programming, backend health probes                      |
-| `galactic-cni`     | Backend TC-BPF programs and pinned maps used for VIP translation and tenant forwarding                                                      |
-| `galactic-nat`     | Independent NAT66/NAT64 egress sessions; shares XDP through the dispatcher when colocated                                                   |
+| Component          | Owns                                                                                                                                         |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `galactic-gateway` | `NetworkGateway` and `NetworkService` reconciliation, Maglev tables, XDP attachment, per-rule `BGPAdvertisement` objects and gateway status  |
+| `galactic-router`  | EVPN advertisement through embedded GoBGP, backend `ServiceVIPBinding` creation and programming, backend health probes                       |
+| `galactic-cni`     | Backend TC-BPF programs and pinned maps used for VIP translation and tenant forwarding                                                       |
+| `galactic-nat`     | Independent NAT66/NAT64 egress sessions; shares XDP through the dispatcher when colocated                                                    |
+| `galactic-worker`  | The Local handoff for backends on the gateway's own node: `local.tap` claims, the backend SID check, VIP translation and delivery to the TAP |
 
 The gateway and router run as separate pods. The gateway requires a public uplink and a node locator; it does not require a tenant VRF on the gateway itself. The DaemonSet selects `node=edge` and `gateway=enabled`, and the co-located router is independently selected by `galactic=router`. See [node labels](../operations/node-labels.md).
+
+Placement is combined (D47): a gateway edge node can also host TAP guests pinned to it, and those guests' backends are the gateway's local backends. The gateway never runs on a compute worker, so it always reaches a backend on a compute worker over the fabric, encapsulated.
 
 ## Control plane
 
@@ -35,9 +38,19 @@ IPv4 VIPs use IPv6 backends. The backend sees the IPv4 client's synthesized IPv6
 
 The XDP program answers an oversized encapsulation with the applicable Packet Too Big or Fragmentation Needed response. A failed neighbor lookup that the kernel can resolve is handed to the host forwarding path. The [packet-path reference](packet-paths.md) records the exact claim, drop, forwarding and fallback branches.
 
+### Local handoff
+
+With `GALACTIC_GATEWAY_WORKER_SOCKET` set, the gateway hands each backend on its own node to the backend's TAP through Galactic Worker's `local.tap` handoff ([Worker contract](../worker/contract.md#local-handoffs)) instead of encapsulating toward it. Worker never falls back from Local to Fabric, so such a backend is never encapsulated.
+
+- **Claims.** The gateway asks Worker for one `local.tap` claim per backend VPCAttachment on its node, in `local` mode, with one backend destination (`BackendRef{node, slot}`) per backend slot it serves there. Worker resolves each slot from the Bound ServiceVIPBinding galactic-router writes.
+- **`edge_local_table`.** The gateway writes one row per backend on its node, keyed by the backend's uSID. A row holds the TAP's ifindex, taken from the claim's `handoff_interfaces` entry with role `tap`, while Worker reports that slot's destination ready, and `0` otherwise. A new backend gets its row at once with `0`, so it is never encapsulated toward this node. A gateway without the socket deletes every row at startup, so its own-node backends are encapsulated again.
+- **Selection.** Maglev selection is unchanged and shared by every gateway. After it, `edge_lb` looks the selected backend's uSID up in `edge_local_table`. A TAP ifindex means `edge_lb` writes GLM2 metadata (the TAP's ifindex and the backend uSID, `localprog/local_meta.h`) and returns `XDP_PASS`. A row with `0` is a drop counted as `local_unavailable`. No row means the existing SRv6 encapsulation.
+- **Delivery.** Worker's `local_rx`, at tc ingress of the receiving public device, checks that the uSID names this node and the TAP's VRF, translates the VIP to the backend with the same `vip_xlat_table` ingress row `usid_ingress` uses, decides the TAP's PublicService policy, sets the decided mark and redirects to the TAP. An IPv4 VIP is translated as `usid_ingress` translates it, so the guest sees the client in `64:ff9b::/96`.
+- **Reply** (D43). The guest replies from its own address. `usid_egress`'s VIP branch restores the VIP and port, translates an IPv4 VIP's reply back to IPv4, clamps a SYN-ACK's MSS and redirects the reply out of `public_uplink_table`'s link before any `egress_route_table` lookup. There is no Local branch in `usid_egress`, and the egress NAT never sees the reply.
+
 ## XDP ownership and recovery
 
-The shared dispatcher owns the interface hook. Gateway and NAT use separate slots and leases, so one can stop without detaching the other's program. Direct attachment remains an explicit configuration choice. Attach selection, driver mode and bond-member sequencing follow the [host XDP guide](../operations/xdp-attach-mode.md).
+The shared dispatcher owns the interface hook. Gateway and NAT use separate slots and leases, so one can stop without detaching the other's program. Every slot runs by tail call, so a verdict a slot program returns is final. Only a packet the gateway does not claim reaches a later slot. A claimed packet's `XDP_PASS`, a Local handoff or a neighbor fallback, goes straight to the kernel, and the NAT slot never sees it. Direct attachment remains an explicit configuration choice. Attach selection, driver mode and bond-member sequencing follow the [host XDP guide](../operations/xdp-attach-mode.md).
 
 <a id="recovery"></a>
 ### Recovery
@@ -50,6 +63,15 @@ Map layout changes require an explicit upgrade plan because recreating a pin dis
 
 Backend nodes perform probes and publish health through their bindings. Gateways consume the same published health state so their tables remain deterministic. Health filtering is opt-in and mixed-version behavior is defined in [backend health](backend-health.md).
 
+A Local backend whose handoff is not ready (D45) has its flows through this gateway dropped (`local_unavailable`). The gateway lists each local backend in its `NetworkGateway`'s `status.localBackends`, with `ready` and a reason, and sets the `LocalHandoff` condition. galactic-router on that node then publishes the backend's `ServiceVIPBinding` health as `Unhealthy` with reason `LocalHandoffNotReady`, so every gateway leaves it out of its Maglev table while backend health filtering applies, and the VIP stays served by its other backends. See [backend health](backend-health.md#local-handoff-not-ready).
+
+A gateway withdraws a VIP family from BGP on its node only when its public path does not cover that family (D44). Two cases do that, and each withdraws both families:
+
+- a public target the datapath resolved, such as a bond member or a VLAN's lower device, runs without the load balancer;
+- the gateway serves local backends and `public_uplink_table` has no next hop, so their replies cannot leave.
+
+A single Local backend that is not ready withdraws nothing. Withdrawal deletes the rule's per-family `-v4` or `-v6` `BGPAdvertisement` on this node. The `NetworkGateway`'s `PublicPath` condition reads `False` with reason `FamilyWithdrawn` and says why, and each rule's per-node `Advertised` condition says which family is withdrawn. It reads `False` with reason `FamilyWithdrawn` once every family of the rule is. A covering aggregate keeps attracting the family's clients. The gateway reports one that this node's router advertises as a `BGPAdvertisement` as `AggregateStillAttracts`, and never suppresses it. An aggregate originated in FRR config, such as a site prefix routed to Null0, is invisible to the gateway and is not reported (D44).
+
 A successful engine update, BGP advertisement and backend binding are distinct states. Check all three when a VIP is unreachable. IPv4 readiness, no-backend handling, quotas and per-rule reasons are in [configuration](configuration.md).
 
 ## Constraints
@@ -61,6 +83,8 @@ A successful engine update, BGP advertisement and backend binding are distinct s
 - The public uplink and each resolved bond member need forwarding sysctls before FIB lookup. An empty bond is a startup error. Missing coverage after startup fails readiness and is retried without detaching working members.
 - `edge_return` drops oversized replies without generating ICMP. TCP MSS clamping reduces that risk; large UDP replies and client ICMP do not gain transparent end-to-end PMTU translation.
 - An IPv4 VIP must not also be a shard's IPv4 masquerade address: the earlier gateway dispatcher slot would claim that address's NAT64 replies.
+- The Local handoff needs `GALACTIC_GATEWAY_XDP_ATTACH=dispatch`: `local_rx` reads the metadata a dispatcher slot sets, and its readiness waits for that slot. The gateway refuses to start with the Worker socket and `direct`.
+- A local backend's replies need `public_uplink_table` on the gateway node. They leave through that table's link, which need not be the device the request arrived on.
 
 ## Implementation entry points
 
@@ -69,6 +93,8 @@ A successful engine update, BGP advertisement and backend binding are distinct s
 - `internal/gateway` builds and applies engine state.
 - `internal/plumbing/ebpf/edgeprog/edgedsr.c` implements the XDP programs.
 - `internal/plumbing/ebpf/xdpdispatch` owns shared attachment and leases.
+- `internal/gateway/localhandoff` keeps the Worker claims and `edge_local_table`; `cmd/galactic-gateway/local.go` computes the public path and the Local handoff metrics.
+- `internal/plumbing/ebpf/localprog/local.c` is Worker's `local_rx`.
 
 ## Testing
 

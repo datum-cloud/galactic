@@ -57,12 +57,15 @@ type Maps struct {
 	Guard *ebpf.Map `ebpf:"lt_guard"`
 	Flow  *ebpf.Map `ebpf:"lt_flow"`
 	Stats *ebpf.Map `ebpf:"lt_stats"`
+	// Rx maps each receiving device to the device its flows' replies leave
+	// through.
+	Rx *ebpf.Map `ebpf:"lt_rx"`
 }
 
 // Close closes every map descriptor.
 func (m *Maps) Close() error {
 	var errs []error
-	for _, mp := range []*ebpf.Map{m.Tap, m.Link, m.Guest, m.Pair, m.Guard, m.Flow, m.Stats} {
+	for _, mp := range []*ebpf.Map{m.Tap, m.Link, m.Guest, m.Pair, m.Guard, m.Flow, m.Stats, m.Rx} {
 		if mp != nil {
 			errs = append(errs, mp.Close())
 		}
@@ -180,6 +183,10 @@ var StatNames = []string{
 	"link_too_big",
 	"link_local_shard",
 	"link_local_shard_no_pair",
+	"rx_sid_mismatch",
+	"rx_no_binding",
+	"rx_xlat_refused",
+	"rx_xlat_failed",
 }
 
 // Stats reads lt_stats by name, summed over CPUs.
