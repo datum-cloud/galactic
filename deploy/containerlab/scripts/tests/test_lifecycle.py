@@ -25,6 +25,14 @@ node_cache = load('lab-node-cache')
 
 
 class ParallelTests(unittest.TestCase):
+    def test_workers_do_not_inherit_terminal_stdin(self):
+        script = 'source "$1/lib.sh"; site() { readlink /proc/self/fd/0; cat; }; parallel_sites site a'
+        with tempfile.TemporaryFile() as input_file:
+            result = subprocess.run(['bash', '-c', script, 'test', str(SCRIPTS)],
+                                    stdin=input_file, capture_output=True, text=True,
+                                    check=True, timeout=5)
+        self.assertEqual(result.stdout.strip(), '/dev/null')
+
     def test_sites_overlap_and_failure_waits_for_other_sites(self):
         with tempfile.TemporaryDirectory() as directory:
             script = '''
@@ -125,9 +133,27 @@ class ResetTests(unittest.TestCase):
 
     def test_checkpoint_rejects_sources_changed_during_deploy(self):
         with mock.patch.object(lifecycle, 'source_hash', return_value='changed'), \
+                mock.patch.object(lifecycle, 'identities') as identities, \
                 mock.patch.object(lifecycle, 'parallel') as parallel, self.assertRaises(RuntimeError):
             lifecycle.checkpoint('original')
         parallel.assert_not_called()
+        identities.assert_not_called()
+
+    def test_checkpoint_rejects_sources_changed_during_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = root / 'bin/lab-images/inventory.json'
+            inventory.parent.mkdir(parents=True)
+            inventory.write_text('[]')
+            with mock.patch.object(lifecycle, 'REPO', root), \
+                    mock.patch.object(lifecycle, 'STATE', root), \
+                    mock.patch.object(lifecycle, 'source_hash', side_effect=['original', 'changed']), \
+                    mock.patch.object(lifecycle, 'identities', return_value={}), \
+                    mock.patch.object(lifecycle, 'parallel', return_value={}), \
+                    self.assertRaisesRegex(RuntimeError, 'checkpoint creation'):
+                lifecycle.checkpoint('original')
+            self.assertFalse((root / 'baseline.json').exists())
+            self.assertFalse((root / 'baseline.tmp').exists())
 
     def test_source_change_prevents_any_mutation(self):
         with mock.patch.object(lifecycle, 'source_hash', return_value='new'), \
@@ -358,6 +384,27 @@ class NodeCacheTests(unittest.TestCase):
                 mock.patch.object(node_cache, 'write_state') as write, self.assertRaises(RuntimeError):
             node_cache.destroy()
         self.assertEqual(run.call_count, 3)
+        write.assert_not_called()
+
+    def test_remaining_nodes_keep_caches_dirty(self):
+        with mock.patch.object(node_cache, 'release', return_value={'node-a': {}}), \
+                mock.patch.object(node_cache, 'run'), \
+                mock.patch.object(node_cache, 'containers', return_value=[]), \
+                mock.patch.object(node_cache, 'nodes', return_value=[('site-a', 'node-a', {})]), \
+                mock.patch.object(node_cache, 'inspect', return_value={'Id': 'remaining'}), \
+                mock.patch.object(node_cache, 'write_state') as write, \
+                self.assertRaisesRegex(RuntimeError, 'nodes remain'):
+            node_cache.destroy()
+        write.assert_not_called()
+
+    def test_failed_docker_query_keeps_caches_dirty(self):
+        with mock.patch.object(node_cache, 'release', return_value={'node-a': {}}), \
+                mock.patch.object(node_cache, 'run'), \
+                mock.patch.object(node_cache, 'containers', side_effect=subprocess.CalledProcessError(1, 'docker')), \
+                mock.patch.object(node_cache, 'nodes', return_value=[]), \
+                mock.patch.object(node_cache, 'write_state') as write, \
+                self.assertRaises(subprocess.CalledProcessError):
+            node_cache.destroy()
         write.assert_not_called()
 
     def test_incomplete_create_is_discarded_without_claiming_a_clean_cache(self):

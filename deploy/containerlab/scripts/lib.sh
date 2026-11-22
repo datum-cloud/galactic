@@ -187,7 +187,7 @@ parallel_sites() {
           > "${timing_file}" || exit 1
       fi
       exit "${status}"
-    ) &
+    ) </dev/null &
     pids+=("$!")
   done
   [[ "${monitor}" == *m* ]] || set +m
