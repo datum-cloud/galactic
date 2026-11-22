@@ -10,7 +10,8 @@ finished.
 ## Prerequisites and image distribution
 
 In addition to the lab's normal tools, the lifecycle needs Python 3 with PyYAML,
-Helm, Go, and a free loopback TCP port 5001. `tools:crane` installs crane v0.20.6
+Helm, Go, a local rootful Docker daemon, and a free loopback TCP port 5001.
+`tools:crane` installs crane v0.20.6
 into the checkout's `bin/`. Run shared image builds, deployment, reset and
 verification under the Containerlab manager reservation.
 
@@ -34,6 +35,8 @@ Affinity is treated conservatively, so every eligible node retains the images.
 Nodes pull the recorded digests with containerd, with at most twelve nodes
 unpacking concurrently. Each image is then tagged with its original reference.
 Images already visible through CRI with the expected config digest are reused.
+Transport references are removed after canonical workload tags are verified,
+so superseded image layers can be reclaimed by containerd.
 Workload manifests and their pull policies are unchanged. Publication compares
 Docker image IDs against the published index or platform config digest, according
 to the Docker image store, and preserves external manifest digests. Node pulls
@@ -58,7 +61,8 @@ Before cluster deletion, teardown stops kubelets, then ordinary pods while their
 network agents remain available, then node agents with control-plane pods last.
 It removes CRI containers and sandboxes and checks containerd namespaces and local
 snapshotters for remaining runtime containers, tasks or writable snapshots. Stores
-are marked reusable only after every node passes and containerd stops cleanly.
+are marked reusable only after every node passes, containerd stops cleanly,
+and all cluster node containers have been deleted.
 Cleanup errors fail the destroy command, while cluster deletion still runs. The
 stores remain dirty and cannot be reused on the next deployment.
 
@@ -73,6 +77,9 @@ these timings are not a cold-cache speed guarantee.
 unowned stores. `task clean` includes it. Purge node caches after direct mutations
 to containerd internals or immutable image snapshots; normal component image
 updates are checked against their expected configuration digests and reloaded.
+The registry helper image must remain available locally for teardown, including
+offline teardown. To reclaim all cached image disk space, destroy the lab and
+run `task node-cache:clean`.
 
 ## Reset
 

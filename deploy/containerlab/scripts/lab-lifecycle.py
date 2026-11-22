@@ -109,12 +109,16 @@ def ready(site):
               f'{item["kind"]}/{item["metadata"]["name"]}', '--timeout=180s')
 
 
-def checkpoint():
+def checkpoint(source):
+    if source_hash() != source:
+        raise RuntimeError('Lab sources changed during deployment; run destroy and deploy')
     parallel(ready)
     image_path = REPO / 'bin/lab-images/inventory.json'
-    state = {'version': 1, 'source': source_hash(), 'identities': identities(),
+    state = {'version': 1, 'source': source, 'identities': identities(),
              'images': json.loads(image_path.read_text()), 'sites': parallel(site_snapshot)}
     target = STATE / 'baseline.json'
+    if source_hash() != source:
+        raise RuntimeError('Lab sources changed during checkpoint creation; run destroy and deploy')
     temp = target.with_suffix('.tmp')
     temp.write_text(json.dumps(state, indent=2) + '\n')
     temp.replace(target)
@@ -204,7 +208,12 @@ def lifecycle(mode, output=None):
     def task(name):
         step(name, lambda: run('task', name))
     try:
+        source = source_hash()
         if mode == 'deploy':
+            existing = run('docker', 'ps', '-a', '--filter', 'label=io.x-k8s.kind.cluster',
+                           '--format', '{{.Label "io.x-k8s.kind.cluster"}}', capture=True)
+            if set(existing.splitlines()) & set(SITES):
+                raise RuntimeError('Kind nodes already exist; use task reset or task destroy before deploy')
             # A failed deploy must not leave a usable checkpoint from an older run.
             (STATE / 'baseline.json').unlink(missing_ok=True)
             task('build')
@@ -230,7 +239,7 @@ def lifecycle(mode, output=None):
             task('deploy:lab-xdp-passthrough')
         for name in BASELINE_TASKS:
             task(name)
-        step('checkpoint', checkpoint)
+        step('checkpoint', lambda: checkpoint(source))
     finally:
         (output / 'elapsed-seconds').write_text(f'{time.monotonic()-start:.3f}\n')
         print(f'Lifecycle evidence: {output}', flush=True)

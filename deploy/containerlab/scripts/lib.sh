@@ -161,30 +161,44 @@ pick_port() {
 
 # parallel_sites FUNCTION SITE... runs independent sites, waits for every child,
 # and fails if any child fails. Each child retains errexit and isolated variables.
-parallel_sites() (
-  local fn=$1 site pid rc=0
+parallel_sites() {
+  local fn=$1 site pid rc=0 monitor=$- old_int old_term
   shift
   local -a pids=()
-  trap 'trap - INT TERM; for pid in "${pids[@]}"; do kill -TERM "${pid}" 2>/dev/null || true; done; wait; exit 130' INT TERM
+  old_int=$(trap -p INT)
+  old_term=$(trap -p TERM)
+  trap 'trap - INT TERM; for pid in "${pids[@]}"; do kill -TERM -- "-${pid}" 2>/dev/null || true; done; wait; exit 130' INT
+  trap 'trap - INT TERM; for pid in "${pids[@]}"; do kill -TERM -- "-${pid}" 2>/dev/null || true; done; wait; exit 143' TERM
+  # Give each worker a process group so cancellation reaches its commands too.
+  set -m
   for site in "$@"; do
     (
       # The outer worker records failures too. The inner shell retains
       # errexit and leaves the site's EXIT trap available for cleanup.
+      set +m
       set +e
       started=$SECONDS
       (set -e; "${fn}" "${site}")
       status=$?
       if [[ -n "${LAB_TIMING_DIR:-}" ]]; then
         mkdir -p "${LAB_TIMING_DIR}" || exit 1
+        timing_file=$(mktemp --suffix=.tsv "${LAB_TIMING_DIR}/$(basename "$0" .sh)-${site}.XXXXXX") || exit 1
         printf '%s\t%s\t%s\n' "${site}" "$((SECONDS-started))" "${status}" \
-          > "${LAB_TIMING_DIR}/$(basename "$0" .sh)-${site}.tsv" || exit 1
+          > "${timing_file}" || exit 1
       fi
       exit "${status}"
     ) &
     pids+=("$!")
   done
+  [[ "${monitor}" == *m* ]] || set +m
   for pid in "${pids[@]}"; do
-    wait "${pid}" || rc=1
+    if ! wait "${pid}"; then
+      echo "Site worker ${pid} failed" >&2
+      rc=1
+    fi
   done
-  exit "${rc}"
-)
+  trap - INT TERM
+  eval "${old_int}"
+  eval "${old_term}"
+  return "${rc}"
+}
