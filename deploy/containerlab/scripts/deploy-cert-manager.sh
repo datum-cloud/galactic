@@ -21,11 +21,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-CERT_MANAGER_VERSION=v1.21.2
-CSI_DRIVER_VERSION=v0.16.0
+source "${SCRIPT_DIR}/image-versions.sh"
 
-for site in dfw iad sjc; do
+deploy_site() {
+  local site=$1
   kc=$(site_kubeconfig "${site}")
+  trap 'rm -f "${kc}"' EXIT
   echo "Installing cert-manager ${CERT_MANAGER_VERSION} on ${site}..."
   helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
     --version "${CERT_MANAGER_VERSION}" --kubeconfig "${kc}" \
@@ -39,5 +40,6 @@ for site in dfw iad sjc; do
     --namespace cert-manager \
     --set 'tolerations[0].operator=Exists' \
     --wait --timeout 10m
-done
+}
+parallel_sites deploy_site dfw iad sjc
 echo "Done."

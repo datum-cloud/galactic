@@ -123,52 +123,35 @@ tasks:
       - docker build --network=host -t remote-host:latest -f ../../containers/remote-host/Dockerfile ../..
 
   deploy:
-    desc: Build images and deploy the full lab
-    deps: [build, host-setup]
+    desc: Build images and deploy the full lab, recording step timings
     cmds:
-      - task: "deploy:clusters"
-      # No rename step: Kind's own sequential worker names are used verbatim
-      # everywhere, so the containers already carry the names gvpc.clab.yaml
-      # and every manifest refer to them by.
-      - task: "deploy:topology"
-      - task: "deploy:lab-xdp-passthrough"
-      - task: "deploy:images"
-      - task: "deploy:system"
-      - task: "deploy:cni"
-      - task: "deploy:lab-xdp-passthrough-compute"
-      # Before deploy:fabric: the fabric-router pods' fabric-api sidecar
-      # mounts a csi-driver volume, and without the driver the pod (FRR
-      # included) cannot start.
-      - task: "deploy:cert-manager"
-      # After cert-manager, which issues its webhook's certificate, and
-      # before deploy:galactic-router, whose traffic policy reconciler
-      # watches the CRDs it installs.
-      - task: "deploy:traffic-policy"
-      - task: "deploy:node-addresses"
-      - task: "deploy:fabric"
-      - task: "deploy:fabric-routing"
-      - task: "deploy:bmp-collector"
-      - task: "deploy:galactic-router"
-      - task: "deploy:galactic-nat"
-      - task: "deploy:scenarios"
-      # After the scenarios: the gateway's NetworkServices select ns60's
-      # backends, which deploy:scenarios creates.
-      - task: "deploy:galactic-gateway"
-      - task: "deploy:fabric-api"
-      # After deploy:galactic-router, whose edge-ownership mount keeps GC
-      # off the VRFs edge attachments join, and the scenarios, whose
-      # tenants the edge services grant.
-      - task: "deploy:galactic-edge"
+      - ./scripts/lab-lifecycle.py deploy {{.CLI_ARGS}}
+
+  reset:
+    desc: Restore a deploy checkpoint without rebuilding images or clusters
+    cmds:
+      - ./scripts/lab-lifecycle.py reset {{.CLI_ARGS}}
+
+  "tools:crane":
+    internal: true
+    status:
+      - test -x ../../bin/crane && ../../bin/crane version | grep -qx v0.20.6
+    cmds:
+      - mkdir -p ../../bin
+      - GOBIN="$(cd ../../bin && pwd)" go install github.com/google/go-containerregistry/cmd/crane@v0.20.6
+
+  "images:publish":
+    desc: Publish local images and prefetch external images into the lab registry
+    deps: ['tools:crane']
+    cmds:
+      - ./scripts/lab-images.py publish
 
   "deploy:clusters":
     desc: Create Kind clusters
     cmds:
-      - kind create cluster --name dfw --config node_files/dfw/config.yaml --image kindest/node:galactic
-      - kind create cluster --name sjc --config node_files/sjc/config.yaml --image kindest/node:galactic
-      - kind create cluster --name iad --config node_files/iad/config.yaml --image kindest/node:galactic
-      - kind export kubeconfig --name dfw --kubeconfig dfw.kubeconfig
-      - kind export kubeconfig --name sjc --kubeconfig sjc.kubeconfig
-      - kind export kubeconfig --name iad --kubeconfig iad.kubeconfig
+      - ./scripts/lab-node-cache.py prepare
+      - ./scripts/deploy-clusters.sh
+      - ./scripts/lab-node-cache.py activate
 
   "deploy:topology":
     desc: Deploy the ContainerLab topology
@@ -282,57 +265,25 @@ tasks:
         done
 
   "deploy:images":
-    desc: Load all container images into Kind
-    vars:
-      # Every worker in every cluster runs fabric-router (the underlay eBGP
-      # session everything else depends on) and galactic-router (EVPN --
-      # plain mode on compute/edge, reflector mode on iad-worker3).
-      FABRIC_NODES: >-
-        dfw-worker dfw-worker2 dfw-worker3 dfw-worker4
-        sjc-worker sjc-worker2
-        iad-worker iad-worker2 iad-worker3
-      # galactic-cni goes everywhere galactic.datumapis.com/galactic=router
-      # is set -- compute and edge alike, but never the reflector, whose
-      # galactic=control value is mutually exclusive with it.
-      CNI_NODES: >-
-        dfw-worker dfw-worker2 dfw-worker3 dfw-worker4
-        sjc-worker sjc-worker2
-        iad-worker iad-worker2
-      # Egress shards and gateways: one each per edge node.
-      NAT_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
-      GATEWAY_NODES: "dfw-worker2 dfw-worker3 sjc-worker2 iad-worker2"
-      # Galactic Edge runs on dfw's edge nodes (deploy:galactic-edge).
-      EDGE_NODES: "dfw-worker2 dfw-worker3"
-      MASQUE_AUTHORITY_NODES: "dfw-worker"
+    desc: Publish current images and pull them from the lab registry into Kind
     cmds:
-      - |
-        set -e
-        load() {
-          image="$1"; shift
-          for node in "$@"; do
-            echo "--- ${image} -> ${node} ---"
-            docker save "${image}" | docker exec -i "${node}" \
-              ctr --namespace k8s.io images import -
-          done
-        }
-        load {{.FABRIC_ROUTER_IMAGE}} {{.FABRIC_NODES}}
-        # The fabric-api sidecar rides in every fabric-router pod, and the
-        # cell gateway and janitor schedule on any worker.
-        load fabric-api:latest {{.FABRIC_NODES}}
-        load galactic-router:latest {{.FABRIC_NODES}}
-        load galactic-cni:latest {{.CNI_NODES}}
-        load galactic-nat:latest {{.NAT_NODES}}
-        load galactic-gateway:latest {{.GATEWAY_NODES}}
-        # The cell controller schedules on any untainted worker.
-        load galactic-controller:latest {{.FABRIC_NODES}}
-        load fabric-router-controller:latest {{.FABRIC_NODES}}
-        load galactic-edge:latest {{.EDGE_NODES}}
-        load edge-provider:latest {{.EDGE_NODES}}
-        load masque-provider:latest {{.EDGE_NODES}}
-        load masque-service:latest {{.EDGE_NODES}}
-        # The grant authority tolerates no edge taint, so it schedules on
-        # dfw's compute node.
-        load masque-authority:latest {{.MASQUE_AUTHORITY_NODES}}
+      - task: images:publish
+      - task: images:load
+
+  "images:clean":
+    desc: Remove the lab-owned registry container and cached layers
+    cmds:
+      - ./scripts/lab-images.py clean
+
+  "images:load":
+    desc: Pull the recorded immutable image inventory into Kind
+    cmds:
+      - ./scripts/lab-images.py load
+
+  "test:lifecycle":
+    desc: Test lifecycle ordering, failure propagation, reset guards and image references offline
+    cmds:
+      - python3 -B -m unittest discover -s scripts/tests -v
 
   "deploy:system":
     desc: Install CRDs, namespace, and RBAC
@@ -348,9 +299,12 @@ tasks:
     desc: Destroy the lab
     cmds:
       - sudo containerlab destroy -t {{.TOPO}} --cleanup
-      - kind delete cluster --name dfw || true
-      - kind delete cluster --name sjc || true
-      - kind delete cluster --name iad || true
+      - ./scripts/destroy-clusters.sh
+
+  "node-cache:clean":
+    desc: Remove unused lab-owned node image caches
+    cmds:
+      - ./scripts/lab-node-cache.py clean
 
   inspect:
     desc: List deployed nodes and mgmt addresses
@@ -1524,6 +1478,8 @@ tasks:
     desc: Destroy the lab and delete artifacts
     cmds:
       - task: destroy
+      - task: images:clean
+      - task: node-cache:clean
       - docker rmi kindest/node:galactic || true
       - docker rmi galactic-router:latest || true
       - docker rmi galactic-nat:latest || true

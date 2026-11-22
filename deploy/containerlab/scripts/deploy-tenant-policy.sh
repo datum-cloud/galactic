@@ -23,7 +23,8 @@ shift
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-for site in "$@"; do
+deploy_site() {
+  local site=$1
   node=$(control_plane "${site}")
   echo "Applying ${NS}'s traffic policy to ${site}..."
   ensure_namespace "${node}" "${NS}"
@@ -33,6 +34,7 @@ for site in "$@"; do
   dir="tenants/${NS}/policy"
   [ -d "${SCRIPT_DIR}/../resources/${dir}/${site}" ] && dir="${dir}/${site}"
   apply_k "${node}" "/galactic/resources/${dir}/"
-done
+}
+parallel_sites deploy_site "$@"
 
 echo "Done."

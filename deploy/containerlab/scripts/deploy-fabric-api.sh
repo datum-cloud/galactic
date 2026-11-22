@@ -114,10 +114,10 @@ check_chain() {
   echo "${site}: every fabric-api credential chains to the current fabric-api-ca"
 }
 
-kc=""
-trap 'rm -f "${kc}"' EXIT
-for site in dfw iad sjc; do
+deploy_site() {
+  local site=$1
   kc=$(site_kubeconfig "${site}")
+  trap 'rm -f "${kc}"' EXIT
   k() { kubectl --kubeconfig "${kc}" "$@"; }
   echo "Installing fabric-api on ${site}..."
   if ! k -n galactic-system get configmap fabric-api >/dev/null; then
@@ -136,5 +136,6 @@ for site in dfw iad sjc; do
   k -n galactic-system rollout status deployment/fabric-api-gateway --timeout=180s
   check_chain "${site}"
   rm -f "${kc}"
-done
+}
+parallel_sites deploy_site dfw iad sjc
 echo "Done."
