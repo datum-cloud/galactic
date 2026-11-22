@@ -412,14 +412,14 @@ func TestRoutedLinkRoot(t *testing.T) {
 	r.pods.add("pod-1", pod)
 	dest := module.Destination{ID: "attachment/" + a.attUID, Mode: workerv1alpha1.Mode_MODE_LOCAL, VPC: a.vpc,
 		Node: testNode, Addresses: []netip.Addr{guestAddr}, HostInterface: a.tap}
-	claim := module.Claim{Key: module.ClaimKey{Node: testNode, VPC: a.vpc, AttachmentUID: "envoy-1"},
+	claim := module.Claim{Key: module.ClaimKey{Node: testNode, VPC: a.vpc, AttachmentUID: routedUID},
 		Owner: "galactic-system/envoy", Generation: 1, Handoff: workerv1alpha1.Handoff_HANDOFF_ROUTED_LINK,
 		OwnerPod: "pod-1", Addresses: []netip.Addr{podAddr}, Destinations: []module.Destination{dest}}
 	claims := []module.Claim{claim}
 
 	wantReady(t, r.reconcile(a.vpc, claims), claims)
-	host := linkName(a.vpc, "envoy-1", intf.LocalRoleRoutedHost)
-	podEnd := linkName(a.vpc, "envoy-1", intf.LocalRoleRoutedPod)
+	host := linkName(a.vpc, routedUID, intf.LocalRoleRoutedHost)
+	podEnd := linkName(a.vpc, routedUID, intf.LocalRoleRoutedPod)
 	got := r.mod.HandoffInterfaces(module.Scope{VPC: a.vpc})[claim.Key]
 	if len(got) != 2 || got[0].Role != workerv1alpha1.HandoffRoleHost || got[0].Name != host ||
 		got[1].Role != workerv1alpha1.HandoffRolePod || got[1].Name != podEnd {

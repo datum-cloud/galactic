@@ -19,8 +19,9 @@ import (
 )
 
 // ensureRouted makes r's link exist from the VPC's VRF to its pod, with its
-// routes and pass-through entries in the VPC's table and its guard. entries
-// are the table's exact entries, which ensureRouted updates as it writes.
+// routes and pass-through entries in the VPC's table, its guard, and the
+// egress datapath while the guard runs first. entries are the table's exact
+// entries, which ensureRouted updates as it writes.
 func (p *pass) ensureRouted(r routedWant, entries map[netip.Prefix]egressroutemap.Entry) error {
 	podNS, err := p.k.Pods.Open(r.podUID)
 	if err != nil {
@@ -49,19 +50,13 @@ func (p *pass) ensureRouted(r routedWant, entries map[netip.Prefix]egressroutema
 	if err := putRow(p.objs.Maps.Guard, uint32(hl.Attrs().Index), gv, p.dry, "guard of "+r.host); err != nil {
 		return err
 	}
-	guarded, err := p.k.filterCurrent(hl.Attrs().Index, filterLinkGuard)
+	first, err := p.ensureGuard(r, &hl)
 	if err != nil {
 		return err
 	}
-	if !guarded && !p.dry && hl.Attrs().Flags&net.FlagUp != 0 {
-		if err := netlink.LinkSetDown(hl); err != nil {
-			return fmt.Errorf("local: set unguarded %s down: %w", r.host, err)
-		}
-		if hl, err = netlink.LinkByName(r.host); err != nil {
-			return err
-		}
-	}
-	if err := p.k.ensureFilter(hl, filterLinkGuard, p.dry); err != nil {
+	// The egress datapath goes on only behind a guard that runs first, and
+	// before the link comes up.
+	if err := p.ensureEgress(r, hl, first); err != nil {
 		return err
 	}
 	if err := setUp(hl, p.dry); err != nil {

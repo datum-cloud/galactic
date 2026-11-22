@@ -18,53 +18,48 @@ import (
 )
 
 // podLinkProtocol marks the routes kernelPodLink makes, so it removes only
-// its own: a Local backend's /128 through the routed link.
+// its own: a Local backend's /128 through the routed link, or, without
+// in-pod encapsulation, the VRF's default route through it.
 const podLinkProtocol = netlink.RouteProtocol(0x47)
 
 // kernelPodLink is the production PodLink, in the calling process's network
 // namespace, which is the proxy pod's.
-type kernelPodLink struct{}
+type kernelPodLink struct {
+	// routeAll sends all of a VPC's traffic over the routed link: Configure
+	// creates the VPC's pod VRF and makes the link its default route. When
+	// false, the VRF and its default route belong to the in-pod
+	// encapsulation, and Configure routes only Local backends over the link.
+	routeAll bool
+}
 
-// NewKernelPodLink returns the production PodLink. Requires CAP_NET_ADMIN.
+// NewKernelPodLink returns the production PodLink for a sidecar with in-pod
+// encapsulation, which creates the VPC's VRF and default route itself.
+// Requires CAP_NET_ADMIN.
 func NewKernelPodLink() PodLink { return kernelPodLink{} }
 
+// NewRoutedPodLink returns the production PodLink for a sidecar without
+// in-pod encapsulation: Configure creates the VPC's pod VRF, and routes all
+// of its traffic over the routed link into the VPC's host VRF. Requires
+// CAP_NET_ADMIN.
+func NewRoutedPodLink() PodLink { return kernelPodLink{routeAll: true} }
+
 // Configure implements PodLink.
-func (kernelPodLink) Configure(vpc, podEnd string, gateway []netip.Addr, hostLL netip.Addr, local []netip.Addr) error {
-	return configurePodLink(intf.GenerateInterfaceNameVRF(vpc), podEnd, gateway, hostLL, local)
+func (l kernelPodLink) Configure(vpc, podEnd string, gateway []netip.Addr, hostLL netip.Addr,
+	local []netip.Addr,
+) error {
+	if !l.routeAll {
+		return configurePodLink(intf.GenerateInterfaceNameVRF(vpc), podEnd, gateway, hostLL, local)
+	}
+	if err := ensurePodVRF(vpc); err != nil {
+		return err
+	}
+	return configureRoutedPodLink(intf.GenerateInterfaceNameVRF(vpc), podEnd, gateway, hostLL)
 }
 
 // configurePodLink configures podEnd in the VRF named vrfName.
 func configurePodLink(vrfName, podEnd string, gateway []netip.Addr, hostLL netip.Addr, local []netip.Addr) error {
-	vl, err := netlink.LinkByName(vrfName)
+	vrfLink, pl, err := wirePodEnd(vrfName, podEnd, gateway)
 	if err != nil {
-		var nf netlink.LinkNotFoundError
-		if errors.As(err, &nf) {
-			return fmt.Errorf("%w: %s", errVRFMissing, vrfName)
-		}
-		return fmt.Errorf("look up VRF %s: %w", vrfName, err)
-	}
-	vrfLink, ok := vl.(*netlink.Vrf)
-	if !ok {
-		return fmt.Errorf("%s is a %s, not a VRF", vrfName, vl.Type())
-	}
-	pl, err := netlink.LinkByName(podEnd)
-	if err != nil {
-		return fmt.Errorf("look up the routed link's pod end %s: %w", podEnd, err)
-	}
-	if pl.Attrs().MasterIndex != vrfLink.Index {
-		if err := netlink.LinkSetMasterByIndex(pl, vrfLink.Index); err != nil {
-			return fmt.Errorf("enslave %s to %s: %w", podEnd, vrfName, err)
-		}
-	}
-	for _, a := range gateway {
-		if !a.Is6() || a.Is4In6() {
-			continue
-		}
-		if err := ensureGateway(pl, vrfLink.Table, a); err != nil {
-			return err
-		}
-	}
-	if err := removeStaleGateways(pl, gateway); err != nil {
 		return err
 	}
 	if err := setDefaultSource(vrfLink.Table, gateway); err != nil {
@@ -76,6 +71,46 @@ func configurePodLink(vrfName, podEnd string, gateway []netip.Addr, hostLL netip
 		}
 	}
 	return syncLocalRoutes(vrfLink.Table, pl.Attrs().Index, hostLL, local)
+}
+
+// wirePodEnd enslaves the link podEnd to the VRF named vrfName and makes its
+// global /128 addresses exactly the IPv6 addresses in gateway, each with its
+// local route. It returns the VRF and the pod end. The error wraps
+// errVRFMissing when the VRF does not exist.
+func wirePodEnd(vrfName, podEnd string, gateway []netip.Addr) (*netlink.Vrf, netlink.Link, error) {
+	vl, err := netlink.LinkByName(vrfName)
+	if err != nil {
+		var nf netlink.LinkNotFoundError
+		if errors.As(err, &nf) {
+			return nil, nil, fmt.Errorf("%w: %s", errVRFMissing, vrfName)
+		}
+		return nil, nil, fmt.Errorf("look up VRF %s: %w", vrfName, err)
+	}
+	vrfLink, ok := vl.(*netlink.Vrf)
+	if !ok {
+		return nil, nil, fmt.Errorf("%s is a %s, not a VRF", vrfName, vl.Type())
+	}
+	pl, err := netlink.LinkByName(podEnd)
+	if err != nil {
+		return nil, nil, fmt.Errorf("look up the routed link's pod end %s: %w", podEnd, err)
+	}
+	if pl.Attrs().MasterIndex != vrfLink.Index {
+		if err := netlink.LinkSetMasterByIndex(pl, vrfLink.Index); err != nil {
+			return nil, nil, fmt.Errorf("enslave %s to %s: %w", podEnd, vrfName, err)
+		}
+	}
+	for _, a := range gateway {
+		if !a.Is6() || a.Is4In6() {
+			continue
+		}
+		if err := ensureGateway(pl, vrfLink.Table, a); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := removeStaleGateways(pl, gateway); err != nil {
+		return nil, nil, err
+	}
+	return vrfLink, pl, nil
 }
 
 // ensureGateway assigns the gateway address a to the pod end l and makes
@@ -147,13 +182,7 @@ func hasLocalRoute(table uint32, linkIdx int, a netip.Addr) (bool, error) {
 // source that cannot be answered. Without a default route yet, as before the
 // datapath is attached, it does nothing and the next sweep sets it.
 func setDefaultSource(table uint32, gateway []netip.Addr) error {
-	var src net.IP
-	for _, a := range gateway {
-		if a.Is6() && !a.Is4In6() {
-			src = a.AsSlice()
-			break
-		}
-	}
+	src := gatewaySource(gateway)
 	if src == nil {
 		return nil
 	}
@@ -164,6 +193,17 @@ func setDefaultSource(table uint32, gateway []netip.Addr) error {
 	r.Src = src
 	if err := netlink.RouteReplace(r); err != nil {
 		return fmt.Errorf("set source %s on the default route of table %d: %w", src, table, err)
+	}
+	return nil
+}
+
+// gatewaySource returns the first IPv6 address in gateway, the source of the
+// pod VRF's default route, or nil when gateway holds none.
+func gatewaySource(gateway []netip.Addr) net.IP {
+	for _, a := range gateway {
+		if a.Is6() && !a.Is4In6() {
+			return a.AsSlice()
+		}
 	}
 	return nil
 }

@@ -69,6 +69,12 @@ type Module struct {
 	tapScopes map[string]bool
 	// errs are the per-link errors of each scope's last Apply.
 	errs map[string]map[string]error
+	// egressErrs are why each scope's routed links carry no egress
+	// datapath, as its last Apply found.
+	egressErrs map[string]map[string]error
+	// blocked are each scope's claims whose routed link cannot carry their
+	// Fabric destinations, from its last Read.
+	blocked map[string]map[module.ClaimKey]module.Blocked
 	// handoffs are each scope's handoff interfaces from its last Read.
 	handoffs map[string]map[module.ClaimKey][]module.HandoffInterface
 	// neighborWait are the scopes with a failed neighbor.
@@ -78,6 +84,7 @@ type Module struct {
 var (
 	_ module.Module          = (*Module)(nil)
 	_ module.HandoffReporter = (*Module)(nil)
+	_ module.HandoffGate     = (*Module)(nil)
 )
 
 // New returns a Local module.
@@ -90,7 +97,9 @@ func New(cfg Config) (*Module, error) {
 	}
 	cfg.Log = cfg.Log.With("module", Name)
 	return &Module{cfg: cfg, desired: map[string][]module.Claim{}, tapScopes: map[string]bool{},
-		errs: map[string]map[string]error{}, handoffs: map[string]map[module.ClaimKey][]module.HandoffInterface{},
+		errs: map[string]map[string]error{}, egressErrs: map[string]map[string]error{},
+		blocked:      map[string]map[module.ClaimKey]module.Blocked{},
+		handoffs:     map[string]map[module.ClaimKey][]module.HandoffInterface{},
 		neighborWait: map[string]bool{}}, nil
 }
 
@@ -187,7 +196,7 @@ func (m *Module) plan(_ context.Context, scope module.Scope, desired []module.Cl
 		delete(m.tapScopes, vpc)
 	}
 	anyTap := len(m.tapScopes) > 0
-	retry := len(m.errs[vpc]) > 0
+	retry := len(m.errs[vpc]) > 0 || len(m.egressErrs[vpc]) > 0
 	m.mu.Unlock()
 
 	ch := &change{vpc: vpc, m: want, edge: edgeClaims(desired), retry: retry, keepEdge: keepEdge}
@@ -245,8 +254,13 @@ func (m *Module) Apply(_ context.Context, scope module.Scope, c module.Change) e
 		m.cfg.Log.Info("a routed link could not be created; retrying on the next change", "vpc", ch.vpc,
 			"link", name, "error", e)
 	}
+	for name, e := range res.egress {
+		m.cfg.Log.Info("a routed link carries no egress datapath; its claim's Fabric destinations are unreachable",
+			"vpc", ch.vpc, "link", name, "error", e)
+	}
 	m.mu.Lock()
 	m.errs[ch.vpc] = res.errs
+	m.egressErrs[ch.vpc] = res.egress
 	anyTap := len(m.tapScopes) > 0
 	m.mu.Unlock()
 	if err := m.cfg.Kernel.ensureReceivers(anyTap, false); err != nil {
@@ -264,9 +278,10 @@ func (m *Module) Read(_ context.Context, scope module.Scope) (module.State, erro
 	m.mu.Lock()
 	claims := m.desired[vpc]
 	errs := m.errs[vpc]
+	egressErrs := m.egressErrs[vpc]
 	m.mu.Unlock()
 	plain := slices.DeleteFunc(slices.Clone(claims), func(c module.Claim) bool { return c.EdgeLink != nil })
-	res, err := m.cfg.Kernel.read(vpc, m.cfg.Node, plain, desire(vpc, plain), errs)
+	res, err := m.cfg.Kernel.read(vpc, m.cfg.Node, plain, desire(vpc, plain), errs, egressErrs)
 	if err != nil {
 		return nil, fmt.Errorf("local: read %s: %w", vpc, err)
 	}
@@ -275,6 +290,7 @@ func (m *Module) Read(_ context.Context, scope module.Scope) (module.State, erro
 	}
 	m.mu.Lock()
 	m.handoffs[vpc] = res.handoffs
+	m.blocked[vpc] = res.blocked
 	if res.failedNeighbors {
 		m.neighborWait[vpc] = true
 	} else {
@@ -323,6 +339,24 @@ func (m *Module) HandoffInterfaces(scope module.Scope) map[module.ClaimKey][]mod
 	out := map[module.ClaimKey][]module.HandoffInterface{}
 	for k, v := range m.handoffs[scope.VPC] {
 		out[k] = append([]module.HandoffInterface(nil), v...)
+	}
+	return out
+}
+
+// HandoffBlocked implements module.HandoffGate. A routed link carries its
+// claim's Fabric destinations only while it carries the egress datapath; a
+// claim whose link does not reports them not forward-ready. Its Local
+// destinations, which the kernel reaches through the link either way, are
+// judged on their own.
+func (m *Module) HandoffBlocked(scope module.Scope, mode workerv1alpha1.Mode) map[module.ClaimKey]module.Blocked {
+	if mode != workerv1alpha1.Mode_MODE_FABRIC {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[module.ClaimKey]module.Blocked, len(m.blocked[scope.VPC]))
+	for k, b := range m.blocked[scope.VPC] {
+		out[k] = b
 	}
 	return out
 }

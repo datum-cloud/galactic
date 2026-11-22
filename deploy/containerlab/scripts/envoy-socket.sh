@@ -13,9 +13,10 @@
 # galactic-vrf sidecar, which holds one Worker socket claim per ns80 VPC.
 # Its upstream sockets bind to each VPC's VRF in the pod and send from the
 # gateway fd20:80:ff04::1, which both VPCs' proxy attachments hold. Each VPC
-# has a local backend (ns80's guest on dfw-worker) and a remote one, which
-# is configured but not exercised: remote backends are not supported yet
-# (#1487), and the run records their rows as skipped.
+# has a local backend (ns80's guest on dfw-worker) and a remote one. Both
+# cross the routed link into the host VRF: a local backend's traffic is
+# routed there, and a remote backend's is SRv6-encapsulated by the host
+# egress datapath Worker attaches to the link's host end (#1487).
 #
 #   REMOTE=dfw-worker4  ns80's guests on dfw's second compute worker (#1460),
 #                       which dfw's cluster already knows
@@ -34,6 +35,8 @@
 #   captures where each request and reply crossed, during fresh and reused
 #   state    routes in the pod and host VRFs, Worker's advertisements, the
 #            remote node's route back, the sidecar's metrics
+#   spoof    a source the proxy's attachment does not hold, sent over the
+#            routed link, never leaves the node
 #   move     VPC 80's local guest goes and comes back
 #   replace  a rollout replaces the Envoy pod
 #   cleanup  the fixture goes; nothing of the claims is left on dfw-worker
@@ -84,20 +87,22 @@ VRF_IMAGE=galactic-vrf:lab
 # This checkout's galactic-controller, which certifies a proxy attachment's
 # node from its pod (#1439); the lab's runs for the case only.
 CTRL_IMAGE=galactic-controller:lab-1439
+# CTRL_SAVE holds the deployed controller image, exported from the node that
+# runs it before the case swaps it, and CTRL_SAVE.ref its image reference.
+# The restore loads it back onto every node rather than trusting the nodes'
+# image cache, which the kubelet may have pruned while the image was unused.
+CTRL_SAVE_DIR=${REPO}/bin/envoy-socket
+CTRL_SAVE=${CTRL_SAVE_DIR}/controller-deployed.tar
 CTRL_DEPLOY=galactic-controller
 WORKER_BIN=/opt/galactic-worker/galactic-worker
 ADV=bgpadvertisements.galactic.datumapis.com
 N=5
 REPLACE_TIMEOUT=${REPLACE_TIMEOUT:-120}
-# Only the local paths are exercised. Remote backends are not supported yet
-# (#1487): the sidecar encapsulates in the pod and sends the SRv6 packet out
-# of the pod's eth0 with the node's SID as its source, and the primary CNI
-# (Cilium in the lab) drops it there because that source is not the pod's
-# address. The remote backends are still configured, so every remote row is
-# recorded once as skipped with this reason.
-PATHS=(80/local 81/local)
-SKIPPED_PATHS=(80/remote 81/remote)
-SKIP_REASON="remote backends are not supported yet (#1487)"
+PATHS=(80/local 80/remote 81/local 81/remote)
+# SPOOF is a source the proxy's attachment does not hold. The spoof window
+# sends from it over VPC 80's routed link; the host end's guard must drop it
+# before the host egress datapath can encapsulate it.
+SPOOF=fd20:80:ff04::5ef
 declare -A VRF=([80]=G000000080V [81]=G000000081V)
 declare -A OTHER=([80]=81 [81]=80)
 
@@ -216,7 +221,7 @@ ADDED=envoy-socket.galactic.datumapis.com/added-addresses
 
 stop_backends() {
   local p pod
-  for p in "${PATHS[@]}" "${SKIPPED_PATHS[@]}"; do
+  for p in "${PATHS[@]}"; do
     pod=$(ready_pod "${BCP[${p}]}" "${BNS[${p}]}" "app=${BAPP[${p}]}" || true)
     [ -n "${pod}" ] || continue
     kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- cat /tmp/envoy-backend.log \
@@ -290,17 +295,55 @@ cleanup() {
   finish
 }
 
+# save_controller exports the image dfw's galactic-controller runs, from a
+# node running it, to CTRL_SAVE, and its reference to CTRL_SAVE.ref.
+save_controller() {
+  local sel node ref
+  sel=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o json </dev/null |
+    jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
+  node=$(kd -n galactic-system get pods -l "${sel}" -o json </dev/null |
+    jq -r '[.items[] | select(.status.phase == "Running")][0].spec.nodeName // empty')
+  [ -n "${node}" ] || return 1
+  ref=$(docker exec "${node}" crictl inspecti -o json "${CTRL_ORIG}" 2>/dev/null | jq -r '.status.repoTags[0] // empty')
+  [ -n "${ref}" ] || return 1
+  mkdir -p "${CTRL_SAVE_DIR}"
+  docker exec "${node}" ctr --namespace k8s.io images export - "${ref}" >"${CTRL_SAVE}.tmp" || return 1
+  tar -tf "${CTRL_SAVE}.tmp" 2>/dev/null | grep -qx 'index.json' || return 1
+  mv "${CTRL_SAVE}.tmp" "${CTRL_SAVE}"
+  printf '%s\n' "${CTRL_ORIG}" >"${CTRL_SAVE}.ref"
+  volatile controller-saved "${ref} from ${node}"
+}
+
 # restore_controller puts dfw's galactic-controller back on the image it ran
-# before the case and removes the case's image from the nodes.
+# before the case: it loads the saved image onto every node, sets it back,
+# and waits for the controller to be Ready. It removes only the case's image
+# reference from the nodes. A restore that does not finish fails the run.
 restore_controller() {
-  local n
+  local n loaded=yes ready=no
   [ "${CTRL_SWAPPED}" = 1 ] || return 0
+  if [ -s "${CTRL_SAVE}" ]; then
+    for n in $(kd get nodes -o jsonpath='{.items[*].metadata.name}' </dev/null); do
+      docker exec -i "${n}" ctr --namespace k8s.io images import - <"${CTRL_SAVE}" >/dev/null 2>&1 || loaded=no
+    done
+  else
+    loaded=no
+  fi
+  record restore "the deployed galactic-controller image is loaded on every node" yes "${loaded}"
   kd -n galactic-system set image "deployment/${CTRL_DEPLOY}" "${CTRL_CONTAINER}=${CTRL_ORIG}" >/dev/null
-  record restore "galactic-controller is back on ${CTRL_ORIG}" yes \
-    "$(kd -n galactic-system rollout status "deployment/${CTRL_DEPLOY}" --timeout=180s \
-      >>"${OUT}/logs/controller-rollout.log" 2>&1 && echo yes || echo no)"
+  if kd -n galactic-system rollout status "deployment/${CTRL_DEPLOY}" --timeout=180s \
+    >>"${OUT}/logs/controller-rollout.log" 2>&1 &&
+    kd -n galactic-system wait --for=condition=Available "deployment/${CTRL_DEPLOY}" --timeout=60s \
+      >>"${OUT}/logs/controller-rollout.log" 2>&1; then
+    ready=yes
+  fi
+  record restore "galactic-controller is back on ${CTRL_ORIG} and Ready" yes "${ready}"
+  if [ "${loaded}" != yes ] || [ "${ready}" != yes ]; then
+    kd -n galactic-system get pods -o wide >>"${OUT}/logs/controller-rollout.log" 2>&1 || true
+    echo "!!! RESTORE FAILED: galactic-controller is not Ready on ${CTRL_ORIG} (image loaded: ${loaded});" \
+      "see ${OUT}/logs/controller-rollout.log" >&2
+  fi
   for n in $(kd get nodes -o jsonpath='{.items[*].metadata.name}' </dev/null); do
-    docker exec "${n}" crictl rmi "${CTRL_IMAGE}" >/dev/null 2>&1 || true
+    docker exec "${n}" ctr --namespace k8s.io images rm "docker.io/library/${CTRL_IMAGE}" >/dev/null 2>&1 || true
   done
 }
 
@@ -350,7 +393,7 @@ restore_checks() {
   record restore "no galactic-vrf sidecar runs in dfw" 0 "${out}"
   record restore "the fixture's copy on ${DFW} is gone" yes \
     "$(docker exec "${DFW}" test -e "${FIXTURE_DIR}" && echo no || echo yes)"
-  for p in "${PATHS[@]}" "${SKIPPED_PATHS[@]}"; do
+  for p in "${PATHS[@]}"; do
     pod=$(ready_pod "${BCP[${p}]}" "${BNS[${p}]}" "app=${BAPP[${p}]}" || true)
     [ -n "${pod}" ] || continue
     out=$(kx "${BCP[${p}]}" -n "${BNS[${p}]}" exec "${pod}" -- pgrep -f '[e]nvoy-backend[.]py' </dev/null || true)
@@ -434,7 +477,7 @@ if [ "${MODE}" = down ]; then
   if [ "$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" \
     -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null)" = "${CTRL_IMAGE}" ]; then
     CTRL_CONTAINER=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].name}')
-    CTRL_ORIG=galactic-controller:latest
+    CTRL_ORIG=$(cat "${CTRL_SAVE}.ref" 2>/dev/null || echo galactic-controller:latest)
     CTRL_SWAPPED=1
   fi
   if [ -n "$(docker exec "${NODE}" pgrep -f "^${WORKER_BIN}" || true)" ]; then
@@ -468,6 +511,13 @@ for n in $(kd get nodes -o jsonpath='{.items[*].metadata.name}' </dev/null); do
 done
 CTRL_CONTAINER=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].name}')
 CTRL_ORIG=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].image}')
+# The deployed image is saved before anything changes it; without a copy the
+# case does not swap the controller at all.
+if ! save_controller; then
+  record setup "the deployed galactic-controller image is saved" yes no
+  exit 1
+fi
+record setup "the deployed galactic-controller image is saved" yes yes
 volatile controller-image "${CTRL_ORIG} replaced by ${CTRL_IMAGE} for the case"
 CTRL_SWAPPED=1
 kd -n galactic-system set image "deployment/${CTRL_DEPLOY}" "${CTRL_CONTAINER}=${CTRL_IMAGE}" >/dev/null
@@ -517,7 +567,7 @@ ensure_addresses() {
     volatile "added-addresses" "ns80/${att} ${addr}/96"
   fi
 }
-for p in "${PATHS[@]}" "${SKIPPED_PATHS[@]}"; do
+for p in "${PATHS[@]}"; do
   [ "${BCP[${p}]}" = "${DFW}" ] && ensure_addresses "${BATT[${p}]}" "${BADDR[${p}]}"
 done
 
@@ -655,7 +705,7 @@ start_backend() {
   return 1
 }
 BACKENDS_STARTED=1
-for p in "${PATHS[@]}" "${SKIPPED_PATHS[@]}"; do
+for p in "${PATHS[@]}"; do
   start_backend "${p}" || {
     record setup "${p} backend listens" yes no
     exit 1
@@ -800,14 +850,16 @@ window() {
 
 # Captures ---------------------------------------------------------------------
 
-# capture W starts the window's captures: the routed links' ends, the
-# sidecar's encapsulation pair and eth0 in the pod, the host ends, the local
-# guests' eth0, and dfw-worker's physical bond members.
+# capture W starts the window's captures: the routed links' ends, eth0 in
+# the pod (and an in-pod encapsulation pair, should one exist), the host
+# ends, the local guests' eth0, and dfw-worker's physical bond members.
 capture() {
   local w="$1" v gpid
   for v in 80 81; do
     cap "${w}" "pod${v}" "pid:${PPID_POD}" "${POD_END[${v}]}"
-    cap "${w}" "encap${v}" "pid:${PPID_POD}" "${IVS[${v}]}" "${IVP[${v}]}"
+    if [ -n "${IVS[${v}]}" ]; then
+      cap "${w}" "encap${v}" "pid:${PPID_POD}" "${IVS[${v}]}" "${IVP[${v}]}"
+    fi
     cap "${w}" "host${v}" node "${HOST_END[${v}]}"
     gpid=$(pod_pid ns80 "${BAPP[${v}/local]}")
     cap "${w}" "guest${v}" "pid:${gpid}" eth0
@@ -848,9 +900,18 @@ diagnose() {
 }
 
 # counts W POINT prints POINT's request and reply counts per path as JSON.
+# A point with no capture, such as an in-pod encapsulation pair that does not
+# exist, counts nothing.
 counts() {
-  python3 -I "${SCRIPT_DIR}/envoy-pcap.py" --gateway "${GW}" --nonces "${OUT}/logs/$1/nonces.tsv" \
-    "${OUT}/pcap/$1/$2".*.pcap
+  local files=()
+  shopt -s nullglob
+  files=("${OUT}/pcap/$1/$2".*.pcap)
+  shopt -u nullglob
+  if [ "${#files[@]}" = 0 ]; then
+    echo '{}'
+    return
+  fi
+  python3 -I "${SCRIPT_DIR}/envoy-pcap.py" --gateway "${GW}" --nonces "${OUT}/logs/$1/nonces.tsv" "${files[@]}"
 }
 
 # where W checks where each path's requests and replies crossed.
@@ -876,12 +937,18 @@ where() {
       record "${w}" "${p}: nothing on the physical members" 0 \
         "$(($(g physical "${p}" req) + $(g physical "${p}" rep)))"
     else
-      record "${w}" "${p}: requests leave through the encapsulation pair" yes "$(seen "$(g "encap${v}" "${p}" req)")"
-      record "${w}" "${p}: no request on the routed link" 0 "$(($(g "pod${v}" "${p}" req) + $(g "host${v}" "${p}" req)))"
-      record "${w}" "${p}: replies return over the routed link" yes "$(seen "$(g "pod${v}" "${p}" rep)")"
-      record "${w}" "${p}: replies enter the host end" yes "$(seen "$(g "host${v}" "${p}" rep)")"
+      record "${w}" "${p}: requests cross VPC ${v}'s routed link" yes "$(seen "$(g "pod${v}" "${p}" req)")"
+      record "${w}" "${p}: requests leave the host end" yes "$(seen "$(g "host${v}" "${p}" req)")"
       record "${w}" "${p}: requests leave the node in SRv6" yes "$(seen "$(g physical "${p}" req_srv6)")"
       record "${w}" "${p}: replies reach the node in SRv6" yes "$(seen "$(g physical "${p}" rep_srv6)")"
+      # Observed, not required: the decapsulating datapath may hand a remote
+      # reply straight to the pod end, past the host end's capture, and the
+      # row after this one is what proves the reply crossed the link.
+      record "${w}" "${p}: replies seen on the host end" - "$(seen "$(g "host${v}" "${p}" rep)")"
+      record "${w}" "${p}: replies cross VPC ${v}'s routed link" yes "$(seen "$(g "pod${v}" "${p}" rep)")"
+      record "${w}" "${p}: nothing out of the pod's eth0" 0 "$(($(g podeth0 "${p}" req) + $(g podeth0 "${p}" rep)))"
+      record "${w}" "${p}: nothing through an in-pod encapsulation pair" 0 \
+        "$(($(g "encap${v}" "${p}" req) + $(g "encap${v}" "${p}" rep)))"
       record "${w}" "${p}: nothing at the local guest" 0 "$(($(g "guest${v}" "${p}" req) + $(g "guest${v}" "${p}" rep)))"
     fi
     record "${w}" "${p}: nothing on VPC ${o}'s link, pair or guest" 0 "$(($(g "pod${o}" "${p}" req) + $(g "pod${o}" "${p}" rep) +
@@ -931,11 +998,13 @@ state() {
     j=$(in_pod "${PPID_POD}" ip -6 -j route show vrf "${VRF[${v}]}" proto 71 2>/dev/null || echo '[]')
     ll=$({ docker exec "${NODE}" ip -6 -j addr show dev "${HOST_END[${v}]}" scope link 2>/dev/null || echo '[]'; } |
       jq -r '.[0].addr_info[0].local // empty')
-    record "${w}" "VPC ${v}: the pod VRF's routed-link routes are the local backend only" "${LOCAL_ADDR}" \
+    record "${w}" "VPC ${v}: the pod VRF's only routed-link route is its default" default \
       "$(jq -r '[.[].dst] | sort | join(",")' <<<"${j}")"
     route=$(jq -r --arg ll "${ll}" --arg dev "${POD_END[${v}]}" \
       '[.[] | select(.gateway == $ll and .dev == $dev)] | length' <<<"${j}")
-    record "${w}" "VPC ${v}: the local route goes through the pod end to the host end's link-local" 1 "${route}"
+    record "${w}" "VPC ${v}: the default route goes through the pod end to the host end's link-local" 1 "${route}"
+    record "${w}" "VPC ${v}: the default route's source is the gateway" "${GW}" \
+      "$(jq -r '[.[] | .prefsrc // empty] | first // "none"' <<<"${j}")"
     record "${w}" "VPC ${v}: the host VRF routes the gateway to the host end" yes \
       "$([ "$(host_gateway_dev "${v}")" = "${HOST_END[${v}]}" ] && echo yes || echo no)"
     a=$(advertisements "${v}" 2>/dev/null || echo '{"items":[]}')
@@ -945,7 +1014,10 @@ state() {
     record "${w}" "VPC ${v}: the advertisement names the Envoy pod" yes \
       "$(jq -r --arg uid "${POD_UID}" 'if [.items[] | select(.metadata.annotations["galactic.datumapis.com/worker-pod"] == $uid)]
         | length == 1 then "yes" else "no" end' <<<"${a}")"
-    record "${w}" "VPC ${v}: the remote node's route back to the gateway: skipped" - "${SKIP_REASON}"
+    record "${w}" "VPC ${v}: the host end carries the host egress datapath" yes \
+      "$(docker exec "${NODE}" tc filter show dev "${HOST_END[${v}]}" ingress 2>/dev/null |
+        grep -q galactic_usid_egress && echo yes || echo no)"
+    remote_route "${v}"
   done
   f="${OUT}/logs/${w}/metrics.txt"
   metrics >"${f}" 2>&1 || true
@@ -967,7 +1039,6 @@ state() {
   fi
 }
 
-# Unused while remote backends are skipped (#1487), which brings it back.
 # remote_route V checks the remote node routes the gateway back in VPC V:
 # a kernel route, or an egress_route_table entry when bpftool can be run
 # without a password.
@@ -981,6 +1052,67 @@ remote_route() {
   fi
   record state "VPC ${v}: ${node} has a route back to the gateway" yes \
     "$(grep -qF "${GW}" <<<"${k}${e}" && echo yes || echo no)"
+}
+
+# Spoof ------------------------------------------------------------------------
+
+# spoof_count W POINT SRC prints how many packets POINT captured in window W
+# from SRC, as {"n": N, "srv6": N}.
+spoof_count() {
+  local files=()
+  shopt -s nullglob
+  files=("${OUT}/pcap/$1/$2".*.pcap)
+  shopt -u nullglob
+  if [ "${#files[@]}" = 0 ]; then
+    echo '{"n": 0, "srv6": 0}'
+    return
+  fi
+  python3 -I "${SCRIPT_DIR}/envoy-pcap.py" --source "$3" "${files[@]}"
+}
+
+# spoof_send SRC COUNT sends COUNT ICMPv6 echo requests from SRC to VPC 80's
+# remote backend out of VPC 80's pod end, framed straight to the host end's
+# MAC with scapy in the rig. Nothing is assigned to the pod end, so the
+# sidecar, which removes any non-gateway address it finds there, cannot
+# change the source.
+spoof_send() {
+  local mac
+  mac=$(docker exec "${NODE}" cat "/sys/class/net/${HOST_END[80]}/address")
+  in_pod "${PPID_POD}" python3 -c '
+import sys
+from scapy.all import Ether, IPv6, ICMPv6EchoRequest, sendp
+dev, mac, src, dst, n = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+sendp(Ether(dst=mac) / IPv6(src=src, dst=dst, hlim=64) / ICMPv6EchoRequest(id=0x1487, data=b"galactic-spoof"),
+      iface=dev, count=n, inter=0.2, verbose=False)
+' "${POD_END[80]}" "${mac}" "$1" "${BADDR[80/remote]}" "$2"
+}
+
+# spoof sends echo requests over VPC 80's routed link from SPOOF, a source
+# the proxy's attachment does not hold, toward VPC 80's remote backend. The
+# pod end must show them sent and the host end received, and nothing from
+# SPOOF may leave the node: the guard drops them before the host egress
+# datapath can encapsulate them. The same requests from the gateway, sent
+# the same way, are the control: they must leave the node in SRv6, which
+# shows the physical captures would have seen the spoofed ones.
+spoof() {
+  local w=spoof pt
+  window "${w}"
+  capture "${w}"
+  spoof_send "${SPOOF}" 5 >"${OUT}/logs/${w}/send-spoof.txt" 2>&1 || true
+  spoof_send "${GW}" 5 >"${OUT}/logs/${w}/send-gateway.txt" 2>&1 || true
+  cap_stop
+  declare -A S G
+  for pt in pod80 host80 physical; do
+    S[${pt}]=$(spoof_count "${w}" "${pt}" "${SPOOF}")
+    G[${pt}]=$(spoof_count "${w}" "${pt}" "${GW}")
+    printf '%s\tspoof=%s gateway=%s\n' "${pt}" "${S[${pt}]}" "${G[${pt}]}" >>"${OUT}/logs/${w}/counts.tsv"
+  done
+  record "${w}" "VPC 80: the pod end sent 5 requests from a source its attachment does not hold" 5 \
+    "$(jq -r .n <<<"${S[pod80]}")"
+  record "${w}" "VPC 80: the host end received them" 5 "$(jq -r .n <<<"${S[host80]}")"
+  record "${w}" "VPC 80: nothing from that source leaves the node" 0 "$(jq -r .n <<<"${S[physical]}")"
+  record "${w}" "VPC 80: the same requests from the gateway leave the node in SRv6" yes \
+    "$(seen "$(jq -r .srv6 <<<"${G[physical]}")")"
 }
 
 # Sockets ----------------------------------------------------------------------
@@ -1042,11 +1174,8 @@ kd -n "${NS}" logs "${POD}" -c galactic-vrf --tail=200 >"${OUT}/logs/galactic-vr
 links
 for v in 80 81; do
   record setup "VPC ${v}: routed link ends found" yes \
-    "$([ -n "${POD_END[${v}]}" ] && [ -n "${HOST_END[${v}]}" ] && [ -n "${IVS[${v}]}" ] && echo yes || echo no)"
-done
-
-for p in "${SKIPPED_PATHS[@]}"; do
-  record scope "${p}: every request row skipped" - "${SKIP_REASON}"
+    "$([ -n "${POD_END[${v}]}" ] && [ -n "${HOST_END[${v}]}" ] && echo yes || echo no)"
+  record setup "VPC ${v}: no in-pod encapsulation pair" none "${IVS[${v}]:-none}"
 done
 
 # probe: one request per VPC and backend over a fresh upstream connection,
@@ -1086,6 +1215,7 @@ where reused
 
 sockets
 state
+spoof
 
 # move: VPC 80's local guest goes. It is the last tenant interface of VPC 80
 # on dfw-worker (ns80 has no TAP guest; a veth is the same state for the
@@ -1095,11 +1225,11 @@ GUEST_A_REPLICAS=$(kd -n ns80 get deployment guest-a -o jsonpath='{.spec.replica
 MOVED=1
 kd -n ns80 scale deployment/guest-a --replicas=0 >/dev/null
 kd -n ns80 wait --for=delete pod -l app=vpc-a --timeout=120s >/dev/null 2>&1 || true
-record move "VPC 80: the pod VRF drops the local route" none "$(wait_local_routes 80 "")"
+record move "VPC 80: the pod VRF keeps its default route through the link" default "$(wait_local_routes 80 default)"
 record move "VPC 80: the host VRF stays" yes "$(docker exec "${NODE}" ip link show "${VRF[80]}" >/dev/null 2>&1 && echo yes || echo no)"
 record move "VPC 80: the host VRF still routes the gateway to the host end" yes \
   "$([ "$(host_gateway_dev 80)" = "${HOST_END[80]}" ] && echo yes || echo no)"
-for p in 81/local; do
+for p in 80/remote 81/local 81/remote; do
   fresh move "${p}"
   reused move "${p}"
 done
@@ -1114,7 +1244,7 @@ kd -n ns80 rollout status deployment/guest-a --timeout=120s >/dev/null
 MOVED=0
 "${SCRIPT_DIR}/publish-attachments.sh" ns80 dfw >"${OUT}/logs/publish-attachments.log" 2>&1
 record move "80/local: the backend restarts in the new guest" yes "$(start_backend 80/local && echo yes || echo no)"
-record move "VPC 80: the pod VRF's local route comes back" "${LOCAL_ADDR}" "$(wait_local_routes 80 "${LOCAL_ADDR}")"
+record move "VPC 80: the pod VRF still has only its default route" default "$(wait_local_routes 80 default)"
 fresh move 80/local
 reused move 80/local
 

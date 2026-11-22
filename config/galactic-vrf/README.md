@@ -11,15 +11,16 @@ components:
   - ../../config/galactic-vrf
 ```
 
-## Backends on this node only
+## How the proxy reaches backends
 
-The proxy reaches backends on its own node only. Remote backends, on other
-nodes, are not supported yet
-([#1487](https://github.com/datum-cloud/galactic/issues/1487)): the sidecar
-encapsulates their traffic in the pod and sends it out of the pod's own
-interface with the node's SRv6 address as its source, and a primary CNI that
-checks a pod's source address, as Cilium does, drops it. Requests to them time
-out. See the [Worker contract](../../docs/worker/contract.md#envoy-and-the-galactic-vrf-sidecar).
+The sidecar sends all of the proxy's upstream traffic over the routed link
+Worker gives each VPC's claim, into the node's VPC routing table. Worker
+attaches the node's egress datapath to the link's host end, so a backend on
+another node is reached over the fabric the way a tenant reaches it, and the
+traffic never leaves through the pod's own interface. The sidecar's earlier
+in-pod encapsulation is off by default (`--in-pod-encapsulation`); a primary
+CNI that checks a pod's source address, such as Cilium, drops its packets.
+See the [Worker contract](../../docs/worker/contract.md#envoy-and-the-galactic-vrf-sidecar).
 
 ## What the consumer supplies
 

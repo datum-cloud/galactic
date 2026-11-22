@@ -6,6 +6,7 @@ package ingresssidecar
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -13,7 +14,9 @@ import (
 
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 
+	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
 )
 
@@ -278,5 +281,158 @@ func waitLocalRoute(table uint32, linkIdx int, a netip.Addr) (bool, error) {
 			return ok, err
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestRoutedPodLink_CreatesVRFAndRoutesEverythingOverTheLink configures a
+// VPC's routed link without in-pod encapsulation. The claims path creates
+// the pod VRF, whose only unicast default is the link to the host end's
+// link-local, sourced from the gateway. A default an in-pod encapsulating
+// sidecar left, through another device, at the same or another metric, is
+// replaced, Local backend /128s it left are removed, and the unreachable
+// default and the gateway's local route survive repeated configures.
+func TestRoutedPodLink_CreatesVRFAndRoutesEverythingOverTheLink(t *testing.T) {
+	requireRoot(t)
+
+	nsObj, err := ns.TempNetNS()
+	if err != nil {
+		t.Fatalf("create test netns: %v", err)
+	}
+	t.Cleanup(func() { _ = nsObj.Close() })
+
+	const vpc = "rtlinktst"
+	gw := netip.MustParseAddr("2001:db8:ff::1")
+	hostLL := netip.MustParseAddr("fe80::1")
+	backend := netip.MustParseAddr("2001:db8:1::10")
+	link := NewRoutedPodLink()
+
+	err = nsObj.Do(func(_ ns.NetNS) error {
+		defer func() {
+			if err := vrf.DeleteInRange(vpc, sidecarTableIDMin, sidecarTableIDMax); err != nil {
+				t.Errorf("release the test VRF: %v", err)
+			}
+		}()
+		if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: "podW"}, PeerName: "hostW"}); err != nil {
+			return err
+		}
+		hl, err := netlink.LinkByName("hostW")
+		if err != nil {
+			return err
+		}
+		if err := netlink.LinkSetUp(hl); err != nil {
+			return err
+		}
+
+		if err := link.Configure(vpc, "podW", []netip.Addr{gw}, hostLL, []netip.Addr{backend}); err != nil {
+			return fmt.Errorf("first configure: %w", err)
+		}
+		vl, err := netlink.LinkByName(intf.GenerateInterfaceNameVRF(vpc))
+		if err != nil {
+			return fmt.Errorf("the claims path did not create the VRF: %w", err)
+		}
+		vrfLink, ok := vl.(*netlink.Vrf)
+		if !ok || vrfLink.Table < sidecarTableIDMin || vrfLink.Table > sidecarTableIDMax {
+			return fmt.Errorf("VRF %s = %+v, want a VRF with a table in [%d,%d]", vl.Attrs().Name, vl,
+				sidecarTableIDMin, sidecarTableIDMax)
+		}
+		table := vrfLink.Table
+		pl, err := netlink.LinkByName("podW")
+		if err != nil {
+			return err
+		}
+		checkRoutedLink(t, table, pl, gw, hostLL, "after the first configure")
+		if routes := localRoutes(t, table); len(routes) != 0 {
+			t.Errorf("table %d has Local backend routes %v, want none", table, routes)
+		}
+
+		// What an in-pod encapsulating sidecar left: a default through its
+		// egress veth at the same metric, another at a lower one, and a
+		// Local backend's /128 over the link.
+		inner, peer := egressVethNames(table)
+		if err := netlink.LinkAdd(&netlink.Veth{LinkAttrs: netlink.LinkAttrs{Name: peer}, PeerName: inner}); err != nil {
+			return err
+		}
+		il, err := netlink.LinkByName(inner)
+		if err != nil {
+			return err
+		}
+		if err := netlink.LinkSetMaster(il, vrfLink); err != nil {
+			return err
+		}
+		if err := netlink.LinkSetUp(il); err != nil {
+			return err
+		}
+		def := &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)}
+		staleGw := net.ParseIP("fe80::2")
+		if err := netlink.RouteReplace(&netlink.Route{Table: int(table), Dst: def, LinkIndex: il.Attrs().Index,
+			Gw: staleGw}); err != nil {
+			return fmt.Errorf("stale default: %w", err)
+		}
+		if err := netlink.RouteAdd(&netlink.Route{Table: int(table), Dst: def, LinkIndex: il.Attrs().Index,
+			Gw: staleGw, Priority: 100}); err != nil {
+			return fmt.Errorf("stale default at metric 100: %w", err)
+		}
+		if err := netlink.RouteReplace(&netlink.Route{Table: int(table),
+			Dst: &net.IPNet{IP: backend.AsSlice(), Mask: net.CIDRMask(128, 128)},
+			Gw:  hostLL.AsSlice(), LinkIndex: pl.Attrs().Index, Protocol: podLinkProtocol}); err != nil {
+			return fmt.Errorf("stale Local route: %w", err)
+		}
+
+		for i := range 2 {
+			if err := link.Configure(vpc, "podW", []netip.Addr{gw}, hostLL, []netip.Addr{backend}); err != nil {
+				return fmt.Errorf("configure %d over stale state: %w", i, err)
+			}
+			checkRoutedLink(t, table, pl, gw, hostLL, fmt.Sprintf("after configure %d over stale state", i))
+			if routes := localRoutes(t, table); len(routes) != 0 {
+				t.Errorf("table %d keeps Local backend routes %v, want none", table, routes)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// checkRoutedLink checks that pod is up in table's VRF with the gateway gw
+// and its local route, that the table's only unicast default leads through
+// pod to hostLL from gw with podLinkProtocol, and that its unreachable
+// default is still there.
+func checkRoutedLink(t *testing.T, table uint32, pod netlink.Link, gw, hostLL netip.Addr, when string) {
+	t.Helper()
+	pl, err := netlink.LinkByIndex(pod.Attrs().Index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pl.Attrs().Flags&net.FlagUp == 0 {
+		t.Errorf("%s: %s is down", when, pl.Attrs().Name)
+	}
+	if ok, err := hasAddr(pl, gw); err != nil || !ok {
+		t.Errorf("%s: %s has no gateway address %s (%v)", when, pl.Attrs().Name, gw, err)
+	}
+	if ok, err := waitLocalRoute(table, pl.Attrs().Index, gw); err != nil || !ok {
+		t.Errorf("%s: table %d local route for %s = %t, %v; want present", when, table, gw, ok, err)
+	}
+	defaults, err := unicastDefaults(table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaults) != 1 {
+		t.Errorf("%s: table %d unicast defaults = %+v, want exactly one", when, table, defaults)
+	}
+	for _, r := range defaults {
+		if r.LinkIndex != pl.Attrs().Index || !r.Gw.Equal(hostLL.AsSlice()) || !r.Src.Equal(gw.AsSlice()) ||
+			r.Protocol != podLinkProtocol {
+			t.Errorf("%s: table %d default = %+v, want via %s dev %s src %s proto %d", when, table, r, hostLL,
+				pl.Attrs().Name, gw, podLinkProtocol)
+		}
+	}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6,
+		&netlink.Route{Table: int(table), Type: unix.RTN_UNREACHABLE}, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_TYPE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 1 || routes[0].Priority != vrf.UnreachableDefaultMetric {
+		t.Errorf("%s: table %d unreachable routes = %+v, want the VRF's unreachable default", when, table, routes)
 	}
 }

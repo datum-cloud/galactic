@@ -63,15 +63,18 @@ type ClaimInputs interface {
 // network namespace.
 type PodLink interface {
 	// Configure enslaves the link podEnd to vpc's VRF, assigns it the
-	// gateway addresses and sets it up, and routes each address in local
-	// through the link to hostLL in the VRF's table, removing any other
-	// route it made there. It returns an error wrapping errVRFMissing while
-	// the VRF does not exist.
+	// gateway addresses and sets it up. With in-pod encapsulation it routes
+	// each address in local through the link to hostLL in the VRF's table,
+	// removing any other route it made there, and returns an error wrapping
+	// errVRFMissing while the VRF does not exist. Without, it creates the
+	// VRF and routes all of the VRF's traffic through the link to hostLL,
+	// ignoring local.
 	Configure(vpc, podEnd string, gateway []netip.Addr, hostLL netip.Addr, local []netip.Addr) error
 }
 
 // errVRFMissing is returned while the VPC's VRF in the pod is not created
-// yet; the Store creates it with the VPC's first backend route.
+// yet. With in-pod encapsulation the Store creates it with the VPC's first
+// backend route.
 var errVRFMissing = errors.New("the VPC's VRF does not exist in the pod yet")
 
 // The states a VPC's claim reports in worker_claims.
@@ -84,7 +87,8 @@ const (
 
 // The reasons an unconfigured claim reports.
 const (
-	// ReasonVRFMissing: the Store has not created the VPC's pod VRF yet.
+	// ReasonVRFMissing: with in-pod encapsulation, the Store has not created
+	// the VPC's pod VRF yet.
 	ReasonVRFMissing = "VRFMissing"
 	// ReasonPodEndNotConfigured: Worker has not reported the routed link's
 	// ends yet, or configuring the pod end failed.
@@ -119,10 +123,12 @@ type claimState struct {
 // The claim's attachment is the proxy's own VPCAttachment in the VPC on this
 // node, and its destinations are the VPCAttachments of the VPC's backends.
 // Worker gives the claim a routed link from the VPC's host VRF into this pod
-// and resolves each destination to Local or Fabric. The manager routes a
-// Local backend over the link and leaves a Fabric backend to the VRF's
-// default route into the sidecar's encapsulating datapath. Replies to the
-// gateway address return over the link in both cases.
+// and resolves each destination to Local or Fabric. Without in-pod
+// encapsulation the link is the VRF's default route and carries every
+// backend's traffic into the host VRF. With it, the manager routes a Local
+// backend over the link and leaves a Fabric backend to the VRF's default
+// route into the sidecar's encapsulating datapath. Replies to the gateway
+// address return over the link in every case.
 //
 // A claim serves one pod. While another pod of the proxy still holds it,
 // Worker refuses this pod with ClaimHeldByAnotherPod, and the manager keeps
@@ -434,8 +440,8 @@ func (c *Claims) wireLocked(vpc string, s *claimState) {
 		case !errors.Is(err, errVRFMissing):
 			c.log.Error("configure the routed link's pod end", "vpc", vpc, "link", podEnd, "error", err)
 		case !s.vrfMissingLogged:
-			// The Store creates the VRF with the VPC's first route; say
-			// once that the pod end waits for it.
+			// With in-pod encapsulation the Store creates the VRF with the
+			// VPC's first route; say once that the pod end waits for it.
 			s.vrfMissingLogged = true
 			c.log.Info("the routed link's pod end waits for the VPC's VRF", "vpc", vpc, "link", podEnd)
 		}

@@ -8,14 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/egressroutemap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/localprog"
+	"go.datum.net/galactic/internal/plumbing/intf"
 )
 
 // applied is what ensure programmed, for Read.
@@ -23,6 +26,9 @@ type applied struct {
 	// errs are the per-link errors ensure met, by the Local or tenant link
 	// name; they do not fail the commit.
 	errs map[string]error
+	// egress are why a routed link, by host end name, carries no egress
+	// datapath; they do not fail the commit either.
+	egress map[string]error
 }
 
 // fix repairs the host with do when it is wrong. A dry run reports errDirty
@@ -72,7 +78,8 @@ type pass struct {
 // An error on one routed link, such as its pod having gone, is recorded in
 // the result and does not stop the rest.
 func (k *Kernel) ensure(m *model, dry bool) (applied, error) {
-	p := &pass{k: k, m: m, dry: dry, pairs: map[string]pair{}, res: applied{errs: map[string]error{}}}
+	p := &pass{k: k, m: m, dry: dry, pairs: map[string]pair{}, res: applied{errs: map[string]error{},
+		egress: map[string]error{}}}
 	var (
 		err     error
 		haveVRF bool
@@ -234,13 +241,25 @@ func (p *pass) wantsLink(name string) bool {
 	return ok && pr.nat == name
 }
 
-// removeLinks deletes the VPC's Local links the model does not want.
+// removeLinks deletes the VPC's Local links the model does not want. A
+// routed link's host end first loses its egress rows, which are keyed by an
+// ifindex a later link may reuse, and its guard.
 func (p *pass) removeLinks() error {
 	for name, l := range p.h.localLinks(p.m.vpc) {
 		if p.wantsLink(name) {
 			continue
 		}
 		if err := fix(p.dry, true, func() error {
+			if strings.HasSuffix(name, intf.LocalRoleRoutedHost) {
+				idx := l.Attrs().Index
+				if err := attachreg.DetachHostLink(p.k.PinDir, uint32(idx), name); err != nil {
+					return fmt.Errorf("local: remove the egress datapath from %s: %w", name, err)
+				}
+				if err := attach.DetachTCXGuard(name); err != nil {
+					return fmt.Errorf("local: detach the guard from %s: %w", name, err)
+				}
+				p.k.setGuardBlocker(idx, 0)
+			}
 			if err := netlink.LinkDel(l); err != nil && !errors.Is(err, unix.ENODEV) {
 				return fmt.Errorf("local: delete %s: %w", name, err)
 			}

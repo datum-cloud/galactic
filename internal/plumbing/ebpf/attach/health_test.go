@@ -399,6 +399,59 @@ func TestCheckNotPreempted(t *testing.T) {
 	})
 }
 
+// TestCheckNotPreempted_RoutedLinkGuard checks that Worker's routed-link
+// guard, which the CNI daemon cannot recognise by ID, is recognised by name
+// at the head of a routed link's tcx chain, and that a foreign program at the
+// head, or right after the guard, is still reported.
+func TestCheckNotPreempted_RoutedLinkGuard(t *testing.T) {
+	origLinkList := linkListFn
+	origFilterList := filterListFn
+	origTCXQuery := tcxQueryFn
+	origProgramName := programNameFn
+	t.Cleanup(func() {
+		linkListFn = origLinkList
+		filterListFn = origFilterList
+		tcxQueryFn = origTCXQuery
+		programNameFn = origProgramName
+	})
+
+	routed := preemptTestLink("G000000002abcR", 9)
+	linkListFn = func() ([]netlink.Link, error) { return []netlink.Link{routed}, nil }
+	filterListFn = func(netlink.Link, uint32) ([]netlink.Filter, error) {
+		return []netlink.Filter{&netlink.BpfFilter{Name: egressFilterName}}, nil
+	}
+	names := map[ebpf.ProgramID]string{301: LocalGuardProgramName, 302: testForeignProgram,
+		304: LocalGuardProgramName[:bpfObjNameLen-1]}
+	programNameFn = func(id ebpf.ProgramID) (string, error) {
+		if n, ok := names[id]; ok {
+			return n, nil
+		}
+		return "", errors.New("simulated: no such program")
+	}
+	tests := []struct {
+		name    string
+		chain   []ebpf.ProgramID
+		wantErr bool
+	}{
+		{"GuardAlone", []ebpf.ProgramID{301}, false},
+		{"GuardThenForeign", []ebpf.ProgramID{301, 302}, true},
+		{"ForeignThenGuard", []ebpf.ProgramID{302, 301}, true},
+		{"UnreadableHead", []ebpf.ProgramID{303, 301}, true},
+		{"GuardThenOwn", []ebpf.ProgramID{301, 202}, false},
+		{"TruncatedGuardName", []ebpf.ProgramID{304}, false},
+		{"TwoGuardsThenForeign", []ebpf.ProgramID{304, 301, 302}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tcxQueryFn = func(int) ([]ebpf.ProgramID, error) { return tt.chain, nil }
+			err := checkNotPreempted(map[ebpf.ProgramID]struct{}{202: {}})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkNotPreempted() error = %v, wantError = %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestCheckNotPreempted_OnlyOwnedInterfaces is the scoping this check got
 // wrong once, and the reason it is worth its own test. A shared uplink
 // carries another CNI's tcx program as a matter of course -- it is that
