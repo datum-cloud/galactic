@@ -355,6 +355,25 @@ sRv6Address/egressAddress/egressSID belongs on this status anymore.
 | `status` _[NetworkGatewayStatus](#networkgatewaystatus)_ |  |  |  |
 
 
+#### NetworkGatewayLocalBackend
+
+
+
+NetworkGatewayLocalBackend is the Local handoff state of one backend
+attachment on the gateway's node.
+
+
+
+_Appears in:_
+- [NetworkGatewayStatus](#networkgatewaystatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `attachmentUID` _string_ | AttachmentUID is the UID of the backend's VPCAttachment. |  | MinLength: 1 <br /> |
+| `ready` _boolean_ | Ready is true when Worker reports every backend slot of the attachment<br />ready for the Local handoff. |  |  |
+| `reason` _string_ | Reason is Ready when Ready is true, and otherwise the Worker reason of<br />the first destination that is not, WorkerUnavailable while the<br />gateway has no Worker session, or PublicUplinkMissing while this<br />node's public_uplink_table has no next hop for the backend's replies. |  | MaxLength: 128 <br /> |
+
+
 #### NetworkGatewaySpec
 
 
@@ -388,6 +407,7 @@ _Appears in:_
 | `observedGeneration` _integer_ | ObservedGeneration is the .metadata.generation this status was computed from. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions contains the standard conditions for this resource. |  |  |
 | `backendHealthFiltering` _boolean_ | BackendHealthFiltering reports that this node's gateway can leave a<br />backend reported Unhealthy out of a NetworkService's Maglev table.<br />Every gateway in the namespace applies health only while every<br />NetworkGateway there reports it, so all of them build the same table.<br />The gateway sets it on every status write; a gateway that cannot apply<br />health, an older one included, writes its status without it. |  |  |
+| `localBackends` _[NetworkGatewayLocalBackend](#networkgatewaylocalbackend) array_ | LocalBackends lists the backends on this gateway's own node that it<br />hands to their TAPs through Galactic Worker's Local handoff, rather<br />than encapsulating toward them, and whether each handoff is ready. The<br />gateway writes it only while its Worker integration is on. A backend<br />listed not ready is reported Unhealthy, with reason<br />LocalHandoffNotReady, by galactic-router on this node, so every<br />gateway leaves it out of its Maglev table until the handoff is ready<br />again. |  | MaxItems: 1024 <br /> |
 
 
 #### NetworkService

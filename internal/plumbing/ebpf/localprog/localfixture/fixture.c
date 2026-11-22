@@ -203,10 +203,11 @@ int ltf_gateway(struct xdp_md *ctx)
 		__u32 tap = vip->tap_ifindex;
 		__u32 magic = vip->magic;
 
-		if (bpf_xdp_adjust_meta(ctx, -(int) sizeof(struct galactic_local_meta)) == 0) {
+		// A GLM1 writer: it reserves only the GLM1 fields.
+		if (bpf_xdp_adjust_meta(ctx, -GALACTIC_LOCAL_META_V1_LEN) == 0) {
 			struct galactic_local_meta *meta = (void *) (long) ctx->data_meta;
 
-			if ((void *) (meta + 1) <= (void *) (long) ctx->data) {
+			if ((void *) meta + GALACTIC_LOCAL_META_V1_LEN <= (void *) (long) ctx->data) {
 				meta->magic = magic;
 				meta->tap_ifindex = tap;
 			}

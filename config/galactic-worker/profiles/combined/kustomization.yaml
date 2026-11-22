@@ -3,9 +3,15 @@
 # A service reaches a guest on its own node through a Local handoff, which
 # receives public traffic through the public slot galactic-gateway holds in
 # the node's shared XDP dispatcher, so a combined node runs the gateway, and
-# galactic-nat shares the uplinks in dispatch mode.
+# galactic-nat shares the uplinks in dispatch mode. galactic-gateway hands
+# the backends on its node to their TAPs through Worker (gateway-patch.yaml).
 # tests/manifests/worker-profiles/combined is the rendered example.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 components:
   - ../nat-dispatch
+patches:
+  - path: gateway-patch.yaml
+    target:
+      kind: DaemonSet
+      name: galactic-gateway

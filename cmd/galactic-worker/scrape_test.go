@@ -22,17 +22,18 @@ func TestMetricsScrape(t *testing.T) {
 }
 
 func TestOptionsValidate(t *testing.T) {
-	o := &options{nodeName: "node-a", allowlist: "a.yaml", claimLimit: 1,
+	o := &options{nodeName: "node-a", gatewayNS: "galactic-system", allowlist: "a.yaml", claimLimit: 1,
 		lease: worker.DefaultLease, renewInterval: worker.DefaultRenewInterval, hostGrace: worker.DefaultHostGrace}
 	if err := o.validate(); err != nil {
 		t.Fatalf("validate() = %v", err)
 	}
 	for name, mutate := range map[string]func(*options){
-		"no node":         func(o *options) { o.nodeName = "" },
-		"no allowlist":    func(o *options) { o.allowlist = "" },
-		"no claims":       func(o *options) { o.claimLimit = 0 },
-		"lease too short": func(o *options) { o.lease = o.renewInterval },
-		"no host grace":   func(o *options) { o.hostGrace = 0 },
+		"no node":              func(o *options) { o.nodeName = "" },
+		"no gateway namespace": func(o *options) { o.gatewayNS = "" },
+		"no allowlist":         func(o *options) { o.allowlist = "" },
+		"no claims":            func(o *options) { o.claimLimit = 0 },
+		"lease too short":      func(o *options) { o.lease = o.renewInterval },
+		"no host grace":        func(o *options) { o.hostGrace = 0 },
 	} {
 		bad := *o
 		mutate(&bad)

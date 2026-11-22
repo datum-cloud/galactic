@@ -65,6 +65,26 @@ type Destination struct {
 	HostInterface string
 	// Shard is set for a shard destination.
 	Shard *ShardTarget
+	// Backend is set for a backend destination, whose other fields are
+	// those of the backend's VPCAttachment: a module delivers to it as it
+	// delivers to that attachment.
+	Backend *BackendTarget
+}
+
+// BackendTarget is what a backend destination resolved to. Worker computes
+// no SID for it: the gateway encodes the slot in the SID it sends, and
+// local_rx checks that SID against this node's locator (locator_table) and
+// the TAP's VRF (vrf_table) where it is received.
+type BackendTarget struct {
+	// Slot is the slot the gateway encodes in the backend SID.
+	Slot uint16
+	// Address and Port are the backend's own address and port, from its
+	// ServiceVIPBindings, which hash to Slot.
+	Address netip.Addr
+	Port    uint16
+	// Bindings are the names of the Bound ServiceVIPBindings that resolved
+	// the destination, sorted.
+	Bindings []string
 }
 
 // ShardTarget is what a shard destination resolved to.

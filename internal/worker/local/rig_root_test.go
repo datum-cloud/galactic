@@ -107,10 +107,13 @@ type rig struct {
 	mode   xdpmode.Mode
 	cell   string
 
-	// rx is the device local_rx runs on, rxLower the devices the dispatcher
-	// runs on, out the device the NAT stand-in sends from.
+	// rx is the receiving device the node addresses, rxLower the devices
+	// the dispatcher runs on, hooks the devices local_rx runs on, out the
+	// device the NAT stand-in sends from. On a bond, local_rx runs on the
+	// members, ahead of whatever runs on the master.
 	rx       string
 	rxLower  []string
+	hooks    []string
 	out      string
 	outVID   uint32
 	clientIf string
@@ -256,6 +259,10 @@ func (r *rig) buildReceiver() {
 		r.out = bondName
 	default:
 		r.out = rxLower0
+	}
+	r.hooks = []string{r.rx}
+	if r.cell == cellBond {
+		r.hooks = r.rxLower
 	}
 	build := func(side ns.NetNS, lowers []string, top string) {
 		r.in(side, func() error {

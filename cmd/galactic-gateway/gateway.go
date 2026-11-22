@@ -268,13 +268,15 @@ func installGateway(
 	for _, target := range append(slices.Clone(targets), returnTargets...) {
 		coverage.configured[target] = true
 	}
-	var missing []string
+	var missing, publicMissing []string
 	if publicSet != nil {
 		missing = publicSet.reconcile(ctx, targets)
+		publicMissing = slices.Clone(missing)
 	}
 	if returnSet != nil {
 		missing = append(missing, returnSet.reconcile(ctx, returnTargets)...)
 	}
+	coverage.setPublic(publicMissing)
 	coverage.set(missing)
 	go watchTargets(ctx, publicInterface, internalInterfaces, publicSet, returnSet, coverage, ipv4)
 
@@ -487,6 +489,9 @@ type datapathCoverage struct {
 
 	mu      sync.Mutex
 	missing []string
+	// publicMissing is the public targets among missing: those running
+	// without the load balancer, which withdraw the VIP families (D44).
+	publicMissing []string
 	// configured is the targets whose forwarding sysctls have been applied.
 	// Only watchTargets touches it once setup returns.
 	configured map[string]bool
@@ -501,6 +506,22 @@ func (c *datapathCoverage) Missing() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return slices.Clone(c.missing)
+}
+
+// PublicMissing reports the public targets the load balancer is not
+// attached to.
+func (c *datapathCoverage) PublicMissing() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.publicMissing)
+}
+
+// setPublic records the public targets among the missing ones. set, which
+// follows it, calls onChange.
+func (c *datapathCoverage) setPublic(missing []string) {
+	c.mu.Lock()
+	c.publicMissing = slices.Clone(missing)
+	c.mu.Unlock()
 }
 
 func (c *datapathCoverage) set(missing []string) {
@@ -582,6 +603,7 @@ func watchTargets(ctx context.Context, publicInterface string, internalInterface
 		if publicSet != nil {
 			ready := coverage.configure(targets)
 			missing = append(publicSet.reconcile(ctx, ready), uncovered(targets, ready)...)
+			coverage.setPublic(dedupe(missing))
 		}
 		if returnSet != nil {
 			ready := coverage.configure(returnTargets)

@@ -1,0 +1,186 @@
+# verify:gateway-local's VIP rules, all in VPC 80 and in dfw's VIP ranges
+# (2001:db8:6060:1::/64 and 198.51.100.0/26, which dfw's edge nodes
+# originate). One rule per backend and protocol, so the backend that answers
+# a VIP is known before the request is sent:
+#
+#   w1  ns80's vpc-a on dfw-worker      2001:db8:6060:1::11  198.51.100.11
+#   w2  gwlocal-w2 TAP on dfw-worker2   2001:db8:6060:1::12  198.51.100.12
+#   w3  gwlocal-w3 TAP on dfw-worker3   2001:db8:6060:1::13  198.51.100.13
+#   w4  ns80's vpc-a2 on dfw-worker4    2001:db8:6060:1::14  198.51.100.14
+#
+# and a pool of all four on 2001:db8:6060:1::10 and 198.51.100.10, which
+# keeps answering while one backend is out. A backend address and port
+# serves one rule per protocol and VIP family, so the pool uses backend port
+# 81, where the same responders listen. No rule has a healthCheck: the only
+# health a gateway applies is galactic-router's LocalHandoffNotReady, which
+# needs none.
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-w1-tcp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::11
+    - 198.51.100.11
+  protocol: tcp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local: w1
+  backendPort: 80
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-w1-udp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::11
+    - 198.51.100.11
+  protocol: udp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local: w1
+  backendPort: 80
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-w2-tcp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::12
+    - 198.51.100.12
+  protocol: tcp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local: w2
+  backendPort: 80
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-w2-udp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::12
+    - 198.51.100.12
+  protocol: udp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local: w2
+  backendPort: 80
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-w3-tcp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::13
+    - 198.51.100.13
+  protocol: tcp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local: w3
+  backendPort: 80
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-w3-udp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::13
+    - 198.51.100.13
+  protocol: udp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local: w3
+  backendPort: 80
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-w4-tcp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::14
+    - 198.51.100.14
+  protocol: tcp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local: w4
+  backendPort: 80
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-w4-udp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::14
+    - 198.51.100.14
+  protocol: udp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local: w4
+  backendPort: 80
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-pool-tcp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::10
+    - 198.51.100.10
+  protocol: tcp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local-pool: "true"
+  backendPort: 81
+---
+apiVersion: galactic.datumapis.com/v1alpha1
+kind: NetworkService
+metadata:
+  name: gwlocal-pool-udp
+  namespace: galactic-system
+spec:
+  vpcRef: "80"
+  vipAddresses:
+    - 2001:db8:6060:1::10
+    - 198.51.100.10
+  protocol: udp
+  port: 80
+  backendSelector:
+    matchLabels:
+      lab.galactic.datumapis.com/gateway-local-pool: "true"
+  backendPort: 81

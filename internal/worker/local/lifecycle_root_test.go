@@ -159,7 +159,7 @@ func TestHookWithdrawalAndRepairRoot(t *testing.T) {
 	wantReady(t, r.reconcile(a.vpc, claims), claims)
 
 	// local_rx on the receiving device: local.tap loses its forward path.
-	r.in(r.node, func() error { return attach.DetachLocal(r.rx) })
+	r.in(r.node, func() error { return attach.DetachLocal(r.hooks[0]) })
 	wantState(t, r.read(a.vpc), tapClaim, true, false, true, workerv1alpha1.ReasonHandoffHookMissing)
 	wantReady(t, r.reconcile(a.vpc, claims), claims)
 

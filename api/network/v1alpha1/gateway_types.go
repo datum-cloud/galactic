@@ -68,7 +68,50 @@ type NetworkGatewayStatus struct {
 	// health, an older one included, writes its status without it.
 	// +optional
 	BackendHealthFiltering bool `json:"backendHealthFiltering,omitempty"`
+
+	// LocalBackends lists the backends on this gateway's own node that it
+	// hands to their TAPs through Galactic Worker's Local handoff, rather
+	// than encapsulating toward them, and whether each handoff is ready. The
+	// gateway writes it only while its Worker integration is on. A backend
+	// listed not ready is reported Unhealthy, with reason
+	// LocalHandoffNotReady, by galactic-router on this node, so every
+	// gateway leaves it out of its Maglev table until the handoff is ready
+	// again.
+	// +optional
+	// +listType=map
+	// +listMapKey=attachmentUID
+	// +kubebuilder:validation:MaxItems=1024
+	LocalBackends []NetworkGatewayLocalBackend `json:"localBackends,omitempty"`
 }
+
+// NetworkGatewayLocalBackend is the Local handoff state of one backend
+// attachment on the gateway's node.
+type NetworkGatewayLocalBackend struct {
+	// AttachmentUID is the UID of the backend's VPCAttachment.
+	// +kubebuilder:validation:MinLength=1
+	AttachmentUID string `json:"attachmentUID"`
+
+	// Ready is true when Worker reports every backend slot of the attachment
+	// ready for the Local handoff.
+	Ready bool `json:"ready"`
+
+	// Reason is Ready when Ready is true, and otherwise the Worker reason of
+	// the first destination that is not, WorkerUnavailable while the
+	// gateway has no Worker session, or PublicUplinkMissing while this
+	// node's public_uplink_table has no next hop for the backend's replies.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	Reason string `json:"reason,omitempty"`
+}
+
+// NetworkGatewayLocalBackend reasons the gateway sets besides Worker's own.
+const (
+	// LocalBackendReasonReady is a backend whose Local handoff is ready.
+	LocalBackendReasonReady = "Ready"
+	// LocalBackendReasonWorkerUnavailable is a backend whose gateway has no
+	// Galactic Worker session.
+	LocalBackendReasonWorkerUnavailable = "WorkerUnavailable"
+)
 
 // NetworkGatewayList is a list of NetworkGateway resources.
 // +kubebuilder:object:root=true

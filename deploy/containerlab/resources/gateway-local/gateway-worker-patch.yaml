@@ -1,0 +1,41 @@
+# Lab-only: point a dfw gateway at galactic-worker, so it hands the backends
+# on its own node to their TAPs, with backend health on. verify-gateway-local.sh applies it with
+# kubectl patch to galactic-gateway-dfw-worker2 and -dfw-worker3, and
+# replaces each DaemonSet with the copy it saved on exit. The lab's gateways
+# already use the XDP dispatcher this needs (GALACTIC_GATEWAY_XDP_ATTACH's
+# default, dispatch).
+spec:
+  template:
+    spec:
+      containers:
+        - name: galactic-gateway
+          env:
+            - name: GALACTIC_GATEWAY_WORKER_SOCKET
+              value: /run/galactic-worker/worker.sock
+            - name: GALACTIC_GATEWAY_WORKER_TOKEN_FILE
+              value: /var/run/secrets/galactic-worker/token
+            # Required with the Worker socket (D48): backend health takes a
+            # backend whose Local handoff is not ready out of every
+            # gateway's Maglev table. The lab base sets it too; it is set
+            # here so this overlay stands alone. dfw-worker2 and
+            # dfw-worker3 are the only gateways in dfw's namespace.
+            - name: GALACTIC_GATEWAY_BACKEND_HEALTH
+              value: "true"
+          volumeMounts:
+            - name: galactic-worker-socket
+              mountPath: /run/galactic-worker
+            - name: galactic-worker-token
+              mountPath: /var/run/secrets/galactic-worker
+              readOnly: true
+      volumes:
+        - name: galactic-worker-socket
+          hostPath:
+            path: /run/galactic-worker
+            type: DirectoryOrCreate
+        - name: galactic-worker-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: galactic-worker
+                  expirationSeconds: 3600
+                  path: token
