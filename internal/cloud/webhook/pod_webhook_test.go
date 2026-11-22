@@ -28,6 +28,14 @@ import (
 	networkingv1alpha "go.datum.net/network-services-operator/api/v1alpha"
 )
 
+const (
+	testPrimaryInterface   = "eth0"
+	testSecondaryInterface = "eth1"
+	testNetworkA           = "ns/a"
+	testNetworkB           = "ns/b"
+	testOtherNetwork       = "ns/other"
+)
+
 func TestInstanceOwner(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -35,13 +43,13 @@ func TestInstanceOwner(t *testing.T) {
 		want  string
 	}{
 		{"controlling instance", metav1.OwnerReference{
-			APIVersion: "compute.datumapis.com/v1alpha", Kind: "Instance",
-			Name: "web-0", Controller: ptr.To(true)}, "web-0"},
+			APIVersion: "compute.datumapis.com/v1alpha", Kind: instanceKind,
+			Name: chainInstance, Controller: ptr.To(true)}, chainInstance},
 		{"not controlling", metav1.OwnerReference{
-			APIVersion: "compute.datumapis.com/v1alpha", Kind: "Instance", Name: "web-0"}, ""},
+			APIVersion: "compute.datumapis.com/v1alpha", Kind: instanceKind, Name: chainInstance}, ""},
 		{"another group's instance", metav1.OwnerReference{
-			APIVersion: "example.com/v1", Kind: "Instance",
-			Name: "web-0", Controller: ptr.To(true)}, ""},
+			APIVersion: "example.com/v1", Kind: instanceKind,
+			Name: chainInstance, Controller: ptr.To(true)}, ""},
 		{"a replicaset", metav1.OwnerReference{
 			APIVersion: "apps/v1", Kind: "ReplicaSet",
 			Name: "web", Controller: ptr.To(true)}, ""},
@@ -61,15 +69,15 @@ func TestInterfaceRefFor(t *testing.T) {
 	instance := &computev1alpha.Instance{
 		Status: computev1alpha.InstanceStatus{
 			NetworkInterfaces: []computev1alpha.InstanceNetworkInterfaceStatus{
-				{Name: "eth0", NetworkInterfaceRef: &networkingv1alpha.LocalNetworkInterfaceRef{Name: "web-0-eth0"}},
-				{Name: "eth1"},
+				{Name: testPrimaryInterface, NetworkInterfaceRef: &networkingv1alpha.LocalNetworkInterfaceRef{Name: "web-0-eth0"}},
+				{Name: testSecondaryInterface},
 			},
 		},
 	}
-	if got := interfaceRefFor(instance, "eth0"); got != "web-0-eth0" {
+	if got := interfaceRefFor(instance, testPrimaryInterface); got != "web-0-eth0" {
 		t.Errorf("bound interface: got %q, want %q", got, "web-0-eth0")
 	}
-	if got := interfaceRefFor(instance, "eth1"); got != "" {
+	if got := interfaceRefFor(instance, testSecondaryInterface); got != "" {
 		t.Errorf("unbound interface: got %q, want empty", got)
 	}
 	if got := interfaceRefFor(instance, "eth9"); got != "" {
@@ -84,13 +92,13 @@ func TestMergeNetworks(t *testing.T) {
 		networks []string
 		want     string
 	}{
-		{"empty", "", []string{"ns/a"}, "ns/a"},
+		{"empty", "", []string{testNetworkA}, testNetworkA},
 		{"nothing to add", "", nil, ""},
-		{"appends in order", "", []string{"ns/a", "ns/b"}, "ns/a,ns/b"},
-		{"preserves what the pod asked for", "ns/other", []string{"ns/a"}, "ns/other,ns/a"},
-		{"does not duplicate", "ns/a", []string{"ns/a"}, "ns/a"},
-		{"tolerates whitespace", " ns/other , ", []string{"ns/a"}, "ns/other,ns/a"},
-		{"drops the default network", "ns/default,ns/other", []string{"ns/a"}, "ns/other,ns/a"},
+		{"appends in order", "", []string{testNetworkA, testNetworkB}, "ns/a,ns/b"},
+		{"preserves what the pod asked for", testOtherNetwork, []string{testNetworkA}, "ns/other,ns/a"},
+		{"does not duplicate", testNetworkA, []string{testNetworkA}, testNetworkA},
+		{"tolerates whitespace", " ns/other , ", []string{testNetworkA}, "ns/other,ns/a"},
+		{"drops the default network", "ns/default,ns/other", []string{testNetworkA}, "ns/other,ns/a"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -111,13 +119,13 @@ func TestInjectNetworks(t *testing.T) {
 		wantListSet bool
 	}{
 		{"single interface is only the default", map[string]string{},
-			[]string{"ns/a"}, "ns/a", "", false},
+			[]string{testNetworkA}, testNetworkA, "", false},
 		{"additional interfaces exclude the default", map[string]string{},
-			[]string{"ns/a", "ns/b", "ns/c"}, "ns/a", "ns/b,ns/c", true},
-		{"preserves what the pod asked for", map[string]string{MultusNetworksAnnotation: "ns/other"},
-			[]string{"ns/a"}, "ns/a", "ns/other", true},
-		{"drops a default the pod already listed", map[string]string{MultusNetworksAnnotation: "ns/a"},
-			[]string{"ns/a", "ns/b"}, "ns/a", "ns/b", true},
+			[]string{testNetworkA, testNetworkB, "ns/c"}, testNetworkA, "ns/b,ns/c", true},
+		{"preserves what the pod asked for", map[string]string{MultusNetworksAnnotation: testOtherNetwork},
+			[]string{testNetworkA}, testNetworkA, testOtherNetwork, true},
+		{"drops a default the pod already listed", map[string]string{MultusNetworksAnnotation: testNetworkA},
+			[]string{testNetworkA, testNetworkB}, testNetworkA, testNetworkB, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -50,7 +50,8 @@ delete_stale_shards() {
     done
 }
 
-for site in dfw sjc iad; do
+deploy_site() {
+  local site=$1
   node=$(control_plane "${site}")
   echo "Applying galactic-nat/${site} to ${node}..."
   delete_stale_shards "${node}"
@@ -62,6 +63,7 @@ for site in dfw sjc iad; do
   # identity is programmed. Programmed is what a tenant's egress route needs.
   docker exec "${node}" kubectl -n galactic-system wait egressshard --all \
     --for=condition=Programmed --timeout=120s
-done
+}
+parallel_sites deploy_site dfw sjc iad
 
 echo "Done."

@@ -44,7 +44,8 @@ spec:
     - name: probe
       action: Deny'
 
-for site in dfw sjc iad; do
+deploy_site() {
+  local site=$1
   node=$(control_plane "${site}")
   echo "Installing traffic policy CRDs and galactic-controller on ${site}..."
   docker exec "${node}" rm -rf /galactic/traffic-policy
@@ -86,6 +87,7 @@ for site in dfw sjc iad; do
     fi
     sleep 2
   done
-done
+}
+parallel_sites deploy_site dfw sjc iad
 
 echo "Done."

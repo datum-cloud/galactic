@@ -211,7 +211,8 @@ func FromBlock(cidr string) (int64, error) {
 	identity := int64(binary.BigEndian.Uint32(octets[RootBits/8 : BlockBits/8]))
 	if identity == 0 {
 		return 0, &UnusableError{message: fmt.Sprintf(
-			"the identity space answered with %q, whose index is zero; zero is what a network holding no identity reads as, so the pool must not hand out its first block", cidr)}
+			"the identity space answered with %q, whose index is zero; "+
+				"zero is what a network holding no identity reads as, so the pool must not hand out its first block", cidr)}
 	}
 	return identity, nil
 }

@@ -1,0 +1,21 @@
+name: Lab lifecycle
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  lifecycle:
+    name: Lab lifecycle tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install test dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/lifecycle-venv"
+          "$RUNNER_TEMP/lifecycle-venv/bin/python" -m pip install -r deploy/containerlab/scripts/tests/requirements.txt
+      - name: Test lifecycle safety and failure propagation
+        run: |
+          "$RUNNER_TEMP/lifecycle-venv/bin/python" -B -m unittest discover -s deploy/containerlab/scripts/tests -v

@@ -20,12 +20,14 @@ source "${SCRIPT_DIR}/lib.sh"
 # already-provisioned copy, and copy_fabric_config (lib.sh) nests
 # config/fabric-router/ under it as base/fabric, inside the overlay's own
 # root, since kustomize requires resources in or below that root.
-for site in dfw iad sjc; do
+deploy_site() {
+  local site=$1
   node=$(control_plane "${site}")
   copy_to "${node}" fabric-router
   copy_fabric_config "${node}"
   apply_k "${node}" "/galactic/resources/fabric-router/${site}/"
-done
+}
+parallel_sites deploy_site dfw iad sjc
 
 # iad-control-plane also carries the galactic-router route-reflector
 # resources, applied by deploy-galactic-router.sh -- copied here so both

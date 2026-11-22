@@ -73,11 +73,11 @@ func newAttachmentChain() *attachmentChain {
 	c.instance = &computev1alpha.Instance{
 		ObjectMeta: meta(chainInstance, "instance-uid"),
 		Spec: computev1alpha.InstanceSpec{
-			NetworkInterfaces: []computev1alpha.InstanceNetworkInterface{{Name: "eth0"}},
+			NetworkInterfaces: []computev1alpha.InstanceNetworkInterface{{Name: testPrimaryInterface}},
 		},
 		Status: computev1alpha.InstanceStatus{
 			NetworkInterfaces: []computev1alpha.InstanceNetworkInterfaceStatus{{
-				Name:                "eth0",
+				Name:                testPrimaryInterface,
 				NetworkInterfaceRef: &networkingv1alpha.LocalNetworkInterfaceRef{Name: chainInterface},
 			}},
 		},
@@ -368,10 +368,10 @@ func TestResolveNetworksStopsAtFirstStaleInterface(t *testing.T) {
 
 	instance := first.instance
 	instance.Spec.NetworkInterfaces = append(instance.Spec.NetworkInterfaces,
-		computev1alpha.InstanceNetworkInterface{Name: "eth1"})
+		computev1alpha.InstanceNetworkInterface{Name: testSecondaryInterface})
 	instance.Status.NetworkInterfaces = append(instance.Status.NetworkInterfaces,
 		computev1alpha.InstanceNetworkInterfaceStatus{
-			Name:                "eth1",
+			Name:                testSecondaryInterface,
 			NetworkInterfaceRef: &networkingv1alpha.LocalNetworkInterfaceRef{Name: "web-0-eth1"},
 		})
 

@@ -34,7 +34,8 @@ shift
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-for site in "$@"; do
+deploy_site() {
+  local site=$1
   cp=$(control_plane "${site}")
   for nad in $(docker exec "${cp}" kubectl get network-attachment-definitions -n "${NS}" \
     -o jsonpath='{.items[*].metadata.name}'); do
@@ -90,4 +91,5 @@ EOF
       -p "{\"status\":{\"vpc\":\"${vpc}\",\"vpcAttachment\":\"${attachment}\",\"node\":\"${node}\",\"podName\":\"${pod}\",\"hostInterface\":\"${host}\"}}" >/dev/null
     echo "${site}: ${NS}/${nad} -> ${node} (${pod}, ${host})"
   done
-done
+}
+parallel_sites deploy_site "$@"

@@ -18,7 +18,8 @@ shift
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
-for site in "$@"; do
+deploy_site() {
+  local site=$1
   node=$(control_plane "${site}")
   echo "Copying ${NS} to ${node}..."
   # tenants/base/ (the shared Namespace + netshoot Deployment every tenant's
@@ -29,6 +30,7 @@ for site in "$@"; do
   copy_to "${node}" "tenants/${NS}"
   echo "Applying ${NS}/${site} to ${node}..."
   apply_k "${node}" "/galactic/resources/tenants/${NS}/${site}/"
-done
+}
+parallel_sites deploy_site "$@"
 
 echo "Done."
