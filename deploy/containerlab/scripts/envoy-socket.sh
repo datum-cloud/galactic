@@ -87,6 +87,12 @@ VRF_IMAGE=galactic-vrf:lab
 # This checkout's galactic-controller, which certifies a proxy attachment's
 # node from its pod (#1439); the lab's runs for the case only.
 CTRL_IMAGE=galactic-controller:lab-1439
+# CTRL_SAVE holds the deployed controller image, exported from the node that
+# runs it before the case swaps it, and CTRL_SAVE.ref its image reference.
+# The restore loads it back onto every node rather than trusting the nodes'
+# image cache, which the kubelet may have pruned while the image was unused.
+CTRL_SAVE_DIR=${REPO}/bin/envoy-socket
+CTRL_SAVE=${CTRL_SAVE_DIR}/controller-deployed.tar
 CTRL_DEPLOY=galactic-controller
 WORKER_BIN=/opt/galactic-worker/galactic-worker
 ADV=bgpadvertisements.galactic.datumapis.com
@@ -289,17 +295,55 @@ cleanup() {
   finish
 }
 
+# save_controller exports the image dfw's galactic-controller runs, from a
+# node running it, to CTRL_SAVE, and its reference to CTRL_SAVE.ref.
+save_controller() {
+  local sel node ref
+  sel=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o json </dev/null |
+    jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
+  node=$(kd -n galactic-system get pods -l "${sel}" -o json </dev/null |
+    jq -r '[.items[] | select(.status.phase == "Running")][0].spec.nodeName // empty')
+  [ -n "${node}" ] || return 1
+  ref=$(docker exec "${node}" crictl inspecti -o json "${CTRL_ORIG}" 2>/dev/null | jq -r '.status.repoTags[0] // empty')
+  [ -n "${ref}" ] || return 1
+  mkdir -p "${CTRL_SAVE_DIR}"
+  docker exec "${node}" ctr --namespace k8s.io images export - "${ref}" >"${CTRL_SAVE}.tmp" || return 1
+  tar -tf "${CTRL_SAVE}.tmp" 2>/dev/null | grep -qx 'index.json' || return 1
+  mv "${CTRL_SAVE}.tmp" "${CTRL_SAVE}"
+  printf '%s\n' "${CTRL_ORIG}" >"${CTRL_SAVE}.ref"
+  volatile controller-saved "${ref} from ${node}"
+}
+
 # restore_controller puts dfw's galactic-controller back on the image it ran
-# before the case and removes the case's image from the nodes.
+# before the case: it loads the saved image onto every node, sets it back,
+# and waits for the controller to be Ready. It removes only the case's image
+# reference from the nodes. A restore that does not finish fails the run.
 restore_controller() {
-  local n
+  local n loaded=yes ready=no
   [ "${CTRL_SWAPPED}" = 1 ] || return 0
+  if [ -s "${CTRL_SAVE}" ]; then
+    for n in $(kd get nodes -o jsonpath='{.items[*].metadata.name}' </dev/null); do
+      docker exec -i "${n}" ctr --namespace k8s.io images import - <"${CTRL_SAVE}" >/dev/null 2>&1 || loaded=no
+    done
+  else
+    loaded=no
+  fi
+  record restore "the deployed galactic-controller image is loaded on every node" yes "${loaded}"
   kd -n galactic-system set image "deployment/${CTRL_DEPLOY}" "${CTRL_CONTAINER}=${CTRL_ORIG}" >/dev/null
-  record restore "galactic-controller is back on ${CTRL_ORIG}" yes \
-    "$(kd -n galactic-system rollout status "deployment/${CTRL_DEPLOY}" --timeout=180s \
-      >>"${OUT}/logs/controller-rollout.log" 2>&1 && echo yes || echo no)"
+  if kd -n galactic-system rollout status "deployment/${CTRL_DEPLOY}" --timeout=180s \
+    >>"${OUT}/logs/controller-rollout.log" 2>&1 &&
+    kd -n galactic-system wait --for=condition=Available "deployment/${CTRL_DEPLOY}" --timeout=60s \
+      >>"${OUT}/logs/controller-rollout.log" 2>&1; then
+    ready=yes
+  fi
+  record restore "galactic-controller is back on ${CTRL_ORIG} and Ready" yes "${ready}"
+  if [ "${loaded}" != yes ] || [ "${ready}" != yes ]; then
+    kd -n galactic-system get pods -o wide >>"${OUT}/logs/controller-rollout.log" 2>&1 || true
+    echo "!!! RESTORE FAILED: galactic-controller is not Ready on ${CTRL_ORIG} (image loaded: ${loaded});" \
+      "see ${OUT}/logs/controller-rollout.log" >&2
+  fi
   for n in $(kd get nodes -o jsonpath='{.items[*].metadata.name}' </dev/null); do
-    docker exec "${n}" crictl rmi "${CTRL_IMAGE}" >/dev/null 2>&1 || true
+    docker exec "${n}" ctr --namespace k8s.io images rm "docker.io/library/${CTRL_IMAGE}" >/dev/null 2>&1 || true
   done
 }
 
@@ -433,7 +477,7 @@ if [ "${MODE}" = down ]; then
   if [ "$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" \
     -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null)" = "${CTRL_IMAGE}" ]; then
     CTRL_CONTAINER=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].name}')
-    CTRL_ORIG=galactic-controller:latest
+    CTRL_ORIG=$(cat "${CTRL_SAVE}.ref" 2>/dev/null || echo galactic-controller:latest)
     CTRL_SWAPPED=1
   fi
   if [ -n "$(docker exec "${NODE}" pgrep -f "^${WORKER_BIN}" || true)" ]; then
@@ -467,6 +511,13 @@ for n in $(kd get nodes -o jsonpath='{.items[*].metadata.name}' </dev/null); do
 done
 CTRL_CONTAINER=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].name}')
 CTRL_ORIG=$(kd -n galactic-system get deployment "${CTRL_DEPLOY}" -o jsonpath='{.spec.template.spec.containers[0].image}')
+# The deployed image is saved before anything changes it; without a copy the
+# case does not swap the controller at all.
+if ! save_controller; then
+  record setup "the deployed galactic-controller image is saved" yes no
+  exit 1
+fi
+record setup "the deployed galactic-controller image is saved" yes yes
 volatile controller-image "${CTRL_ORIG} replaced by ${CTRL_IMAGE} for the case"
 CTRL_SWAPPED=1
 kd -n galactic-system set image "deployment/${CTRL_DEPLOY}" "${CTRL_CONTAINER}=${CTRL_IMAGE}" >/dev/null
@@ -890,7 +941,10 @@ where() {
       record "${w}" "${p}: requests leave the host end" yes "$(seen "$(g "host${v}" "${p}" req)")"
       record "${w}" "${p}: requests leave the node in SRv6" yes "$(seen "$(g physical "${p}" req_srv6)")"
       record "${w}" "${p}: replies reach the node in SRv6" yes "$(seen "$(g physical "${p}" rep_srv6)")"
-      record "${w}" "${p}: replies enter the host end" yes "$(seen "$(g "host${v}" "${p}" rep)")"
+      # Observed, not required: the decapsulating datapath may hand a remote
+      # reply straight to the pod end, past the host end's capture, and the
+      # row after this one is what proves the reply crossed the link.
+      record "${w}" "${p}: replies seen on the host end" - "$(seen "$(g "host${v}" "${p}" rep)")"
       record "${w}" "${p}: replies cross VPC ${v}'s routed link" yes "$(seen "$(g "pod${v}" "${p}" rep)")"
       record "${w}" "${p}: nothing out of the pod's eth0" 0 "$(($(g podeth0 "${p}" req) + $(g podeth0 "${p}" rep)))"
       record "${w}" "${p}: nothing through an in-pod encapsulation pair" 0 \
@@ -1002,8 +1056,8 @@ remote_route() {
 
 # Spoof ------------------------------------------------------------------------
 
-# spoof_count W POINT prints how many packets POINT captured in window W from
-# SPOOF, as {"n": N, "srv6": N}.
+# spoof_count W POINT SRC prints how many packets POINT captured in window W
+# from SRC, as {"n": N, "srv6": N}.
 spoof_count() {
   local files=()
   shopt -s nullglob
@@ -1013,39 +1067,52 @@ spoof_count() {
     echo '{"n": 0, "srv6": 0}'
     return
   fi
-  python3 -I "${SCRIPT_DIR}/envoy-pcap.py" --source "${SPOOF}" "${files[@]}"
+  python3 -I "${SCRIPT_DIR}/envoy-pcap.py" --source "$3" "${files[@]}"
 }
 
-# spoof sends pings over VPC 80's routed link from SPOOF, a source the proxy's
-# attachment does not hold, toward VPC 80's remote backend. The host end
-# receives them, and its guard must drop them before the host egress datapath
-# encapsulates them, so nothing from SPOOF may leave the node. It gives the
-# pod end SPOOF and a route from it in the pod VRF, and removes both again;
-# the pod goes at cleanup in any case.
+# spoof_send SRC COUNT sends COUNT ICMPv6 echo requests from SRC to VPC 80's
+# remote backend out of VPC 80's pod end, framed straight to the host end's
+# MAC with scapy in the rig. Nothing is assigned to the pod end, so the
+# sidecar, which removes any non-gateway address it finds there, cannot
+# change the source.
+spoof_send() {
+  local mac
+  mac=$(docker exec "${NODE}" cat "/sys/class/net/${HOST_END[80]}/address")
+  in_pod "${PPID_POD}" python3 -c '
+import sys
+from scapy.all import Ether, IPv6, ICMPv6EchoRequest, sendp
+dev, mac, src, dst, n = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+sendp(Ether(dst=mac) / IPv6(src=src, dst=dst, hlim=64) / ICMPv6EchoRequest(id=0x1487, data=b"galactic-spoof"),
+      iface=dev, count=n, inter=0.2, verbose=False)
+' "${POD_END[80]}" "${mac}" "$1" "${BADDR[80/remote]}" "$2"
+}
+
+# spoof sends echo requests over VPC 80's routed link from SPOOF, a source
+# the proxy's attachment does not hold, toward VPC 80's remote backend. The
+# pod end must show them sent and the host end received, and nothing from
+# SPOOF may leave the node: the guard drops them before the host egress
+# datapath can encapsulate them. The same requests from the gateway, sent
+# the same way, are the control: they must leave the node in SRv6, which
+# shows the physical captures would have seen the spoofed ones.
 spoof() {
-  local w=spoof v=80 table ll pt j
+  local w=spoof pt
   window "${w}"
-  table=$(in_pod "${PPID_POD}" ip -j -d link show "${VRF[${v}]}" | jq -r '.[0].linkinfo.info_data.table')
-  ll=$(docker exec "${NODE}" ip -6 -j addr show dev "${HOST_END[${v}]}" scope link |
-    jq -r '.[0].addr_info[0].local // empty')
-  in_pod "${PPID_POD}" ip -6 addr add "${SPOOF}/128" dev "${POD_END[${v}]}" nodad
-  in_pod "${PPID_POD}" ip -6 route add "${BADDR[${v}/remote]}/128" via "${ll}" dev "${POD_END[${v}]}" \
-    table "${table}" src "${SPOOF}"
   capture "${w}"
-  in_pod "${PPID_POD}" ping -6 -c 5 -i 0.2 -W 1 -I "${VRF[${v}]}" "${BADDR[${v}/remote]}" \
-    >"${OUT}/logs/${w}/ping.txt" 2>&1 || true
+  spoof_send "${SPOOF}" 5 >"${OUT}/logs/${w}/send-spoof.txt" 2>&1 || true
+  spoof_send "${GW}" 5 >"${OUT}/logs/${w}/send-gateway.txt" 2>&1 || true
   cap_stop
-  in_pod "${PPID_POD}" ip -6 route del "${BADDR[${v}/remote]}/128" table "${table}" || true
-  in_pod "${PPID_POD}" ip -6 addr del "${SPOOF}/128" dev "${POD_END[${v}]}" || true
-  declare -A S
-  for pt in "pod${v}" "host${v}" physical; do
-    S[${pt}]=$(spoof_count "${w}" "${pt}")
-    printf '%s\t%s\n' "${pt}" "${S[${pt}]}" >>"${OUT}/logs/${w}/counts.tsv"
+  declare -A S G
+  for pt in pod80 host80 physical; do
+    S[${pt}]=$(spoof_count "${w}" "${pt}" "${SPOOF}")
+    G[${pt}]=$(spoof_count "${w}" "${pt}" "${GW}")
+    printf '%s\tspoof=%s gateway=%s\n' "${pt}" "${S[${pt}]}" "${G[${pt}]}" >>"${OUT}/logs/${w}/counts.tsv"
   done
-  j() { jq -r ".${2}" <<<"${S[$1]}"; }
-  record "${w}" "VPC ${v}: the pod end sent from a source its attachment does not hold" yes "$(seen "$(j "pod${v}" n)")"
-  record "${w}" "VPC ${v}: the host end received them" yes "$(seen "$(j "host${v}" n)")"
-  record "${w}" "VPC ${v}: nothing from that source leaves the node" 0 "$(j physical n)"
+  record "${w}" "VPC 80: the pod end sent 5 requests from a source its attachment does not hold" 5 \
+    "$(jq -r .n <<<"${S[pod80]}")"
+  record "${w}" "VPC 80: the host end received them" 5 "$(jq -r .n <<<"${S[host80]}")"
+  record "${w}" "VPC 80: nothing from that source leaves the node" 0 "$(jq -r .n <<<"${S[physical]}")"
+  record "${w}" "VPC 80: the same requests from the gateway leave the node in SRv6" yes \
+    "$(seen "$(jq -r .srv6 <<<"${G[physical]}")")"
 }
 
 # Sockets ----------------------------------------------------------------------
