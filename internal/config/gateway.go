@@ -50,6 +50,18 @@ const (
 	// packet from a VIP address and have it forwarded unexamined.
 	EnvGatewayInternalInterfaces = "GALACTIC_GATEWAY_INTERNAL_INTERFACES"
 
+	// EnvGatewayWorkerSocket is galactic-worker's socket. Set, the gateway
+	// hands each backend on its own node to the backend's TAP through
+	// Worker's Local handoff (docs/worker/contract.md) instead of
+	// encapsulating toward it, and needs the shared XDP dispatcher. Unset,
+	// it encapsulates toward every backend, its own node's included.
+	EnvGatewayWorkerSocket = "GALACTIC_GATEWAY_WORKER_SOCKET"
+
+	// EnvGatewayWorkerTokenFile is the projected ServiceAccount token the
+	// gateway authenticates to galactic-worker with. Empty means the
+	// workerclient default.
+	EnvGatewayWorkerTokenFile = "GALACTIC_GATEWAY_WORKER_TOKEN_FILE"
+
 	// EnvGatewaySRv6Address is this node's plain SRv6-reachable address, used
 	// as the outer-header source for every packet this datapath forwards. It is
 	// never a translation source and is never compared against anything on a
@@ -190,6 +202,11 @@ type GatewayConfig struct {
 	// ProjectServices is EnvGatewayProjectServices.
 	ProjectServices bool
 
+	// WorkerSocket is EnvGatewayWorkerSocket and WorkerTokenFile
+	// EnvGatewayWorkerTokenFile.
+	WorkerSocket    string
+	WorkerTokenFile string
+
 	// Namespace is EnvGatewayNamespace.
 	Namespace string
 
@@ -222,6 +239,8 @@ func NewGatewayConfig() *GatewayConfig {
 	v.SetDefault("project_services", false)
 	v.SetDefault(keyGatewayNamespace, "")
 	v.SetDefault("project_vip_prefixes", "")
+	v.SetDefault(keyWorkerSocket, "")
+	v.SetDefault(keyWorkerTokenFile, "")
 
 	cfg := &GatewayConfig{
 		v:      v,
@@ -252,6 +271,8 @@ func (c *GatewayConfig) BindFlags(flags *pflag.FlagSet) {
 		{"gateway-project-services", "project_services"},
 		{"gateway-namespace", keyGatewayNamespace},
 		{"gateway-project-vip-prefixes", "project_vip_prefixes"},
+		{"gateway-worker-socket", keyWorkerSocket},
+		{"gateway-worker-token-file", keyWorkerTokenFile},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -280,6 +301,8 @@ func (c *GatewayConfig) readFields() {
 	c.ProjectServices = c.v.GetBool("project_services")
 	c.Namespace = c.v.GetString(keyGatewayNamespace)
 	c.projectVIPPrefixes = splitCommaList(c.v.GetString("project_vip_prefixes"))
+	c.WorkerSocket = c.v.GetString(keyWorkerSocket)
+	c.WorkerTokenFile = c.v.GetString(keyWorkerTokenFile)
 }
 
 // splitCommaList parses a comma-separated list, such as interface names or BMP
@@ -322,6 +345,11 @@ func (c *GatewayConfig) Validate() error {
 		return fmt.Errorf(
 			"public interface is required (use --gateway-public-interface flag or %s env var)",
 			EnvGatewayPublicInterface)
+	}
+	if c.WorkerSocket != "" && c.XDPAttach != GatewayXDPAttachDispatch {
+		// Worker's local_rx takes the gateway's packets from the metadata a
+		// dispatcher slot sets, and its readiness waits for that slot.
+		return fmt.Errorf("%s needs %s=%q", EnvGatewayWorkerSocket, EnvGatewayXDPAttach, GatewayXDPAttachDispatch)
 	}
 	if c.SRv6Address == "" {
 		return nil

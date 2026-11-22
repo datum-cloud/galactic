@@ -11,22 +11,24 @@ flags, or a combination of both (CLI flags take precedence), with the
 
 Logging takes `--log-level` (`LOG_LEVEL`), without the `GALACTIC_GATEWAY` prefix and the standard `--zap-*` flags; see [Logging](../observability/logging.md).
 
-| Option               | Environment Variable                    | CLI Flag                         | Default     | Required              |
-| -------------------- | --------------------------------------- | -------------------------------- | ----------- | --------------------- |
-| Node name            | `GALACTIC_GATEWAY_NODE_NAME`            | `--node-name`, `-n`              | —           | Yes                   |
-| Public interface     | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`     | `--gateway-public-interface`     | —           | While enabled         |
-| SRv6 address         | `GALACTIC_GATEWAY_SRV6_ADDRESS`         | `--gateway-srv6-address`         | Derived     | No                    |
-| Internal interfaces  | `GALACTIC_GATEWAY_INTERNAL_INTERFACES`  | `--gateway-internal-interfaces`  | —           | No                    |
-| XDP attach mode      | `GALACTIC_GATEWAY_XDP_ATTACH`           | `--gateway-xdp-attach`           | `dispatch`  | No                    |
-| Datapath enabled     | `GALACTIC_GATEWAY_DATAPATH_ENABLED`     | `--gateway-datapath-enabled`     | `true`      | No                    |
-| IPv4 VIPs            | `GALACTIC_GATEWAY_IPV4_VIPS`            | `--gateway-ipv4-vips`            | `false`     | No                    |
-| Backend health       | `GALACTIC_GATEWAY_BACKEND_HEALTH`       | `--gateway-backend-health`       | `false`     | No                    |
-| Procfs sysctl root   | `GALACTIC_GATEWAY_PROC_SYS_PATH`        | `--gateway-proc-sys-path`        | `/proc/sys` | No                    |
-| Project services     | `GALACTIC_GATEWAY_PROJECT_SERVICES`     | `--gateway-project-services`     | `false`     | No                    |
-| Gateway namespace    | `GALACTIC_GATEWAY_NAMESPACE`            | `--gateway-namespace`            | —           | With project services |
-| Project VIP prefixes | `GALACTIC_GATEWAY_PROJECT_VIP_PREFIXES` | `--gateway-project-vip-prefixes` | —           | With project services |
-| Metrics port         | `GALACTIC_GATEWAY_METRICS_PORT`         | `--metrics-port`                 | `8081`      | No                    |
-| gRPC health port     | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`     | `--grpc-health-port`             | `5181`      | No                    |
+| Option               | Environment Variable                    | CLI Flag                         | Default              | Required              |
+| -------------------- | --------------------------------------- | -------------------------------- | -------------------- | --------------------- |
+| Node name            | `GALACTIC_GATEWAY_NODE_NAME`            | `--node-name`, `-n`              | —                    | Yes                   |
+| Public interface     | `GALACTIC_GATEWAY_PUBLIC_INTERFACE`     | `--gateway-public-interface`     | —                    | While enabled         |
+| SRv6 address         | `GALACTIC_GATEWAY_SRV6_ADDRESS`         | `--gateway-srv6-address`         | Derived              | No                    |
+| Internal interfaces  | `GALACTIC_GATEWAY_INTERNAL_INTERFACES`  | `--gateway-internal-interfaces`  | —                    | No                    |
+| XDP attach mode      | `GALACTIC_GATEWAY_XDP_ATTACH`           | `--gateway-xdp-attach`           | `dispatch`           | No                    |
+| Datapath enabled     | `GALACTIC_GATEWAY_DATAPATH_ENABLED`     | `--gateway-datapath-enabled`     | `true`               | No                    |
+| IPv4 VIPs            | `GALACTIC_GATEWAY_IPV4_VIPS`            | `--gateway-ipv4-vips`            | `false`              | No                    |
+| Backend health       | `GALACTIC_GATEWAY_BACKEND_HEALTH`       | `--gateway-backend-health`       | `false`              | No                    |
+| Procfs sysctl root   | `GALACTIC_GATEWAY_PROC_SYS_PATH`        | `--gateway-proc-sys-path`        | `/proc/sys`          | No                    |
+| Project services     | `GALACTIC_GATEWAY_PROJECT_SERVICES`     | `--gateway-project-services`     | `false`              | No                    |
+| Gateway namespace    | `GALACTIC_GATEWAY_NAMESPACE`            | `--gateway-namespace`            | —                    | With project services |
+| Project VIP prefixes | `GALACTIC_GATEWAY_PROJECT_VIP_PREFIXES` | `--gateway-project-vip-prefixes` | —                    | With project services |
+| Worker socket        | `GALACTIC_GATEWAY_WORKER_SOCKET`        | `--gateway-worker-socket`        | —                    | No                    |
+| Worker token file    | `GALACTIC_GATEWAY_WORKER_TOKEN_FILE`    | `--gateway-worker-token-file`    | workerclient default | No                    |
+| Metrics port         | `GALACTIC_GATEWAY_METRICS_PORT`         | `--metrics-port`                 | `8081`               | No                    |
+| gRPC health port     | `GALACTIC_GATEWAY_GRPC_HEALTH_PORT`     | `--grpc-health-port`             | `5181`               | No                    |
 
 `GALACTIC_GATEWAY_XDP_ATTACH` is `dispatch` or `direct`. `dispatch` runs
 `edge_lb` and `edge_return` from the gateway slots of the node's shared,
@@ -36,6 +38,28 @@ attaches the programs themselves, unpinned, so they detach when the process
 exits. It first detaches an idle dispatcher from its interfaces, and refuses
 to start while another datapath's slot is live there. See
 [Sharing the XDP hook](packet-paths.md#sharing-the-xdp-hook-xdpdispatch).
+
+### Local backends
+
+`GALACTIC_GATEWAY_WORKER_SOCKET` is galactic-worker's socket. Set, the gateway
+hands each backend on its own node to the backend's TAP through Worker's
+`local.tap` handoff instead of encapsulating toward it
+([Local handoff](architecture.md#local-handoff)).
+`GALACTIC_GATEWAY_WORKER_TOKEN_FILE` is the projected ServiceAccount token the
+gateway presents to Worker; empty means the workerclient default.
+
+- The socket needs `GALACTIC_GATEWAY_XDP_ATTACH=dispatch`. With `direct`,
+  `Validate` fails at startup.
+- Every backend on this node is then handed off or dropped, never
+  encapsulated. While Worker does not report a backend's handoff ready, the
+  gateway drops its flows and reports it in `status.localBackends`, and
+  galactic-router reports it `Unhealthy`
+  ([backend health](backend-health.md#local-handoff-not-ready)).
+- The backends' replies leave through `public_uplink_table`. Without a row
+  there, the node withdraws both VIP families from BGP and its `PublicPath`
+  condition says why.
+- Unset, the gateway deletes every `edge_local_table` row at startup and
+  encapsulates toward every backend, its own node's included.
 
 `GALACTIC_GATEWAY_IPV4_VIPS=true` serves IPv4 VIPs on this node. It is off by
 default and is set per gateway node. It does three things:
@@ -91,9 +115,10 @@ unloads them, and leaves IPv6 untouched. See
 [Rolling out and rolling back IPv4 VIPs](#rolling-out-and-rolling-back-ipv4-vips).
 
 `GALACTIC_GATEWAY_BACKEND_HEALTH=true` lets this node take a backend its node
-reports `Unhealthy` out of a `NetworkService`'s Maglev table. It applies only
-to a service with `spec.healthCheck`, and only while every `NetworkGateway` in
-the namespace reports `status.backendHealthFiltering: true`, which each node
+reports `Unhealthy` out of a `NetworkService`'s Maglev table. A probe result
+applies only to a service with `spec.healthCheck`; a `LocalHandoffNotReady`
+decision applies to every service. Either applies only while every
+`NetworkGateway` in the namespace reports `status.backendHealthFiltering: true`, which each node
 sets when the switch is on. A single node without it, not yet upgraded, rolled
 back or with the switch off, turns health off on every node, so they keep
 building the same table. Health is read from `ServiceVIPBinding`s, so the
@@ -158,10 +183,10 @@ node both run as separate `hostNetwork: true` pods — every port either one
 binds shares that node's network namespace and must not collide, even
 though the two are no longer co-located in the same pod:
 
-| Pod                                                                                           | Metrics | gRPC health |
-| --------------------------------------------------------------------------------------------- | ------- | ----------- |
-| `galactic-router` (this node's tenant-BGP side, `config/galactic-router/overlays/router/`)    | `9179`  | `5179`      |
-| `galactic-gateway`                                                                            | `8081`  | `5181`      |
+| Pod                                                                                        | Metrics | gRPC health |
+| ------------------------------------------------------------------------------------------ | ------- | ----------- |
+| `galactic-router` (this node's tenant-BGP side, `config/galactic-router/overlays/router/`) | `9179`  | `5179`      |
+| `galactic-gateway`                                                                         | `8081`  | `5181`      |
 
 The `galactic-router` pod on a gateway node is the exact same DaemonSet as
 `galactic-router`'s default role on a `compute` node — it carries no
@@ -178,11 +203,14 @@ listener on this role). See
 
 ### `NetworkGateway` — one per gateway node
 
-| Field                           | Required | Type     | Description                                                                                                                                                                                                                                                                                                                                                |
-| ------------------------------- | -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.targetRef.name`           | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                                                                                                                                                                                                      |
-| `status.conditions`             | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, `IPv4ForwardingFailed` (an IPv4 VIP is due to load but the node's IPv4 forwarding could not be turned on, so IPv4 VIPs are left out and IPv6 is served), or `Terminating`. |
-| `status.backendHealthFiltering` | —        | `bool`   | `true` while this node can take `Unhealthy` backends out of a rule's Maglev table (`GALACTIC_GATEWAY_BACKEND_HEALTH`). Health applies only while every `NetworkGateway` in the namespace reports it.                                                                                                                                                       |
+| Field                           | Required | Type     | Description                                                                                                                                                                                                                                                                                                                                                     |
+| ------------------------------- | -------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.targetRef.name`           | Yes      | `string` | Kubernetes node name this gateway engine executes on.                                                                                                                                                                                                                                                                                                           |
+| `status.conditions`             | —        | —        | `Ready` condition, reason `EngineHealthy` (converged and fully advertised), `AdvertisementFailed` (converged but couldn't publish one or more rule routes), `DatapathDisabled`, `IPv4ForwardingFailed` (an IPv4 VIP is due to load but the node's IPv4 forwarding could not be turned on, so IPv4 VIPs are left out and IPv6 is served), or `Terminating`.      |
+| `status.backendHealthFiltering` | —        | `bool`   | `true` while this node can take `Unhealthy` backends out of a rule's Maglev table (`GALACTIC_GATEWAY_BACKEND_HEALTH`). Health applies only while every `NetworkGateway` in the namespace reports it.                                                                                                                                                            |
+| `status.localBackends`          | —        | `list`   | Set only with `GALACTIC_GATEWAY_WORKER_SOCKET`. One entry per backend VPCAttachment on this node: `attachmentUID`, `ready`, and `reason` (`Ready`, `WorkerUnavailable` while the gateway has no Worker session, `PublicUplinkMissing` while this node's `public_uplink_table` has no next hop, or Worker's reason for the first destination that is not ready). |
+| `LocalHandoff` condition        | —        | —        | Set only with `GALACTIC_GATEWAY_WORKER_SOCKET`. `True` with `Ready` or `NoLocalBackends`; `False` with `LocalHandoffNotReady`, or `WorkerUnavailable` when that is the first not-ready backend's reason. The message names the backends that are not ready.                                                                                                     |
+| `PublicPath` condition          | —        | —        | `True` with `Covered` while the public path covers both VIP families; `False` with `FamilyWithdrawn` while a family is withdrawn from BGP on this node, with the reason in the message. See [Health and failures](architecture.md#health-and-failures).                                                                                                         |
 
 There is deliberately **no** self-address or primary-node field on this
 status — DSR has nothing analogous to publish. Create one object per
@@ -190,16 +218,16 @@ gateway node, named after that node (see the worked example above).
 
 ### `NetworkService` — internal ingress load-balancing spec
 
-| Field                  | Required | Type                   | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ---------------------- | -------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the Galactic cell controller, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                                                                                                                                                                                                                                                                                                        |
-| `spec.vipAddresses`    | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions: at most one IPv6 and at most one IPv4 address, an IPv4 address in dotted form. See below.                                                                                                                                                                                                                                                                                                                                                         |
-| `spec.protocol`        | Yes      | `tcp` \| `udp`         | IP protocol load-balanced on `vipAddresses`. The API also accepts `sctp`, `esp`, `gre` and `icmp`, but refuses them as not served yet; see below.                                                                                                                                                                                                                                                                                                                                             |
-| `spec.port`            | tcp, udp | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                          |
-| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`galactic.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends of both VIPs; its IPv4 addresses are never backends. Must not be empty.                                                                                                                                                                                                                                                                 |
-| `spec.backendPort`     | tcp, udp | `int32` (1–65535)      | Destination port on every selected backend. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                                      |
-| `spec.sessionAffinity` | No       | `string` enum          | `None` (default), `ClientIP` or `ClientIPAndProtocol`: which connections from one client share a backend. See [Session affinity](#session-affinity).                                                                                                                                                                                                                                                                                                                                          |
-| `spec.healthCheck`     | No       | object                 | Turns on TCP health checks of the backends: `port` (default `backendPort`, required for `udp`), `intervalSeconds` (5), `timeoutSeconds` (2), `unhealthyThreshold` (3), `healthyThreshold` (3). See [Backend health checks](backend-health.md).                                                                                                                                                                                                                                                |
+| Field                  | Required | Type                   | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------- | -------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.vpcRef`          | Yes      | `string`               | Opaque VPC identifier (owned by the Galactic cell controller, not validated here beyond non-emptiness). Only attachments whose `status.vpc` equals it can be backends.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `spec.vipAddresses`    | Yes      | `[]string` (1–8)       | Ingress VIP addresses this rule provisions: at most one IPv6 and at most one IPv4 address, an IPv4 address in dotted form. See below.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `spec.protocol`        | Yes      | `tcp` \| `udp`         | IP protocol load-balanced on `vipAddresses`. The API also accepts `sctp`, `esp`, `gre` and `icmp`, but refuses them as not served yet; see below.                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `spec.port`            | tcp, udp | `int32` (1–65535)      | Ingress port on `vipAddresses` this rule load-balances. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `spec.backendSelector` | Yes      | `metav1.LabelSelector` | Selects the `VPCAttachment`s (`galactic.datumapis.com`, any namespace) that serve the rule. Each contributes its IPv6 interface addresses as backends of both VIPs; its IPv4 addresses are never backends. Must not be empty.                                                                                                                                                                                                                                                                                                                                                           |
+| `spec.backendPort`     | tcp, udp | `int32` (1–65535)      | Destination port on every selected backend. Required for a protocol with ports, refused for one without.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `spec.sessionAffinity` | No       | `string` enum          | `None` (default), `ClientIP` or `ClientIPAndProtocol`: which connections from one client share a backend. See [Session affinity](#session-affinity).                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `spec.healthCheck`     | No       | object                 | Turns on TCP health checks of the backends: `port` (default `backendPort`, required for `udp`), `intervalSeconds` (5), `timeoutSeconds` (2), `unhealthyThreshold` (3), `healthyThreshold` (3). See [Backend health checks](backend-health.md).                                                                                                                                                                                                                                                                                                                                          |
 | `status.conditions`    | —        | —                      | `Accepted` (set `True` once gateway nodes serve the rule; for a rule in a project namespace, also an ownership check, see [Services in a project namespace](#services-in-a-project-namespace)); the rule-wide `Programmed`, `Advertised`, `BackendsReady`, `Ready` and, with an IPv4 VIP, `IPv4Served` (see [Reading a rule's status](#reading-a-rules-status)); `<gateway-node>/Programmed` and `<gateway-node>/Advertised` per gateway node, `<gateway-node>/IPv4Served` per gateway node for a rule with an IPv4 VIP, and `<backend-node>/BackendsBound` per node hosting a backend. |
 
 Example, the TCP rule from `deploy/containerlab/resources/galactic-gateway/iad/networkservices.yaml`:

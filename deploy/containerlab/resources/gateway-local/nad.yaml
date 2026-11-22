@@ -1,0 +1,77 @@
+# One TAP attachment in VPC 80 on each of dfw's edge nodes: 88 on
+# dfw-worker2 and 89 on dfw-worker3, after nat-local's 86 and 87. Each has
+# its own /96, fd20:80:ff01::4:0:0 and fd20:80:ff01::5:0:0, after ns80's
+# ::1:0:0 (dfw-worker), ::2:0:0 (dfw-worker4) and nat-local's ::3:0:0, so
+# all four VIP backends of verify:gateway-local are distinct addresses in one
+# VPC. Secondary attachments of the guests in guests.yaml: galactic-tap
+# creates the host tap G000000080088H or G000000080089H in VPC 80's VRF.
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: gwlocal-w2
+  namespace: ns80
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "gwlocal-w2",
+      "plugins": [
+        {
+          "type": "galactic-tap",
+          "vpc": "80",
+          "vpcattachment": "88",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:80:ff01:0:0:4::/96",
+                "gateway": "fd20:80:ff01::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "80",
+          "vpcattachment": "88",
+          "namespace": "galactic-system"
+        }
+      ]
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: gwlocal-w3
+  namespace: ns80
+spec:
+  config: |-
+    {
+      "cniVersion": "1.0.0",
+      "name": "gwlocal-w3",
+      "plugins": [
+        {
+          "type": "galactic-tap",
+          "vpc": "80",
+          "vpcattachment": "89",
+          "namespace": "galactic-system",
+          "ipam": {
+            "type": "galactic-ipam",
+            "addresses": [
+              {
+                "address": "fd20:80:ff01:0:0:5::/96",
+                "gateway": "fd20:80:ff01::1"
+              }
+            ]
+          }
+        },
+        {
+          "type": "galactic-bgp",
+          "vpc": "80",
+          "vpcattachment": "89",
+          "namespace": "galactic-system"
+        }
+      ]
+    }

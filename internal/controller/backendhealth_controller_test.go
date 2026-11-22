@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -272,5 +273,93 @@ func TestBackendHealthFailClosedRestartsOnGenerationAndDoesNotSeed(t *testing.T)
 	h := getHealth(t, c, binding)
 	if h.ObservedGeneration != rule.Generation || h.LastProbeTime.IsZero() {
 		t.Fatalf("health not scoped/refreshed: %+v", h)
+	}
+}
+
+// localGateway is the NetworkGateway on the backend's node, reporting the
+// backend attachment's Local handoff with ready and reason.
+func localGateway(namespace string, ready bool, reason string) *bgpv1alpha1.NetworkGateway {
+	return &bgpv1alpha1.NetworkGateway{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "gw-local"},
+		Spec: bgpv1alpha1.NetworkGatewaySpec{
+			TargetRef: bgpv1alpha1.TargetRef{Kind: bindingTargetKind, Name: testComputeNodeName},
+		},
+		Status: bgpv1alpha1.NetworkGatewayStatus{LocalBackends: []bgpv1alpha1.NetworkGatewayLocalBackend{
+			{AttachmentUID: string(testHealthUID), Ready: ready, Reason: reason},
+		}},
+	}
+}
+
+// TestBackendHealthReconciler_LocalHandoffNotReadyWithoutHealthCheck: a rule
+// with no healthCheck still gets an Unhealthy decision while the gateway on
+// the backend's node reports its Local handoff not ready, and the decision is
+// cleared once the handoff is ready.
+func TestBackendHealthReconciler_LocalHandoffNotReadyWithoutHealthCheck(t *testing.T) {
+	rule, attachment, binding := newHealthFixture(t)
+	rule.Spec.HealthCheck = nil
+	gw := localGateway(binding.Namespace, false, "HandoffHookMissing")
+	r, c := newHealthReconciler(t, newFakeProber(healthprobe.Decision{}), rule, attachment, binding, gw)
+
+	reconcileHealth(t, r, binding)
+	got := getHealth(t, c, binding)
+	if got == nil || got.State != bgpv1alpha1.BackendHealthUnhealthy ||
+		got.Reason != bgpv1alpha1.BackendHealthReasonLocalHandoffNotReady || got.AttachmentUID != testHealthUID {
+		t.Fatalf("status.health = %+v, want Unhealthy LocalHandoffNotReady", got)
+	}
+	if !strings.Contains(got.Message, "HandoffHookMissing") {
+		t.Errorf("message = %q, want the gateway's reason", got.Message)
+	}
+
+	gw.Status.LocalBackends[0].Ready = true
+	// The fake client keeps NetworkGateway status on the main resource.
+	if err := c.Update(context.Background(), gw); err != nil {
+		t.Fatalf("update NetworkGateway: %v", err)
+	}
+	fresh := &bgpv1alpha1.ServiceVIPBinding{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(binding), fresh); err != nil {
+		t.Fatal(err)
+	}
+	reconcileHealth(t, r, fresh)
+	if got := getHealth(t, c, binding); got != nil {
+		t.Errorf("status.health = %+v, want cleared once the handoff is ready", got)
+	}
+}
+
+// TestBackendHealthReconciler_LocalHandoffOverridesProbe: a probe that
+// succeeds over the TAP does not hide a Local handoff that is not ready, and
+// a decision the gateway caused never seeds a probe loop.
+func TestBackendHealthReconciler_LocalHandoffOverridesProbe(t *testing.T) {
+	rule, attachment, binding := newHealthFixture(t)
+	gw := localGateway(binding.Namespace, false, "DispatcherSlotUnclaimed")
+	prober := newFakeProber(healthprobe.Decision{State: healthprobe.StateHealthy,
+		Reason: healthprobe.ReasonProbeSucceeded, Since: time.Unix(1_700_000_000, 0)})
+	r, c := newHealthReconciler(t, prober, rule, attachment, binding, gw)
+
+	reconcileHealth(t, r, binding)
+	got := getHealth(t, c, binding)
+	if got == nil || got.State != bgpv1alpha1.BackendHealthUnhealthy ||
+		got.Reason != bgpv1alpha1.BackendHealthReasonLocalHandoffNotReady {
+		t.Fatalf("status.health = %+v, want Unhealthy LocalHandoffNotReady", got)
+	}
+	if _, held := prober.owners[client.ObjectKeyFromObject(binding).String()]; !held {
+		t.Error("the probe stopped; it must keep running for when the handoff is ready")
+	}
+	if seed := seedDecision(got, testHealthUID, testBackendPort); seed != nil {
+		t.Errorf("seed = %+v, want none from a gateway decision", seed)
+	}
+}
+
+// TestBackendHealthReconciler_OtherNodesGatewayIgnored: only the gateway on
+// the backend's own node speaks for its Local handoff.
+func TestBackendHealthReconciler_OtherNodesGatewayIgnored(t *testing.T) {
+	rule, attachment, binding := newHealthFixture(t)
+	rule.Spec.HealthCheck = nil
+	gw := localGateway(binding.Namespace, false, "HandoffHookMissing")
+	gw.Spec.TargetRef.Name = "another-node"
+	r, c := newHealthReconciler(t, newFakeProber(healthprobe.Decision{}), rule, attachment, binding, gw)
+
+	reconcileHealth(t, r, binding)
+	if got := getHealth(t, c, binding); got != nil {
+		t.Errorf("status.health = %+v, want none", got)
 	}
 }

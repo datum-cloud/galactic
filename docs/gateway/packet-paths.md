@@ -48,7 +48,10 @@ that converges this node's whole gateway engine:
    (issue #715). The `BGPAdvertisement` watch wakes the pass when the
    advertisements are deleted, and a `RequeueAfter` wakes the one that ends
    the delay. A restarted process remembers nothing, so it drops a rule
-   whose advertisements are already gone on its first pass.
+   whose advertisements are already gone on its first pass. With the Worker
+   socket set, the pass also hands the backends on this node to the Local
+   handoff (`syncLocalBackends`), which keeps their Worker claims and
+   `edge_local_table` rows ([Local handoff](architecture.md#local-handoff)).
 2. **Wire BGP.** Reconciles one `BGPAdvertisement` per loaded rule per
    non-empty VIP address family, name-qualified by node
    (`<rule>-<node>-<hash>-v4`/`-v6` — required, not cosmetic, since every
@@ -80,7 +83,10 @@ that converges this node's whole gateway engine:
    and is `Bound` for its current generation (`ipv4Bindings.unbound`), naming
    the others as unresolved. `-v4` is advertised only then (`ipv4Loaded`),
    and a closed gate deletes it before the other families are written
-   (`withdrawIPv4Advertisement`), so a failed `-v6` write never delays it.
+   (`withdrawFamilyAdvertisement`), so a failed `-v6` write never delays it.
+   A family the public path does not cover on this node is withdrawn the same
+   way, `-v6` included (D44, `PublicPathState`), and the rule's
+   `<node>/Advertised` message names it.
    While no backend is Bound, the VIP still loads over every eligible backend
    but stays unadvertised (`ipv4Unbound`), because `galactic-router` writes
    IPv4 bindings only while a gateway reports the VIP loaded; leaving it out
@@ -230,7 +236,28 @@ forward half, so it has exactly one branch, not two. Replies are
    same backend. `affinity` occupies padding before `generation`, so it adds
    nothing to `vip_value`'s size, and a zero byte reads as `None`. See
    [configuration.md](../gateway/configuration.md#session-affinity).
-5. **Push** a fresh 40-byte outer IPv6 header addressed to the chosen
+5. **Local backend.** Look the selected backend's uSID up in
+   `edge_local_table`, after the shared selection, so every gateway node
+   still picks the same backend. Only a backend on this node has a row, and
+   only while the gateway runs with Galactic Worker
+   ([Local handoff](architecture.md#local-handoff)).
+   - A row with a TAP ifindex: write GLM2 metadata (magic, the TAP's
+     ifindex and the backend uSID, `localprog/local_meta.h`) with
+     `bpf_xdp_adjust_meta` and return `XDP_PASS`, counted in
+     `local_handoffs` (`galactic_edge_local_handoffs_total`). The verdict is
+     final: no later dispatcher slot, the NAT slot included, sees the packet.
+     Worker's `local_rx`, at tc ingress of the receiving device, checks that
+     the uSID names this node and the TAP's VRF (`rx_sid_mismatch`
+     otherwise), translates the VIP to the backend with the `vip_xlat_table`
+     ingress row for the uSID's slot (`rx_no_binding` without one; an IPv4
+     VIP through `vip_siit_ingress`), decides the TAP's PublicService policy,
+     sets the decided mark and redirects to the TAP. If the kernel refuses
+     room for the metadata, the packet is dropped as `adjust_meta_failed`.
+   - A row whose TAP is `0`, a handoff Worker does not report ready: drop,
+     counted as `local_unavailable`. A Local backend is never encapsulated
+     instead.
+   - No row: step 6.
+6. **Push** a fresh 40-byte outer IPv6 header addressed to the chosen
    backend's own worker-node SRv6 uSID (`vip_table`'s per-backend field,
    resolved by the Go control plane the same way any other cross-node SRv6
    destination is — see [uSID resolution](architecture.md#backend-identity)
@@ -384,6 +411,18 @@ state. `edge_return` and `vip_addr_table` apply only if the resolved uplink is
 an edge. If that interface loses its neighbor and another listed interface
 has one, `ResolvePublicUplink` falls back to it; if none does, the row keeps
 its last value. Both edges still need IPv4 VIPs on for the forward path.
+
+A backend on a gateway node that Worker's Local handoff serves replies the
+same way (D43). Its guest replies from its own address, and `usid_egress` on
+the TAP takes the reply through its VIP branch: the egress `vip_xlat_table`
+row restores the VIP and port, an IPv4 VIP's reply is translated back to
+IPv4, a SYN-ACK's MSS is clamped, and the reply is redirected out of
+`public_uplink_table`'s link before any `egress_route_table` lookup. There is
+no default pass-through and no Local branch in `usid_egress`, so the egress
+NAT never sees the reply. The reply leaves through `public_uplink_table`'s
+link, not necessarily the device the request arrived on. A node with no
+`public_uplink_table` row withdraws its VIP families instead
+([Health and failures](architecture.md#health-and-failures)).
 
 Attached only to `GALACTIC_GATEWAY_INTERNAL_INTERFACES`, never the public
 uplink: on the uplink an external client could source a packet from a VIP

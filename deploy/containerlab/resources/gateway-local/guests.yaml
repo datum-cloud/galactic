@@ -1,0 +1,224 @@
+# TAP-backed VIP backends in VPC 80, one on each of dfw's edge nodes: the
+# combined placement, where a gateway node also hosts guests. Each pod's
+# primary network is the cluster's; its gwlocal-* attachment is secondary,
+# and galactic-tap creates the host tap in VPC 80's VRF. The vmm container
+# plays the hypervisor as ns80-tap's does (resources/tenants/ns80-tap/): it
+# opens the host tap and bridges it to tap0 in the pod with socat. The
+# responder answers TCP and UDP on ports 80 and 81 as ns60's backends do,
+# with the backend's name and the client address it saw.
+#
+# verify-gateway-local.sh takes a TAP's carrier away by creating /tmp/hold in
+# the vmm container and stopping the bridge: the bridge stays down, and the
+# host tap has no reader, until /tmp/hold is removed. hostPID makes the
+# node's PID 1 reachable for socat's netns= option, so never pkill by name
+# in these pods: it would reach the node's processes.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gwlocal-w2
+  namespace: ns80
+  labels:
+    app: gwlocal-w2
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gwlocal-w2
+  template:
+    metadata:
+      labels:
+        app: gwlocal-w2
+      annotations:
+        k8s.v1.cni.cncf.io/networks: gwlocal-w2
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker2
+      tolerations:
+        - key: galactic.datumapis.com/nat
+          operator: Equal
+          value: enabled
+          effect: NoSchedule
+      hostPID: true
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: vmm
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: TAP
+              value: G000000080088H
+            - name: GUEST
+              value: fd20:80:ff01::4:0:0/96
+            - name: GATEWAY
+              value: fd20:80:ff01::1
+            # The VPC, the off-fabric client and the IPv4 clients' NAT64
+            # prefix go out tap0; the cluster network keeps the default.
+            - name: ROUTES
+              value: fd20:80::/32 2001:db8:1:40::/64 64:ff9b::/96
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -u
+              [ -e /run/netns/host ] || ip netns attach host 1
+              i=0
+              until ip netns exec host ip link show "${TAP}" >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ "${i}" -ge 120 ]; then
+                  echo "vmm: host tap ${TAP} did not appear" >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+              while :; do
+                socat -d TUN,tun-type=tap,tun-name="${TAP}",iff-no-pi,netns=host \
+                  TUN,tun-type=tap,tun-name=tap0,iff-no-pi,iff-up &
+                bridge=$!
+                echo "${bridge}" >/tmp/bridge.pid
+                i=0
+                until ip link show tap0 >/dev/null 2>&1; do
+                  i=$((i + 1))
+                  if [ "${i}" -ge 100 ]; then
+                    echo "vmm: tap0 did not appear" >&2
+                    exit 1
+                  fi
+                  sleep 0.1
+                done
+                # Routes only after the bridge holds tap0, or the kernel drops them with it.
+                ip -6 addr replace "${GUEST}" dev tap0 nodad
+                for r in ${ROUTES}; do
+                  ip -6 route replace "${r}" via "${GATEWAY}" dev tap0 onlink
+                done
+                touch /tmp/ready
+                wait "${bridge}" || true
+                rm -f /tmp/ready /tmp/bridge.pid
+                while [ -e /tmp/hold ]; do sleep 1; done
+              done
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/ready && ip link show tap0 | grep -q LOWER_UP"]
+            periodSeconds: 2
+        - name: responder
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BACKEND
+              value: dfw-worker2
+          # The ns60 responder (resources/tenants/ns60/base/backend.yaml),
+          # on port 80 for the per-backend services and 81 for the pool.
+          command: ["sh", "-c"]
+          args:
+            - |
+              reply='echo "$BACKEND $SOCAT_PEERADDR"'
+              for p in 80 81; do
+                socat TCP6-LISTEN:${p},reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null &
+                socat UDP6-RECVFROM:${p},reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null &
+              done
+              wait
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gwlocal-w3
+  namespace: ns80
+  labels:
+    app: gwlocal-w3
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gwlocal-w3
+  template:
+    metadata:
+      labels:
+        app: gwlocal-w3
+      annotations:
+        k8s.v1.cni.cncf.io/networks: gwlocal-w3
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dfw-worker3
+      tolerations:
+        - key: galactic.datumapis.com/nat
+          operator: Equal
+          value: enabled
+          effect: NoSchedule
+      hostPID: true
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: vmm
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: TAP
+              value: G000000080089H
+            - name: GUEST
+              value: fd20:80:ff01::5:0:0/96
+            - name: GATEWAY
+              value: fd20:80:ff01::1
+            - name: ROUTES
+              value: fd20:80::/32 2001:db8:1:40::/64 64:ff9b::/96
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -u
+              [ -e /run/netns/host ] || ip netns attach host 1
+              i=0
+              until ip netns exec host ip link show "${TAP}" >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ "${i}" -ge 120 ]; then
+                  echo "vmm: host tap ${TAP} did not appear" >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+              while :; do
+                socat -d TUN,tun-type=tap,tun-name="${TAP}",iff-no-pi,netns=host \
+                  TUN,tun-type=tap,tun-name=tap0,iff-no-pi,iff-up &
+                bridge=$!
+                echo "${bridge}" >/tmp/bridge.pid
+                i=0
+                until ip link show tap0 >/dev/null 2>&1; do
+                  i=$((i + 1))
+                  if [ "${i}" -ge 100 ]; then
+                    echo "vmm: tap0 did not appear" >&2
+                    exit 1
+                  fi
+                  sleep 0.1
+                done
+                # Routes only after the bridge holds tap0, or the kernel drops them with it.
+                ip -6 addr replace "${GUEST}" dev tap0 nodad
+                for r in ${ROUTES}; do
+                  ip -6 route replace "${r}" via "${GATEWAY}" dev tap0 onlink
+                done
+                touch /tmp/ready
+                wait "${bridge}" || true
+                rm -f /tmp/ready /tmp/bridge.pid
+                while [ -e /tmp/hold ]; do sleep 1; done
+              done
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/ready && ip link show tap0 | grep -q LOWER_UP"]
+            periodSeconds: 2
+        - name: responder
+          image: ghcr.io/datum-cloud/galactic-debug@sha256:b64e338f845d06f82f2575ae6bb6855da330af7551a8816b7ade2602a85722f2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BACKEND
+              value: dfw-worker3
+          command: ["sh", "-c"]
+          args:
+            - |
+              reply='echo "$BACKEND $SOCAT_PEERADDR"'
+              for p in 80 81; do
+                socat TCP6-LISTEN:${p},reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null &
+                socat UDP6-RECVFROM:${p},reuseaddr,fork SYSTEM:"$reply"'!!'/dev/null &
+              done
+              wait
