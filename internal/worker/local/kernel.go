@@ -225,8 +225,6 @@ func (k *Kernel) program(name string) *ebpf.Program {
 	}
 }
 
-// filterCurrent reports whether ifindex carries the Local filter name with
-// the program this Kernel loaded.
 // tcxAhead is TCXAhead, or attach.TCXIngressAhead when it is nil.
 func (k *Kernel) tcxAhead(ifindex int) (ebpf.ProgramID, string, error) {
 	if k.TCXAhead != nil {
@@ -235,6 +233,8 @@ func (k *Kernel) tcxAhead(ifindex int) (ebpf.ProgramID, string, error) {
 	return attach.TCXIngressAhead(ifindex)
 }
 
+// filterCurrent reports whether ifindex carries the Local filter name with
+// the program this Kernel loaded.
 func (k *Kernel) filterCurrent(ifindex int, name string) (bool, error) {
 	got, id, ok, err := attach.LocalFilter(ifindex)
 	if err != nil || !ok {
