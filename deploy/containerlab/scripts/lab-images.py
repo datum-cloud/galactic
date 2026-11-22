@@ -328,6 +328,13 @@ def pull_node(node, records):
         run('docker', 'exec', node, 'ctr', '-n', 'k8s.io', 'images', 'tag',
             '--force', source, reference)
         wait_for_image(node, reference, record.get('config'))
+    # Canonical workload tags retain the images. Drop transport references,
+    # including older digests, so containerd can reclaim superseded layers.
+    references = run('docker', 'exec', node, 'ctr', '-n', 'k8s.io', 'images', 'ls', '-q', capture=True)
+    transport = [ref for ref in references.splitlines()
+                 if ref.startswith((f'{NODE_HOST}/lab/', f'{NODE_HOST}/external/'))]
+    if transport:
+        run('docker', 'exec', node, 'ctr', '-n', 'k8s.io', 'images', 'rm', *transport)
     print(f'Loaded {node} in {time.monotonic()-started:.3f}s', flush=True)
 
 

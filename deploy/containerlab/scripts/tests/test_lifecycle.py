@@ -1,5 +1,8 @@
 import importlib.util
 import json
+import os
+import signal
+import time
 from pathlib import Path
 import subprocess
 import tempfile
@@ -53,7 +56,6 @@ touch must-not-run
             kind = Path(directory) / 'kind'
             kind.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$LOG"\n')
             kind.chmod(0o755)
-            import os
             env = {**os.environ, 'PATH': directory + ':' + os.environ['PATH'],
                    'LOG': directory + '/calls'}
             subprocess.run([str(SCRIPTS / 'deploy-clusters.sh')], env=env, check=True)
@@ -63,6 +65,34 @@ touch must-not-run
             for site in lifecycle.SITES:
                 self.assertTrue(any(f'--name {site} ' in line and
                                     f'--kubeconfig {site}.kubeconfig' in line for line in calls))
+
+
+    def test_term_to_parent_stops_worker_descendants(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # The site inherits the directory through an exported variable.
+            script = 'set -e; source "$1/lib.sh"; export OUT="$2"; site() { touch "$OUT/started"; sleep 1; touch "$OUT/orphan"; }; parallel_sites site a'
+            process = subprocess.Popen(['bash', '-c', script, 'test', str(SCRIPTS), directory],
+                                       start_new_session=True)
+            try:
+                deadline = time.monotonic() + 5
+                while not (root / 'started').exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue((root / 'started').exists())
+                process.terminate()
+                self.assertEqual(process.wait(timeout=5), 143)
+                time.sleep(1.1)
+                self.assertFalse((root / 'orphan').exists())
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+
+    def test_repeated_sites_keep_separate_timings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = 'source "$1/lib.sh"; export LAB_TIMING_DIR="$2"; site() { :; }; parallel_sites site a; parallel_sites site a'
+            subprocess.run(['bash', '-c', script, 'test', str(SCRIPTS), directory], check=True)
+            self.assertEqual(len(list(Path(directory).glob('*.tsv'))), 2)
 
 
 class ResetTests(unittest.TestCase):
@@ -93,11 +123,28 @@ class ResetTests(unittest.TestCase):
         self.assertEqual(patch, [{'op': 'add', 'path': '/spec', 'value': saved['components'][0]['spec']}])
         self.assertIn('--wait=true', k.call_args_list[-1].args)
 
+    def test_checkpoint_rejects_sources_changed_during_deploy(self):
+        with mock.patch.object(lifecycle, 'source_hash', return_value='changed'), \
+                mock.patch.object(lifecycle, 'parallel') as parallel, self.assertRaises(RuntimeError):
+            lifecycle.checkpoint('original')
+        parallel.assert_not_called()
+
     def test_source_change_prevents_any_mutation(self):
         with mock.patch.object(lifecycle, 'source_hash', return_value='new'), \
                 mock.patch.object(lifecycle, 'run') as run, self.assertRaises(RuntimeError):
             lifecycle.preflight({'version': 1, 'source': 'old'})
         run.assert_not_called()
+
+    def test_deploy_on_existing_clusters_preserves_reset_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'state'
+            state.mkdir()
+            checkpoint = state / 'baseline.json'
+            checkpoint.write_text('{}')
+            with mock.patch.object(lifecycle, 'STATE', state), \
+                    mock.patch.object(lifecycle, 'run', return_value='dfw'), self.assertRaises(RuntimeError):
+                lifecycle.lifecycle('deploy', Path(directory) / 'evidence')
+            self.assertTrue(checkpoint.exists())
 
     def test_failed_preflight_keeps_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -122,6 +169,7 @@ class ResetTests(unittest.TestCase):
             (images_dir / 'inventory.json').write_text('["branch-image"]')
             (state / 'baseline.json').write_text(json.dumps({'images': ['baseline-image'], 'sites': {}}))
             with mock.patch.object(lifecycle, 'STATE', state), mock.patch.object(lifecycle, 'REPO', root), \
+                    mock.patch.object(lifecycle, 'source_hash', return_value='same'), \
                     mock.patch.object(lifecycle, 'preflight'), mock.patch.object(lifecycle, 'parallel'), \
                     mock.patch.object(lifecycle, 'checkpoint'), mock.patch.object(lifecycle, 'run') as run:
                 lifecycle.lifecycle('reset', root / 'evidence')
@@ -148,6 +196,13 @@ class ImageTests(unittest.TestCase):
                 mock.patch.object(images, 'run') as run, self.assertRaises(RuntimeError):
             images.registry_volume()
         run.assert_not_called()
+
+    def test_transport_cleanup_preserves_workload_and_unrelated_references(self):
+        refs = [images.NODE_HOST + '/lab/tool@sha256:old', images.NODE_HOST + '/external/hash@sha256:new',
+                'docker.io/library/tool:latest', 'another-registry/tool:latest']
+        with mock.patch.object(images, 'run', side_effect=['\n'.join(refs), None]) as run:
+            images.pull_node('node-a', [])
+        self.assertEqual(run.call_args.args[-3:], ('rm', *refs[:2]))
 
     def test_canonical_references(self):
         self.assertEqual(images.canonical('fabric-router:latest'), 'docker.io/library/fabric-router:latest')
@@ -193,7 +248,7 @@ items:
             with mock.patch.object(images.subprocess, 'run', return_value=result), \
                     mock.patch.object(images, 'run') as run, mock.patch.object(images, 'wait_for_image'):
                 images.pull_node('node-a', records)
-            self.assertEqual(run.call_count, 0 if cached == 'expected' else 2)
+            self.assertEqual(run.call_count, 1 if cached == 'expected' else 3)
 
     def test_chart_placement_respects_taints_without_assuming_affinity(self):
         nodes = {'compute': {'labels': {'kubernetes.io/os': 'linux'}, 'taints': []},
@@ -225,7 +280,7 @@ items:
         self.assertEqual(run.call_args_list[1].args[-1], records[0]['image'])
         with mock.patch.object(images, 'run') as run:
             images.pull_node('node-b', records)
-        run.assert_not_called()
+        self.assertEqual(run.call_args.args[-3:], ('images', 'ls', '-q'))
 
 
 class NodeCacheTests(unittest.TestCase):
@@ -255,6 +310,78 @@ class NodeCacheTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             node_cache.owned({**volume, 'Labels': {}})
         self.assertFalse(node_cache.mounted(volume, [[{'Source': '/vol/cache-other/data'}]]))
+
+    def test_missing_or_malformed_state_is_dirty(self):
+        for value in ('', '{bad', '[]', 'null'):
+            with self.subTest(value=value), mock.patch.object(node_cache, 'helper', return_value=value):
+                self.assertEqual(node_cache.read_state('cache-a'), {})
+
+    def test_dirty_and_incompatible_stores_are_removed_before_seed(self):
+        volume = {'Name': node_cache.PREFIX + 'node-a', 'Mountpoint': '/vol/cache',
+                  'Labels': {node_cache.LABEL: 'true'}}
+        for state in ({'clean': False}, {'clean': True, 'version': 1, 'base': 'old'}):
+            events = []
+            with mock.patch.object(node_cache, 'inspect', return_value=volume), \
+                    mock.patch.object(node_cache, 'containers', return_value=[]), \
+                    mock.patch.object(node_cache, 'read_state', return_value=state), \
+                    mock.patch.object(node_cache, 'remove', side_effect=lambda v: events.append('remove')), \
+                    mock.patch.object(node_cache, 'run', side_effect=lambda *a, **k: events.append(a[1])), \
+                    mock.patch.object(node_cache, 'write_state') as write:
+                node_cache.prepare_volume('node-a', 'new')
+            self.assertEqual(events[0], 'remove')
+            self.assertFalse(write.call_args.args[1]['clean'])
+
+    def test_activation_rejects_a_changed_node_base_without_marking_clean(self):
+        volume = {'Name': node_cache.PREFIX + 'node-a', 'Mountpoint': '/vol/cache',
+                  'Labels': {node_cache.LABEL: 'true'}}
+        node = {'Id': 'container-a', 'Image': 'new', 'Mounts': [
+            {'Source': '/vol/cache/data', 'Destination': '/var/lib/containerd'}]}
+        with mock.patch.object(node_cache, 'nodes', return_value=[('site-a', 'node-a', {})]), \
+                mock.patch.object(node_cache, 'inspect', side_effect=[volume, node]), \
+                mock.patch.object(node_cache, 'read_state', return_value={'base': 'old', 'clean': False}), \
+                mock.patch.object(node_cache, 'base_fingerprint', return_value='new'), \
+                mock.patch.object(node_cache, 'write_state') as write, self.assertRaises(RuntimeError):
+            node_cache.activate()
+        write.assert_not_called()
+
+    def test_destroy_deletes_clusters_after_failed_release_but_never_marks_clean(self):
+        with mock.patch.object(node_cache, 'release', side_effect=RuntimeError('dirty')), \
+                mock.patch.object(node_cache, 'run') as run, \
+                mock.patch.object(node_cache, 'write_state') as write, self.assertRaises(RuntimeError):
+            node_cache.destroy()
+        self.assertEqual([c.args[-1] for c in run.call_args_list], list(node_cache.SITES))
+        write.assert_not_called()
+
+    def test_failed_node_deletion_keeps_caches_dirty(self):
+        with mock.patch.object(node_cache, 'release', return_value={'node-a': {}}), \
+                mock.patch.object(node_cache, 'run', side_effect=subprocess.CalledProcessError(1, 'kind')) as run, \
+                mock.patch.object(node_cache, 'write_state') as write, self.assertRaises(RuntimeError):
+            node_cache.destroy()
+        self.assertEqual(run.call_count, 3)
+        write.assert_not_called()
+
+    def test_incomplete_create_is_discarded_without_claiming_a_clean_cache(self):
+        volume = {'Name': node_cache.PREFIX + 'node-a', 'Mountpoint': '/vol/cache',
+                  'Labels': {node_cache.LABEL: 'true'}}
+        node = {'Id': 'container-a', 'Mounts': [{'Source': '/vol/cache/data'}]}
+        with mock.patch.object(node_cache, 'nodes', return_value=[('site-a', 'node-a', {})]), \
+                mock.patch.object(node_cache, 'inspect', side_effect=[node, volume]), \
+                mock.patch.object(node_cache, 'read_state', return_value={'clean': False}), \
+                mock.patch.object(node_cache, 'run') as run, \
+                mock.patch.object(node_cache, 'write_state') as write:
+            self.assertEqual(node_cache.release(), {})
+        run.assert_not_called()
+        write.assert_not_called()
+
+    def test_destroy_marks_clean_only_after_node_deletion(self):
+        events = []
+        with mock.patch.object(node_cache, 'release', return_value={'node-a': {}}), \
+                mock.patch.object(node_cache, 'run', side_effect=lambda *a: events.append('delete')), \
+                mock.patch.object(node_cache, 'containers', return_value=[]), \
+                mock.patch.object(node_cache, 'nodes', return_value=[]), \
+                mock.patch.object(node_cache, 'write_state', side_effect=lambda *a: events.append('clean')):
+            node_cache.destroy()
+        self.assertEqual(events, ['delete', 'delete', 'delete', 'clean'])
 
     def test_runtime_snapshots_must_all_be_committed(self):
         node_cache.no_writable_snapshots('KEY PARENT KIND\nsha256:layer Committed\n')
@@ -308,8 +435,7 @@ class NodeCacheTests(unittest.TestCase):
         self.assertEqual({e[0] for e in events[:2]}, set(names))
         self.assertTrue(all(e[1] is False for e in events[:2]))
         self.assertEqual(events[2:4], [('site-a-worker', True), ('site-a-control-plane', True)])
-        self.assertTrue(all(call.args[1]['clean'] for call in write.call_args_list))
-        self.assertEqual(write.call_count, 2)
+        write.assert_not_called()
 
     def test_release_never_marks_failed_teardown_clean(self):
         volume = {'Name': node_cache.PREFIX + 'node-a', 'Mountpoint': '/vol/cache',

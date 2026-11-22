@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 import yaml
@@ -164,7 +165,9 @@ def activate():
                                and m['Destination'] == '/var/lib/containerd' for m in node['Mounts']):
             raise RuntimeError(f'{name}: expected image cache is not attached')
         state = read_state(volume['Name'])
-        state.update(clean=False, container=node['Id'], base=base_fingerprint(node['Image']))
+        if state.get('base') != base_fingerprint(node['Image']):
+            raise RuntimeError(f'{name}: node image changed after cache preparation')
+        state.update(clean=False, container=node['Id'])
         write_state(volume['Name'], state)
 
 
@@ -258,6 +261,8 @@ def release():
             continue  # Older deployments have disposable stores and need no cache teardown.
         owned(volume)
         state = read_state(volume['Name'])
+        if not state.get('container') and state.get('clean') is not True:
+            continue  # An incomplete create leaves a dirty store to discard.
         if state.get('container') != node['Id']:
             raise RuntimeError(f'{name}: unverified cache lease; destroy and discard this cache')
         cached[name] = state
@@ -268,7 +273,28 @@ def release():
     parallel(lambda name: stop_pods(name, True), [n for n in cached if '-control-plane' not in n])
     parallel(lambda name: stop_pods(name, True), [n for n in cached if '-control-plane' in n])
     parallel(empty_runtime, cached)
-    # No store is marked reusable unless every node's cleanup succeeded.
+    return cached
+
+
+def destroy():
+    cached = {}
+    failed = False
+    try:
+        cached = release()
+    except Exception as error:
+        print(f'Cache cleanup failed: {error}', file=sys.stderr)
+        failed = True
+    for site in SITES:
+        try:
+            run('kind', 'delete', 'cluster', '--name', site)
+        except subprocess.CalledProcessError:
+            failed = True
+    if failed:
+        raise RuntimeError('Cluster teardown failed; image caches remain dirty')
+    containers()  # A failed Docker query must not mean that nodes are absent.
+    if any(inspect('container', name) for _, name, _ in nodes()):
+        raise RuntimeError('Cluster nodes remain; image caches cannot be reused')
+    # Keep stores dirty until verified runtimes and their node containers are gone.
     for name, state in cached.items():
         state.update(clean=True, container=None,
                      verified={'containers': 0, 'sandboxes': 0, 'tasks': 0, 'writable_snapshots': 0})
@@ -282,6 +308,6 @@ def clean():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'activate', 'release', 'clean'))
+    parser.add_argument('action', choices=('prepare', 'activate', 'destroy', 'clean'))
     action = parser.parse_args().action
-    {'prepare': prepare, 'activate': activate, 'release': release, 'clean': clean}[action]()
+    {'prepare': prepare, 'activate': activate, 'destroy': destroy, 'clean': clean}[action]()
