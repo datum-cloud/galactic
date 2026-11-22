@@ -65,6 +65,14 @@ func TestEntryPathsRoot(t *testing.T) {
 				claims := r.claims(v)
 				st := r.reconcile(v.vpc, claims)
 				wantReady(t, st, claims[:1])
+				// The gateway keys its datapath on the TAP the claim
+				// reports.
+				want := module.HandoffInterface{Role: workerv1alpha1.HandoffRoleTap, Name: v.tap,
+					Ifindex: int32(v.tapIdx)} //nolint:gosec // a test ifindex
+				if got := r.mod.HandoffInterfaces(module.Scope{VPC: v.vpc})[claims[0].Key]; len(got) != 1 ||
+					got[0] != want {
+					t.Fatalf("VPC %s: tap handoff interfaces = %+v, want [%+v]", v.vpc, got, want)
+				}
 				// The pair is programmed, but its return needs the NAT
 				// program on the NAT end.
 				wantState(t, st, claims[1], true, true, false, workerv1alpha1.ReasonHandoffHookMissing)

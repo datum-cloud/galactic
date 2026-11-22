@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net/netip"
 	"regexp"
 	"strconv"
@@ -91,6 +92,11 @@ func validateSpec(gen uint64, spec *workerv1alpha1.ClaimSpec) error {
 			}
 			ok = t.Shard.GetName() != ""
 		case *workerv1alpha1.Destination_Backend:
+			// Slot 0 means "no slot" in the uSID layout, and a slot is 16
+			// bits wide.
+			if slot := t.Backend.GetSlot(); t.Backend.GetNode() != "" && (slot == 0 || slot > math.MaxUint16) {
+				return malformed(fmt.Sprintf("destination %d: a backend slot is 1 to %d", i, math.MaxUint16))
+			}
 			ok = t.Backend.GetNode() != ""
 		}
 		if !ok {
@@ -321,6 +327,20 @@ func (w *Worker) admitDestinations(ctx context.Context, caller auth.Caller, k mo
 			}
 			continue
 		}
+		if b, isBackend := d.GetTarget().(*workerv1alpha1.Destination_Backend); isBackend {
+			msg, err := w.admitBackend(ctx, k.VPC, b.Backend)
+			if err != nil {
+				return refusal.New(codes.Unavailable, workerv1alpha1.ReasonResyncing, "trusted sources unavailable", nil)
+			}
+			if msg != "" {
+				return notAuthorized(msg)
+			}
+			// A backend on another node is reached over the fabric.
+			if spec.GetMode() != workerv1alpha1.Mode_MODE_LOCAL && b.Backend.GetNode() != w.cfg.Node {
+				needFabric = true
+			}
+			continue
+		}
 		t, ok := d.GetTarget().(*workerv1alpha1.Destination_Attachment)
 		if !ok {
 			continue
@@ -361,6 +381,31 @@ func (w *Worker) admitDestinations(ctx context.Context, caller auth.Caller, k mo
 			caller.ServiceAccount+" may not use "+workerv1alpha1.CapabilityFabricSRv6, nil)
 	}
 	return nil
+}
+
+// admitBackend returns why a backend destination may not be claimed in vpc,
+// or "". A backend that is not bound yet is accepted, and reports
+// BackendNotBound until it is; one bound only in other VPCs is refused, as
+// an attachment in another VPC is. Reconciliation checks it again.
+func (w *Worker) admitBackend(ctx context.Context, vpc string, ref *workerv1alpha1.BackendRef) (string, error) {
+	bindings, err := w.d.Sources.BackendBindings(ctx, ref.GetNode(), uint16(ref.GetSlot())) //nolint:gosec // validated
+	if err != nil {
+		return "", err
+	}
+	other := false
+	for _, b := range bindings {
+		if !b.Bound {
+			continue
+		}
+		if b.VPCRef == vpc {
+			return "", nil
+		}
+		other = true
+	}
+	if other {
+		return fmt.Sprintf("destination backend %s/%d is in another VPC", ref.GetNode(), ref.GetSlot()), nil
+	}
+	return "", nil
 }
 
 // put runs Request (update false) or Update.

@@ -145,3 +145,24 @@ func deleteLocalFilters(link netlink.Link, match func(name string) bool) error {
 	}
 	return errors.Join(errs...)
 }
+
+// TCXIngressAhead reports the first program attached through tcx to
+// ifindex's ingress, which the kernel runs before every clsact filter,
+// Local's included. A tcx program that ends a packet's ingress, as a cluster
+// CNI's on a bond master does, keeps Local's filter from ever seeing it. id
+// is 0 when no tcx program is attached, or the kernel has no tcx. name is
+// empty when the program cannot be named.
+func TCXIngressAhead(ifindex int) (id ebpf.ProgramID, name string, err error) {
+	ids, err := tcxQueryFn(ifindex)
+	if errors.Is(err, ebpf.ErrNotSupported) {
+		return 0, "", nil
+	}
+	if err != nil {
+		return 0, "", fmt.Errorf("attach: query tcx ingress of ifindex %d: %w", ifindex, err)
+	}
+	if len(ids) == 0 {
+		return 0, "", nil
+	}
+	name, _ = programNameFn(ids[0])
+	return ids[0], name, nil
+}

@@ -47,6 +47,7 @@ type Collector struct {
 	rangeTable     *edgemap.VIPTable
 	dropReasons    DropReasonsReader
 	neighFallbacks DropReasonsReader
+	localHandoffs  DropReasonsReader
 	attribution    VPCAttribution
 }
 
@@ -65,6 +66,13 @@ func (c *Collector) WithNeighFallbacks(m DropReasonsReader) *Collector {
 	return c
 }
 
+// WithLocalHandoffs adds the local_handoffs map, a single-entry per-CPU array,
+// as galactic_edge_local_handoffs_total.
+func (c *Collector) WithLocalHandoffs(m DropReasonsReader) *Collector {
+	c.localHandoffs = m
+	return c
+}
+
 // NewCollectorFromObjects builds a Collector reading directly from a loaded
 // object set's maps.
 func NewCollectorFromObjects(objs *edgeprog.EdgedsrObjects, attribution VPCAttribution) *Collector {
@@ -75,7 +83,7 @@ func NewCollectorFromObjects(objs *edgeprog.EdgedsrObjects, attribution VPCAttri
 		).WithPeerTable(edgemap.KernelTable{Map: objs.VipRangeBackends}),
 		objs.DropReasons,
 		attribution,
-	).WithNeighFallbacks(objs.NeighFallbacks)
+	).WithNeighFallbacks(objs.NeighFallbacks).WithLocalHandoffs(objs.LocalHandoffs)
 	collector.rangeTable = edgemap.NewVIPTable(edgemap.KernelTable{Map: objs.VipRangeBackends},
 		edgemap.KernelTable{Map: objs.VipStatsTable},
 		edgemap.KernelTable{Map: objs.VipAddrTable},
@@ -144,6 +152,14 @@ var (
 			"Not counted in drops_total.",
 		nil, nil,
 	)
+	localHandoffsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "local_handoffs_total"),
+		"Packets edge_lb handed to Worker's Local module on this node, for a backend this node "+
+			"serves through a local.tap handoff (edge_local_table), instead of encapsulating them. "+
+			"Counts the handoff, not delivery: Worker's local_rx counts what it delivers or drops. "+
+			"Not counted in drops_total.",
+		nil, nil,
+	)
 	returnPacketsDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "return", "packets_total"),
 		"Reply packets this node forwarded for traffic sourced from this VIP+port+protocol, bypassing "+
@@ -176,6 +192,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- ruleSecondsSinceLastPacketDesc
 	ch <- dropsDesc
 	ch <- neighFallbacksDesc
+	ch <- localHandoffsDesc
 	ch <- returnPacketsDesc
 	ch <- returnBytesDesc
 	ch <- returnDroppedDesc
@@ -186,7 +203,8 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	c.collectRules(ch)
 	c.collectReturn(ch)
 	c.collectDrops(ch)
-	c.collectNeighFallbacks(ch)
+	collectSingleCounter(ch, c.neighFallbacks, neighFallbacksDesc, "neigh_fallbacks")
+	collectSingleCounter(ch, c.localHandoffs, localHandoffsDesc, "local_handoffs")
 }
 
 // vpcs snapshots the attribution. Callers take it after listing a map: the
@@ -308,18 +326,20 @@ func (c *Collector) collectDrops(ch chan<- prometheus.Metric) {
 	}
 }
 
-func (c *Collector) collectNeighFallbacks(ch chan<- prometheus.Metric) {
-	if c.neighFallbacks == nil {
+// collectSingleCounter reports m, a single-entry per-CPU array, summed over
+// CPUs, as desc. A nil m reports nothing.
+func collectSingleCounter(ch chan<- prometheus.Metric, m DropReasonsReader, desc *prometheus.Desc, name string) {
+	if m == nil {
 		return
 	}
 	var perCPU []uint64
-	if err := c.neighFallbacks.Lookup(uint32(0), &perCPU); err != nil {
-		ch <- prometheus.NewInvalidMetric(neighFallbacksDesc, fmt.Errorf("lookup neigh_fallbacks: %w", err))
+	if err := m.Lookup(uint32(0), &perCPU); err != nil {
+		ch <- prometheus.NewInvalidMetric(desc, fmt.Errorf("lookup %s: %w", name, err))
 		return
 	}
 	var total uint64
 	for _, v := range perCPU {
 		total += v
 	}
-	ch <- prometheus.MustNewConstMetric(neighFallbacksDesc, prometheus.CounterValue, float64(total))
+	ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(total))
 }

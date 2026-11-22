@@ -1,0 +1,45 @@
+# galactic-gateway hands each backend on its own node to the backend's TAP
+# through galactic-worker's Local handoff (docs/gateway/architecture.md#local-handoff),
+# which needs Worker's socket, the token, audience galactic-worker, that
+# identifies the gateway to it, and backend health on every gateway in the
+# namespace, which takes a backend whose handoff is not ready out of every
+# gateway's Maglev table (docs/worker/README.md, D48). The gateway runs in
+# the default dispatch attach mode, which the handoff needs.
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: GALACTIC_GATEWAY_WORKER_SOCKET
+    value: /run/galactic-worker/worker.sock
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: GALACTIC_GATEWAY_BACKEND_HEALTH
+    value: "true"
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: galactic-worker-socket
+    mountPath: /run/galactic-worker
+- op: add
+  path: /spec/template/spec/containers/0/volumeMounts/-
+  value:
+    name: galactic-worker-token
+    mountPath: /var/run/secrets/galactic-worker
+    readOnly: true
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: galactic-worker-socket
+    hostPath:
+      path: /run/galactic-worker
+      type: DirectoryOrCreate
+- op: add
+  path: /spec/template/spec/volumes/-
+  value:
+    name: galactic-worker-token
+    projected:
+      sources:
+        - serviceAccountToken:
+            audience: galactic-worker
+            expirationSeconds: 3600
+            path: token

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -219,6 +220,11 @@ func (k *Kernel) destinationCheck(ck *check, h *host, vrfIdx int, c module.Claim
 				ck.unprogrammed(workerv1alpha1.ReasonPending, "Local has not authorized "+d.HostInterface+" yet")
 				return l
 			}
+			// The client keys its datapath on the TAP's ifindex, so only a
+			// TAP lt_tap authorizes is reported, whatever kind of
+			// destination, an attachment or a backend, it serves.
+			addHandoff(out, c.Key, module.HandoffInterface{Role: workerv1alpha1.HandoffRoleTap,
+				Name: d.HostInterface, Ifindex: int32(l.Attrs().Index)})
 		}
 		if c.Handoff == workerv1alpha1.Handoff_HANDOFF_VETH_PAIR {
 			for _, a := range ipv6(d.Addresses) {
@@ -263,6 +269,14 @@ func (k *Kernel) destinationCheck(ck *check, h *host, vrfIdx int, c module.Claim
 	return l
 }
 
+// addHandoff adds h to claim k's handoff interfaces unless k already has it,
+// as several destinations of one claim can share one TAP.
+func addHandoff(out *readResult, k module.ClaimKey, h module.HandoffInterface) {
+	if !slices.Contains(out.handoffs[k], h) {
+		out.handoffs[k] = append(out.handoffs[k], h)
+	}
+}
+
 // tapCheck checks a local.tap destination's receive path: a receiving device
 // whose dispatcher runs a live public slot, carrying local_rx, with an MTU
 // the TAP's covers.
@@ -288,10 +302,16 @@ func (k *Kernel) tapCheck(rs []receiver) func(*check, netlink.Link) {
 			ck.notReady(true, false, workerv1alpha1.ReasonDispatcherSlotUnclaimed, msg)
 			return
 		}
-		hooked := false
+		var unhooked []string
 		for _, r := range live {
-			if ok, err := k.filterCurrent(r.idx, filterRx); err == nil && ok {
-				hooked = true
+			if ok, err := k.filterCurrent(r.idx, filterRx); err != nil || !ok {
+				unhooked = append(unhooked, r.name+" (no local_rx)")
+			} else if id, name, err := k.tcxAhead(r.idx); err == nil && id != 0 {
+				// tcx runs before every clsact filter, so a program there
+				// decides first and can end the packet's ingress before
+				// local_rx sees it.
+				unhooked = append(unhooked, fmt.Sprintf("%s (tcx program %q, id %d, runs ahead of local_rx)",
+					r.name, name, id))
 			}
 			if r.mtu > l.Attrs().MTU {
 				ck.notReady(true, false, workerv1alpha1.ReasonHandoffMTUTooSmall,
@@ -299,9 +319,9 @@ func (k *Kernel) tapCheck(rs []receiver) func(*check, netlink.Link) {
 						r.name, r.mtu))
 			}
 		}
-		if !hooked {
+		if len(unhooked) > 0 {
 			ck.notReady(true, false, workerv1alpha1.ReasonHandoffHookMissing,
-				"Local's tc program is on no receiving device")
+				"local_rx does not receive on every receiving device: "+strings.Join(unhooked, ", "))
 		}
 	}
 }
