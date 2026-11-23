@@ -316,10 +316,21 @@ func TestParseEgressGroupConfig(t *testing.T) {
 			env:  map[string]string{EnvCNIEgressPinIdle: "45m"},
 			want: EgressGroupConfig{Mode: EgressModeOrdered, Hash: EgressHashSource, PinIdle: 45 * time.Minute, MinActive: 1},
 		},
+		{
+			name: "ZeroSecondsPinIdleTurnsPinsOff",
+			env:  map[string]string{EnvCNIEgressPinIdle: "0s"},
+			want: EgressGroupConfig{Mode: EgressModeOrdered, Hash: EgressHashSource, PinIdle: 0, MinActive: 1},
+		},
+		{
+			name: "ZeroMinutesPinIdleTurnsPinsOff",
+			env:  map[string]string{EnvCNIEgressPinIdle: "0m"},
+			want: EgressGroupConfig{Mode: EgressModeOrdered, Hash: EgressHashSource, PinIdle: 0, MinActive: 1},
+		},
 		{name: "UnknownModeFails", env: map[string]string{EnvCNIEgressMode: "anycast"}, wantErr: true},
 		{name: "UnknownHashFails", env: map[string]string{EnvCNIEgressHash: "5tuple"}, wantErr: true},
 		{name: "BadPinIdleFails", env: map[string]string{EnvCNIEgressPinIdle: "forever"}, wantErr: true},
 		{name: "SubSecondPinIdleFails", env: map[string]string{EnvCNIEgressPinIdle: "10ms"}, wantErr: true},
+		{name: "NegativePinIdleFails", env: map[string]string{EnvCNIEgressPinIdle: "-5s"}, wantErr: true},
 		{name: "NegativeMinActiveFails", env: map[string]string{EnvCNIEgressPoolMinActive: "-1"}, wantErr: true},
 	}
 	for _, tt := range tests {

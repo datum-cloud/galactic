@@ -143,8 +143,8 @@ hashed mode with more than three NAT64 prefixes in
   longest idle timeout, so a pin never outlives the session it protects. Pins
   live in a 65536-entry LRU on each compute node and are not shared between
   nodes. One evicted under pressure falls back to the Maglev table, which
-  gives the same shard unless the membership changed since it was made. `0`
-  turns pins off.
+  gives the same shard unless the membership changed since it was made. A
+  zero duration (`0`, `0s` or `0m`) turns pins off.
 - **Sessions are not replicated.** A session lives on one shard. When a shard
   fails, its sessions break and their tenants are placed elsewhere; only
   sessions on surviving shards continue.
