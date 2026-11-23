@@ -78,6 +78,10 @@ type Request struct {
 	// installed in a remote location's import policy would then merge an
 	// unrelated network into a dead one's routes. Inheritance is confined to
 	// one namespace and one name; reissue is not confined to anything.
+	//
+	// Inheritance lasts only while the block is held. Once the address service
+	// can free a released block after a cooldown, a name that returns after it
+	// gets a new identity; see Release.
 	NetworkNamespace string
 	NetworkName      string
 }
@@ -129,10 +133,13 @@ func Claim(ctx context.Context, ipamClient client.Client, request Request) (int6
 		Target:       ipamv1alpha1.TargetBlock,
 		PrefixLength: ptr.To(int32(BlockBits)),
 
-		// An identity is never given back. A Route Target still installed in a
-		// remote location's import policy would silently merge a new network
-		// into a dead one's routes, so holding the block forever is the safe
-		// failure and reissuing it is not a failure anything can see.
+		// The block is not handed back to the pool on release. A Route Target
+		// still installed in a remote location's import policy would silently
+		// merge a new network into a dead one's routes, so holding the block is
+		// the safe failure and reissuing it early is not a failure anything can
+		// see. Retain holds it forever; it is the only policy the address
+		// service has that holds a block at all. See Release for what replaces
+		// it.
 		ReclaimPolicy: ipamv1alpha1.ReclaimRetain,
 	}
 
@@ -180,6 +187,13 @@ func Claim(ctx context.Context, ipamClient client.Client, request Request) (int6
 // the claim bound, not the claim's own, which can change. So the claim is
 // deleted only once that allocation reads Retain, and only the claim that was
 // read.
+//
+// This frees the quota unit and never the block. Freeing the block as well
+// belongs in the address service, as a reclaim policy any service can use: it
+// holds a released block through a cooldown and only then returns it to the
+// pool. For an identity, the cooldown is safe only once no location can still
+// import the block's Route Target. Once the address service offers that policy,
+// Claim asks for it, requireRetained accepts it, and nothing else here changes.
 func Release(ctx context.Context, ipamClient client.Client, request Request) error {
 	ipClaim := &ipamv1alpha1.IPClaim{}
 	key := client.ObjectKey{Namespace: request.Namespace, Name: ClaimName(request.NetworkNamespace, request.NetworkName)}

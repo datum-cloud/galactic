@@ -333,6 +333,9 @@ func (r *NetworkFabricIdentityReconciler) claim(
 // is never reissued. A Route Target still installed in a remote location's
 // import policy can then never merge a new network into a dead one's routes.
 // The per-location policies are shared and stay.
+//
+// The block itself goes back to the pool only when the address service frees
+// it after a cooldown; see fabricidentity.Release.
 func (r *NetworkFabricIdentityReconciler) collect(
 	ctx context.Context,
 	namespace string,
