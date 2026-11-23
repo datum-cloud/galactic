@@ -10,5 +10,4 @@ formatter:
 include:
   - "**/*.yaml"
 exclude:
-  - ".git/**"
   - "vendor/**"
