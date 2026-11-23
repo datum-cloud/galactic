@@ -117,9 +117,9 @@ const (
 
 	// EnvCNIEgressPinIdle is how long, as a Go duration, hashed mode keeps a
 	// tenant address on the shard it was first sent to after its last packet,
-	// so adding or draining a shard does not move established sessions. "0"
-	// turns pinning off. The default, DefaultEgressPinIdle, is the egress
-	// shard's longest idle timeout.
+	// so adding or draining a shard does not move established sessions. A zero
+	// duration ("0", "0s", "0m") turns pinning off. The default,
+	// DefaultEgressPinIdle, is the egress shard's longest idle timeout.
 	EnvCNIEgressPinIdle = "GALACTIC_CNI_EGRESS_PIN_IDLE"
 
 	// EnvCNIEgressPoolMinActive is the fewest active egress shards the cluster
@@ -255,10 +255,10 @@ func ParseEgressGroupConfig(getenv func(string) string) (EgressGroupConfig, erro
 	if raw := strings.TrimSpace(getenv(EnvCNIEgressPinIdle)); raw != "" {
 		idle, err := time.ParseDuration(raw)
 		switch {
-		case raw == "0":
-			cfg.PinIdle = 0
 		case err != nil:
 			errs = append(errs, fmt.Errorf("%s=%q: %w", EnvCNIEgressPinIdle, raw, err))
+		case idle == 0:
+			cfg.PinIdle = 0
 		case idle < time.Second:
 			errs = append(errs, fmt.Errorf("%s=%q: want 0 or at least 1s", EnvCNIEgressPinIdle, raw))
 		default:

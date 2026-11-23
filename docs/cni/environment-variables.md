@@ -270,11 +270,11 @@ How long hashed mode keeps a tenant address on the shard its first packet
 went to, after its last packet, as a Go duration. Adding or draining a shard
 then leaves established sessions where they are. A tenant that keeps sending
 keeps its pin, and so keeps a draining shard in use, for as long as it
-sends. `0` turns pins off, and with it any way for a drain to preserve
-sessions. Pins are per compute node, at most 65536. Read by `galactic-cni run`
-only.
+sends. A zero duration (`0`, `0s` or `0m`) turns pins off, and with it any
+way for a drain to preserve sessions. Pins are per compute node, at most
+65536. Read by `galactic-cni run` only.
 
-**Type:** duration (`0`, or at least `1s`) · **Default:** `2h4m`, the egress
+**Type:** duration (zero, or at least `1s`) · **Default:** `2h4m`, the egress
 shard's established-TCP idle timeout
 
 ## `GALACTIC_CNI_EGRESS_POOL_MIN_ACTIVE`
