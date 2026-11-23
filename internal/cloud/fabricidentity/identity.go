@@ -79,9 +79,9 @@ type Request struct {
 	// unrelated network into a dead one's routes. Inheritance is confined to
 	// one namespace and one name; reissue is not confined to anything.
 	//
-	// Inheritance lasts only while the block is held. Once the address service
-	// can free a released block after a cooldown, a name that returns after it
-	// gets a new identity; see Release.
+	// Inheritance lasts only while the block is held. If the identity class
+	// sets a retention lease, a name that returns after the lease runs out gets
+	// a new identity; see Release.
 	NetworkNamespace string
 	NetworkName      string
 }
@@ -137,9 +137,8 @@ func Claim(ctx context.Context, ipamClient client.Client, request Request) (int6
 		// still installed in a remote location's import policy would silently
 		// merge a new network into a dead one's routes, so holding the block is
 		// the safe failure and reissuing it early is not a failure anything can
-		// see. Retain holds it forever; it is the only policy the address
-		// service has that holds a block at all. See Release for what replaces
-		// it.
+		// see. Retain holds it until the identity class's retention lease runs
+		// out, or forever if the class sets none; see Release.
 		ReclaimPolicy: ipamv1alpha1.ReclaimRetain,
 	}
 
@@ -188,12 +187,12 @@ func Claim(ctx context.Context, ipamClient client.Client, request Request) (int6
 // deleted only once that allocation reads Retain, and only the claim that was
 // read.
 //
-// This frees the quota unit and never the block. Freeing the block as well
-// belongs in the address service, as a reclaim policy any service can use: it
-// holds a released block through a cooldown and only then returns it to the
-// pool. For an identity, the cooldown is safe only once no location can still
-// import the block's Route Target. Once the address service offers that policy,
-// Claim asks for it, requireRetained accepts it, and nothing else here changes.
+// This frees the quota unit, never the block. The address service frees the
+// block: it holds a retained allocation for the retention lease its class or
+// pool sets, then returns the block to the pool. With no lease it holds the
+// block forever. For an identity, a lease is safe only if it outlasts the time
+// any location can still import the block's Route Target, since a block freed
+// sooner can be reissued into a dead network's routes.
 func Release(ctx context.Context, ipamClient client.Client, request Request) error {
 	ipClaim := &ipamv1alpha1.IPClaim{}
 	key := client.ObjectKey{Namespace: request.Namespace, Name: ClaimName(request.NetworkNamespace, request.NetworkName)}

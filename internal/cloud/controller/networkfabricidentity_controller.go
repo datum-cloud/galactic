@@ -334,8 +334,8 @@ func (r *NetworkFabricIdentityReconciler) claim(
 // import policy can then never merge a new network into a dead one's routes.
 // The per-location policies are shared and stay.
 //
-// The block itself goes back to the pool only when the address service frees
-// it after a cooldown; see fabricidentity.Release.
+// The block goes back to the pool only when the identity class's retention
+// lease runs out; see fabricidentity.Release.
 func (r *NetworkFabricIdentityReconciler) collect(
 	ctx context.Context,
 	namespace string,
