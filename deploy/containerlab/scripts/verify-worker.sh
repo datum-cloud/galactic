@@ -124,11 +124,23 @@ table_of() {
     jq -r '.[0].linkinfo.info_data.table // empty' || true
 }
 
+# egress_rows NODE SKIP prints the map rows and marks tables with no VRF.
+egress_rows() {
+  local -
+  set -o pipefail
+  local node="$1" skip="$2" vrfs pid
+  vrfs=$(docker exec "${node}" ip -j -d link show type vrf |
+    jq -r '[.[].linkinfo.info_data.table] | join("|")') || return
+  pid=$(docker inspect -f '{{.State.Pid}}' "${node}") || return
+  sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic/egress_route_table" |
+    python3 -I "${SCRIPT_DIR}/worker-rows.py" "${skip}" "${vrfs}"
+}
+
 # snapshot NODE prints NODE's host state that Worker does not own and that
 # is outside the claimed VPCs' VRF tables, one sorted line per item.
 snapshot() {
   local -
-  local node="$1" tables="" pid t vpc
+  local node="$1" tables="" t vpc
   set +e +o pipefail
   for vpc in ${RELATED_VPCS}; do
     t=$(table_of "${node}" "${vpc}")
@@ -159,13 +171,7 @@ snapshot() {
             | "tc \($d) pref \(.pref) \(.kind) \(.options.bpf_name // .options.handle // "-")"' 
       done
     done
-    # A row of a table no VRF holds is garbage galactic-router's GC sweeps
-    # within one interval; it is kept apart as stale_egress_row, which the
-    # comparison leaves out and the leak check counts.
-    vrfs=$(docker exec "${node}" ip -j -d link show type vrf | jq -r '[.[].linkinfo.info_data.table] | join("|")')
-    pid=$(docker inspect -f '{{.State.Pid}}' "${node}")
-    sudo -n bpftool -j map dump pinned "/proc/${pid}/root/sys/fs/bpf/galactic/egress_route_table" |
-      python3 -I "${SCRIPT_DIR}/worker-rows.py" "${tables}" "${vrfs:-none}"
+    egress_rows "${node}" "${tables}" || echo "egress_route_table unreadable"
   } | sort
 }
 
@@ -238,18 +244,20 @@ fixture_restored() {
 # later releases it and removes the rows. Both run every 5 minutes, so that
 # takes up to three intervals.
 no_stale_rows() {
-  local left="" node
+  local left node rows
   for _ in $(seq 96); do
     left=""
     for node in "${NODES[@]}"; do
-      if snapshot "${node}" | grep -q '^stale_egress_row '; then
-        left="${left} ${node}"
+      if ! rows=$(egress_rows "${node}" ""); then
+        left="${left} ${node} (map or VRFs unreadable)"
+      elif grep -q '^stale_egress_row ' <<<"${rows}"; then
+        left="${left} ${node} (stale rows)"
       fi
     done
     [ -z "${left}" ] && return 0
     sleep 10
   done
-  fail "$1: egress_route_table rows of a table no VRF holds remain on${left} after 16 minutes"
+  fail "$1: egress route cleanup unverified after 16 minutes on${left}"
 }
 
 # snap_all LABEL writes every Worker node's snapshot under OUT/LABEL.
@@ -366,7 +374,8 @@ cleanup() {
     log "fixture check: dfw-worker2 as it was before the fixture"
     fixture_restored
   fi
-  if [ "${status}" -eq 0 ] && [ "${#NODES[@]}" -gt 0 ]; then
+  # A failed check can still leave fixture routes behind for other checks.
+  if [ "${#NODES[@]}" -gt 0 ]; then
     log "leak check: rows of tables no VRF holds"
     no_stale_rows "cleanup"
   fi
