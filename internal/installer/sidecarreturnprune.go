@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -27,6 +26,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/vrf"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 // Leftovers of the retired host-side return path of the ingress sidecar.
@@ -34,7 +34,7 @@ import (
 // galactic-worker now gives the sidecar its return path. Earlier installers
 // built one themselves, per advertised gateway address, from:
 //
-//   - a routing table sidecarReturnTableBase+VRFID holding a /128 device route
+//   - a routing table sidecarreturn.TableBase+VRFID holding a /128 device route
 //     for the gateway address out the host side of the sidecar pod's primary
 //     interface;
 //   - a PERMANENT neighbor for that address on the same interface;
@@ -44,17 +44,10 @@ import (
 //
 // Nothing removes these once the installer no longer writes them, and the
 // vrf_table row keeps steering that VPC's replies into a table that no longer
-// leads to the sidecar. The prune below removes them once, at installer
-// startup, so an upgraded node does not keep them.
+// leads to the sidecar. The prune below removes them after the endpoint no
+// longer needs it, as part of the installer reconciliation.
 
-const (
-	// sidecarReturnTableBase and sidecarReturnTableMax bound the host routing
-	// table IDs the retired return path allocated, one per Argument. No other
-	// writer uses them: host tenant VRF tables stop at vrf.HostTableIDMax,
-	// below the range, and sidecar VRF tables live in pod namespaces.
-	sidecarReturnTableBase = 0xF000
-	sidecarReturnTableMax  = sidecarReturnTableBase + uformat.ArgumentMax
-)
+const sidecarReturnTableMax = sidecarreturn.TableBase + uformat.ArgumentMax
 
 // retiredSidecarReturnPruned counts what one prune removed.
 type retiredSidecarReturnPruned struct {
@@ -66,56 +59,6 @@ type retiredSidecarReturnPruned struct {
 	// could be resolved for their Argument, so no fence could be taken. The
 	// GC sweep removes such a row once its BGPVRFInstance is gone.
 	vrfRowsKept int
-}
-
-func (p retiredSidecarReturnPruned) total() int {
-	return p.vrfRows + p.routes + p.neighbors + p.infraRows
-}
-
-// startRetiredSidecarReturnPrune runs pruneRetiredSidecarReturn once, off the
-// caller's goroutine, against the loaded datapath in st, and logs the result.
-// It does nothing when st has no loaded datapath. Without a Kubernetes client
-// it still removes the routes, neighbors and infra rows, and leaves the
-// vrf_table rows to the GC sweep.
-func startRetiredSidecarReturnPrune(ctx context.Context, st ebpfDatapathState) {
-	if st.objs == nil {
-		return
-	}
-	go func() {
-		// The VPCs are read from the API only for a retired vrf_table row,
-		// so a node with nothing left over makes no API call.
-		var once bool
-		vpcs := map[uint16]string{}
-		vpcOf := func(argument uint16) (string, bool) {
-			if !once {
-				once = true
-				if st.k8sClient == nil || st.nodeName == "" {
-					return "", false
-				}
-				found, err := sidecarReturnVPCs(ctx, st.k8sClient, st.namespace, st.nodeName)
-				if err != nil {
-					slog.Warn("Could not resolve VPCs for the retired sidecar return path's vrf_table rows; "+
-						"leaving those rows to the GC sweep", "err", err)
-				} else {
-					vpcs = found
-				}
-			}
-			vpc, ok := vpcs[argument]
-			return vpc, ok
-		}
-		pruned, err := pruneRetiredSidecarReturn(ctx, attach.PinDir, vpcOf)
-		attrs := []any{"vrfRows", pruned.vrfRows, "routes", pruned.routes, "neighbors", pruned.neighbors,
-			"infraRows", pruned.infraRows, "vrfRowsKept", pruned.vrfRowsKept}
-		switch {
-		case err != nil:
-			slog.Warn("Could not remove all leftovers of the retired sidecar return path; "+
-				"the next installer start retries", append(attrs, "err", err)...)
-		case pruned.total() > 0 || pruned.vrfRowsKept > 0:
-			slog.Info("Removed leftovers of the retired sidecar return path", attrs...)
-		default:
-			slog.Debug("No leftovers of the retired sidecar return path found")
-		}
-	}()
 }
 
 // pruneRetiredSidecarReturn removes the state the retired sidecar return path
@@ -130,7 +73,7 @@ func startRetiredSidecarReturnPrune(ctx context.Context, st ebpfDatapathState) {
 // routes, and the infra rows last. Every step is attempted; the error joins
 // every failure.
 func pruneRetiredSidecarReturn(
-	ctx context.Context, pinDir string, vpcOf func(argument uint16) (string, bool),
+	ctx context.Context, pinDir string, vpcOf func(argument uint16) (string, bool), keep sidecarReturnKeep,
 ) (retiredSidecarReturnPruned, error) {
 	var pruned retiredSidecarReturnPruned
 
@@ -141,51 +84,56 @@ func pruneRetiredSidecarReturn(
 	}
 	var leftover []netlink.Route
 	for _, r := range routes {
-		if r.Table >= sidecarReturnTableBase && r.Table <= sidecarReturnTableMax {
+		switch {
+		case r.Table >= sidecarreturn.TableBase && r.Table <= sidecarReturnTableMax:
+			if !keep.arguments[uint16(r.Table-sidecarreturn.TableBase)] { //nolint:gosec // reserved range is bounded
+				leftover = append(leftover, r)
+			}
+		case r.Protocol == sidecarreturn.RouteProtocol && !keep.routes[compatibilityRouteKey(r)]:
 			leftover = append(leftover, r)
 		}
 	}
 
 	var errs []error
-	removed, kept, err := pruneRetiredSidecarReturnVRFRows(ctx, pinDir, vpcOf)
+	removed, kept, err := pruneRetiredSidecarReturnVRFRows(ctx, pinDir, vpcOf, keep.arguments)
 	pruned.vrfRows, pruned.vrfRowsKept = removed, kept
 	errs = append(errs, err)
 
-	ifindexes := map[uint32]bool{}
+	retired := make(map[sidecarReturnNeighborKey]netlink.Route, len(keep.retired)+len(leftover))
+	for _, route := range keep.retired {
+		retired[sidecarNeighborKey(route)] = route
+	}
 	for i := range leftover {
 		r := leftover[i]
-		if r.LinkIndex > 0 {
-			ifindexes[uint32(r.LinkIndex)] = true //nolint:gosec // a kernel ifindex
-		}
-		n, err := pruneRetiredSidecarReturnNeighbor(r)
-		pruned.neighbors += n
-		errs = append(errs, err)
 		if err := netlink.RouteDel(&r); err != nil && !errors.Is(err, unix.ESRCH) {
 			errs = append(errs, fmt.Errorf("delete route %v from table %d: %w", r.Dst, r.Table, err))
 			continue
 		}
 		pruned.routes++
+		retired[sidecarNeighborKey(r)] = r
 	}
 
+	// Neighbor keys are shared across tables. Another VPC on this veth can
+	// still need the same neighbor after this VPC hands its gateway over.
+	ifindexes := map[uint32]bool{}
+	for key, route := range retired {
+		if key.ifindex <= 0 {
+			continue
+		}
+		if !keep.neighbors[key] {
+			n, err := pruneRetiredSidecarReturnNeighbor(route)
+			pruned.neighbors += n
+			errs = append(errs, err)
+		}
+		ifindex := uint32(key.ifindex) //nolint:gosec // positive kernel ifindex
+		if !keep.ifindexes[ifindex] {
+			ifindexes[ifindex] = true
+		}
+	}
 	n, err := pruneRetiredSidecarReturnInfra(pinDir, ifindexes)
 	pruned.infraRows = n
 	errs = append(errs, err)
 	return pruned, errors.Join(errs...)
-}
-
-// isRetiredSidecarReturnRow reports whether a vrf_table row with this key and
-// value is one the retired return path wrote: under a Block other than the
-// ingress sidecar's, pointing at that Argument's table in the retired range,
-// with EgressKindVeth. CNI and galactic-worker point a VPC's row at its host
-// VRF table, which is never in that range.
-func isRetiredSidecarReturnRow(block uint64, argument uint16, tableID, egressKind uint32) bool {
-	if block == uformat.BlockIngressSidecar {
-		return false
-	}
-	if argument < uformat.ArgumentMin || argument > uformat.ArgumentMax {
-		return false
-	}
-	return tableID == sidecarReturnTableBase+uint32(argument) && egressKind == usidmap.EgressKindVeth
 }
 
 // pruneRetiredSidecarReturnVRFRows repairs every retired vrf_table row whose
@@ -196,7 +144,7 @@ func isRetiredSidecarReturnRow(block uint64, argument uint16, tableID, egressKin
 // returns how many rows it repaired or removed and how many it kept for want
 // of a VPC. A datapath with no pinned maps has none.
 func pruneRetiredSidecarReturnVRFRows(
-	ctx context.Context, pinDir string, vpcOf func(argument uint16) (string, bool),
+	ctx context.Context, pinDir string, vpcOf func(argument uint16) (string, bool), keep map[uint16]bool,
 ) (removed, kept int, err error) {
 	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
@@ -213,7 +161,7 @@ func pruneRetiredSidecarReturnVRFRows(
 	}
 	var errs []error
 	for _, row := range rows {
-		if !isRetiredSidecarReturnRow(row.Block, row.Argument, row.VRFTableID, row.EgressKind) {
+		if keep[row.Argument] || !sidecarreturn.LegacyRow(row) {
 			continue
 		}
 		vpc, ok := vpcOf(row.Argument)
@@ -225,7 +173,7 @@ func pruneRetiredSidecarReturnVRFRows(
 		err := vpcfence.Write(ctx, vpc, func() error {
 			cur, present, err := registry.VRF.Get(row.Block, row.Argument)
 			if err != nil || !present ||
-				!isRetiredSidecarReturnRow(cur.Block, cur.Argument, cur.VRFTableID, cur.EgressKind) {
+				!sidecarreturn.LegacyRow(cur) {
 				return err
 			}
 			// The retired path overwrote the VPC's canonical row, the one CNI
@@ -320,12 +268,25 @@ func pruneRetiredSidecarReturnInfra(pinDir string, ifindexes map[uint32]bool) (i
 		if ifindex >= ifindexvrfmap.SidecarIfindexBase {
 			continue
 		}
+		link, err := netlink.LinkByIndex(int(ifindex))
+		var missing netlink.LinkNotFoundError
+		if err != nil && !errors.As(err, &missing) {
+			errs = append(errs, err)
+			continue
+		}
+		if link != nil && (attach.IsInternalLink(link) || intf.IsGalacticLinkName(link.Attrs().Name)) {
+			continue
+		}
 		infra, err := policy.IsInfra(ifindex)
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		if !infra {
+			continue
+		}
+		if err := removeSidecarEgressKind(pinDir, ifindex); err != nil {
+			errs = append(errs, err)
 			continue
 		}
 		if err := policy.RemoveInfra(ifindex); err != nil {
@@ -337,13 +298,29 @@ func pruneRetiredSidecarReturnInfra(pinDir string, ifindexes map[uint32]bool) (i
 	return removed, errors.Join(errs...)
 }
 
+func removeSidecarEgressKind(pinDir string, ifindex uint32) error {
+	kinds, closer, err := ifindexvrfmap.OpenPinnedEgressKind(pinDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = closer.Close() }()
+	return kinds.Unregister(ifindex)
+}
+
+type sidecarReturnVPC struct {
+	name, router string
+}
+
 // sidecarReturnVPCs maps each VRFID of the BGPVRFInstances on this node's
 // Galactic routers to its VPC, decoded from the instance name's leading
 // segment. A VRFID claimed by two VPCs, or whose name does not decode, is left
 // out.
 func sidecarReturnVPCs(
 	ctx context.Context, k8s client.Client, namespace, nodeName string,
-) (map[uint16]string, error) {
+) (map[uint16]sidecarReturnVPC, error) {
 	routerNames, err := galacticRouterNamesForNode(ctx, k8s, namespace, nodeName)
 	if err != nil {
 		return nil, err
@@ -352,7 +329,7 @@ func sidecarReturnVPCs(
 	if err := k8s.List(ctx, list, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list BGPVRFInstances in namespace %s: %w", namespace, err)
 	}
-	out := map[uint16]string{}
+	out := map[uint16]sidecarReturnVPC{}
 	ambiguous := map[uint16]bool{}
 	for i := range list.Items {
 		inst := &list.Items[i]
@@ -371,10 +348,11 @@ func sidecarReturnVPCs(
 			continue
 		}
 		argument := uint16(inst.Spec.VRFID)
-		if prev, ok := out[argument]; ok && prev != vpc {
+		entry := sidecarReturnVPC{vpc, inst.Spec.RouterRef.Name}
+		if prev, ok := out[argument]; ok && prev != entry {
 			ambiguous[argument] = true
 		}
-		out[argument] = vpc
+		out[argument] = entry
 	}
 	for argument := range ambiguous {
 		delete(out, argument)

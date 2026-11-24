@@ -70,7 +70,7 @@ func activationFixture(t *testing.T, state tpmap.State, quarantined bool) (pinDi
 		t.Fatal(err)
 	}
 	cfg := bgpConfig{srv6Locator: "2001:db8:1::/48", nodeID: 5}
-	if _, err := registerEBPFDatapath(cfg, testVPC, testAttachment, ifaceTypeVeth, 42, pinDir, nil); err != nil {
+	if _, err := registerEBPFDatapath(cfg, testVPC, testAttachment, ifaceTypeVeth, 42, pinDir, nil, nil); err != nil {
 		t.Fatalf("registerEBPFDatapath: %v", err)
 	}
 	return pinDir, host, maps

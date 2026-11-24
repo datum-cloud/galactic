@@ -149,7 +149,7 @@ func TestRoutedLinkSurvivesInstallerRepairRoot(t *testing.T) {
 	check("after the host-only port restore")
 
 	if _, err := pruneRetiredSidecarReturn(context.Background(), pinDir,
-		func(uint16) (string, bool) { return "", false }); err != nil {
+		func(uint16) (string, bool) { return "", false }, sidecarReturnKeep{}); err != nil {
 		t.Fatal(err)
 	}
 	check("after the retired sidecar return prune")

@@ -48,8 +48,9 @@ subjects:
 # On a node where an attachment's VPC has no workload, the node agent creates
 # the VPC's node state as CNI ADD does: it lists the BGPRouters to find its
 # node's, and creates or updates the node's BGPVRFInstance for the VPC under
-# the node's Argument lock. Only in the namespace the cell's BGP objects live
-# in, which --bgp-namespace names; an agent given another namespace needs this
+# the node's Argument lock. It reads the legacy ingress advertisement when
+# keeping a return route across a VRF table change. This role is scoped to
+# the cell's BGP namespace. An agent given another --bgp-namespace needs this
 # Role and RoleBinding there instead. It never deletes one; galactic-router GC
 # does.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -64,6 +65,9 @@ rules:
   - apiGroups: [galactic.datumapis.com]
     resources: [bgpvrfinstances]
     verbs: [get, list, create, update]
+  - apiGroups: [galactic.datumapis.com]
+    resources: [bgpadvertisements]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

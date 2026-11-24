@@ -89,6 +89,9 @@ type Registration struct {
 	// the VRF's ::/0 NAT66 default. Empty is valid and registers nothing.
 	LocalPrefixes []string
 	Egress        EgressConfig
+	// PreserveLegacyReturn prepares an existing legacy path before changing
+	// the VPC's shared vrf_table row. The CNI caller holds the VPC fence.
+	PreserveLegacyReturn func(usidmap.VRFEntry, uint32) error
 }
 
 // RegisterDatapath registers one attachment against the eBPF uSID datapath's
@@ -148,6 +151,17 @@ func RegisterDatapath(pinDir string, r Registration) (registered bool, err error
 		return false, fmt.Errorf("register eBPF function_table entry: %w", err)
 	}
 
+	if r.PreserveLegacyReturn != nil {
+		row, present, err := registry.VRF.Get(block, r.Argument)
+		if err != nil {
+			return false, err
+		}
+		if present {
+			if err := r.PreserveLegacyReturn(row, vrfTableID); err != nil {
+				return false, err
+			}
+		}
+	}
 	if err := registry.VRF.Register(block, r.Argument, vrfTableID, egressKind); err != nil {
 		return false, fmt.Errorf("register eBPF vrf_table entry: %w", err)
 	}

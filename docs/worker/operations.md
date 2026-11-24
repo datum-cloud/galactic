@@ -76,6 +76,21 @@ to the uplinks (the lab uses `eth0 bond+`). Worker creates links named
 `G<VPC><key>N`, `T`, `R` and `P`, and a device pattern that matches them breaks
 Local delivery.
 
+### Roll out ingress sidecars separately
+
+The installer preserves the return path for a legacy `galactic-vrf` sidecar
+while its gateway advertisement and primary veth still describe a live
+endpoint. You can upgrade Worker and the node installer before rolling the
+cluster's sidecar image and controller.
+
+The installer keeps a fallback route in the VPC's host table while the legacy
+sidecar runs. If Worker, CNI ADD, or garbage collection repoints the shared
+SRv6 entry first, it carries the active legacy route into the VPC table before
+switching the entry. When Worker advertises the same gateway and its routed
+link can deliver replies, the installer retires the fallback. On rollback,
+the replacement sidecar can publish its legacy gateway again and the installer
+restores the path. Replacing the proxy pod interrupts the connections it held.
+
 ## Read the diagnostics
 
 ### Inspect

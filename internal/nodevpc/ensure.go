@@ -20,6 +20,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 // ErrNoSRv6Identity is returned by Ensure when the node's BGPRouter has no
@@ -104,7 +105,8 @@ func Ensure(ctx context.Context, cfg Config, vpc string) (State, error) {
 	}
 
 	state := State{Router: router, Table: table, Block: block, Argument: uint16(vrfID), Instance: name}
-	if err := ensureVRFRow(cfg.PinDir, state, owner); err != nil {
+	scope := sidecarreturn.Scope{K8s: cfg.K8s, Namespace: cfg.Namespace, Node: cfg.Node, VPC: vpc, Router: router.Name}
+	if err := ensureVRFRow(ctx, cfg.PinDir, state, owner, scope); err != nil {
 		return State{}, err
 	}
 	return state, nil
@@ -170,15 +172,17 @@ func prepare(ctx context.Context, cfg Config, vpc string) (prepared, error) {
 // ensureVRFRow makes the vrf_table row for s's (Block, Argument) map to s's
 // table. A missing row is written with the veth egress kind. A row that maps
 // to another table is rewritten with its egress kind kept, as GC's repair
-// does: it was left by a VPC that held the Argument before, and would deliver
-// this VPC's traffic into that VPC's VRF. A row already on s's table is left
-// alone, since CNI ADD writes it with the egress kind of its own interface.
+// does. A live legacy ingress sidecar route is carried forward before
+// redirecting the row. A row already on s's table is left alone, since CNI
+// ADD writes it with the egress kind of its own interface.
 //
 // The key's vpc_attribution_table row is removed when it names a VPC other
 // than owner's, so the key's traffic is reported unattributed rather than
 // charged to that VPC; a CNI ADD of this VPC writes it again. A missing row is
 // not written: an edge attachment has no VPCAttachment to name.
-func ensureVRFRow(pinDir string, s State, owner attributionOwner) error {
+func ensureVRFRow(
+	ctx context.Context, pinDir string, s State, owner attributionOwner, scope sidecarreturn.Scope,
+) error {
 	registry, closer, err := usidmap.OpenPinnedRegistry(pinDir)
 	if err != nil {
 		return fmt.Errorf("open pinned uSID maps: %w", err)
@@ -202,6 +206,9 @@ func ensureVRFRow(pinDir string, s State, owner attributionOwner) error {
 	}
 	kind := usidmap.EgressKindVeth
 	if ok {
+		if err := scope.Preserve(ctx, row, s.Table); err != nil {
+			return err
+		}
 		kind = row.EgressKind
 		slog.Warn("nodevpc: rewriting vrf_table entry that maps to another VRF's table",
 			"block", s.Block, "argument", s.Argument, "from", row.VRFTableID, "to", s.Table)

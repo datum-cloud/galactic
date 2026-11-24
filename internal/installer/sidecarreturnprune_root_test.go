@@ -20,6 +20,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 // The fixture TestPruneRetiredSidecarReturn writes: a retired row whose VPC
@@ -94,7 +95,7 @@ func TestPruneRetiredSidecarReturn(t *testing.T) {
 
 	gateway := net.ParseIP("2001:db8:aa::5")
 	host := &net.IPNet{IP: gateway, Mask: net.CIDRMask(128, 128)}
-	for _, table := range []int{sidecarReturnTableBase + int(pruneTestRetired), pruneTestHostTable} {
+	for _, table := range []int{sidecarreturn.TableBase + int(pruneTestRetired), pruneTestHostTable} {
 		if err := netlink.RouteAdd(&netlink.Route{Dst: host, LinkIndex: ifindex, Table: table}); err != nil {
 			t.Fatalf("add route in table %#x: %v", table, err)
 		}
@@ -108,9 +109,9 @@ func TestPruneRetiredSidecarReturn(t *testing.T) {
 		argument uint16
 		table    uint32
 	}{
-		{pruneTestRetired, sidecarReturnTableBase + uint32(pruneTestRetired)},
-		{pruneTestRestored, sidecarReturnTableBase + uint32(pruneTestRestored)},
-		{pruneTestUnknown, sidecarReturnTableBase + uint32(pruneTestUnknown)},
+		{pruneTestRetired, sidecarreturn.TableBase + uint32(pruneTestRetired)},
+		{pruneTestRestored, sidecarreturn.TableBase + uint32(pruneTestRestored)},
+		{pruneTestUnknown, sidecarreturn.TableBase + uint32(pruneTestUnknown)},
 		{pruneTestCNI, pruneTestHostTable},
 	} {
 		if err := registry.VRF.Register(pruneTestBlock, r.argument, r.table, usidmap.EgressKindVeth); err != nil {
@@ -137,7 +138,7 @@ func TestPruneRetiredSidecarReturn(t *testing.T) {
 		}
 		return "", false
 	}
-	pruned, err := pruneRetiredSidecarReturn(context.Background(), pinDir, vpcOf)
+	pruned, err := pruneRetiredSidecarReturn(context.Background(), pinDir, vpcOf, sidecarReturnKeep{})
 	if err != nil {
 		t.Fatalf("pruneRetiredSidecarReturn: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestPruneRetiredSidecarReturn(t *testing.T) {
 
 	checkRetiredSidecarReturnPruned(t, registry, policy, ifindex, gateway)
 
-	again, err := pruneRetiredSidecarReturn(context.Background(), pinDir, vpcOf)
+	again, err := pruneRetiredSidecarReturn(context.Background(), pinDir, vpcOf, sidecarReturnKeep{})
 	if err != nil {
 		t.Fatalf("second pruneRetiredSidecarReturn: %v", err)
 	}
@@ -176,7 +177,7 @@ func checkRetiredSidecarReturnPruned(
 		}
 	}
 	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6,
-		&netlink.Route{Table: sidecarReturnTableBase + int(pruneTestRetired)}, netlink.RT_FILTER_TABLE)
+		&netlink.Route{Table: sidecarreturn.TableBase + int(pruneTestRetired)}, netlink.RT_FILTER_TABLE)
 	if err != nil || len(routes) != 0 {
 		t.Errorf("retired table holds %v (err %v), want empty", routes, err)
 	}
