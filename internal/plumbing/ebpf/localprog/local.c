@@ -766,9 +766,12 @@ int local_pair_rx(struct __sk_buff *skb)
 	// the packet ran generic XDP, whose redirect transmits the received skb
 	// with its metadata; a native redirect rebuilds the skb without it. The
 	// pop also removes a tag in the frame itself, which a pair, untagged by
-	// contract, never carries; with neither present it is a no-op.
-	if (bpf_skb_vlan_pop(skb))
+	// contract, never carries; with neither present it is a no-op. A packet
+	// whose tag cannot be removed is not deliverable IPv6, and counts so.
+	if (bpf_skb_vlan_pop(skb)) {
+		lt_count(LT_STAT_PAIR_NOT_IPV6);
 		return TC_ACT_SHOT;
+	}
 
 	struct usid_ip6hdr *ip6 = lt_ip6(skb);
 
