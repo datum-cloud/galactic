@@ -131,7 +131,7 @@ func newRig(t *testing.T, cell string, mode xdpmode.Mode) *rig {
 	t.Helper()
 	requireRoot(t)
 	r := &rig{t: t, cell: cell, mode: mode, pods: &fakePods{}}
-	r.pin = fmt.Sprintf("/sys/fs/bpf/galactic-local-test-%d-%s", os.Getpid(), cell)
+	r.pin = fmt.Sprintf("/sys/fs/bpf/galactic-local-test-%d-%s-%s", os.Getpid(), cell, mode)
 	_ = os.RemoveAll(r.pin)
 	t.Cleanup(func() { _ = os.RemoveAll(r.pin) })
 

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/vishvananda/netlink"
+
 	workerv1alpha1 "go.datum.net/galactic/api/galactic/worker/v1alpha1"
 	"go.datum.net/galactic/internal/plumbing/ebpf/xdpmode"
 	"go.datum.net/galactic/internal/worker/module"
@@ -38,18 +40,20 @@ func wantState(t *testing.T, st module.State, c module.Claim, programmed, fwd, r
 }
 
 // cells are the receiving devices and XDP modes local.tap and
-// local.veth_pair are qualified on (docs/worker/qualification.md). The NAT
-// end of a pair always runs native.
+// local.veth_pair are qualified on (docs/worker/qualification.md), with the
+// netlink kind of the device the node addresses. The NAT end of a pair always
+// runs native.
 var cells = []struct {
 	name string
 	mode xdpmode.Mode
+	kind string
 }{
-	{"plain", xdpmode.Native},
-	{"plain", xdpmode.Generic},
-	{cellVLAN, xdpmode.Native},
-	{cellVLAN, xdpmode.Generic},
-	{cellBond, xdpmode.Native},
-	{cellBond, xdpmode.Generic},
+	{"plain", xdpmode.Native, "veth"},
+	{"plain", xdpmode.Generic, "veth"},
+	{cellVLAN, xdpmode.Native, "vlan"},
+	{cellVLAN, xdpmode.Generic, "vlan"},
+	{cellBond, xdpmode.Native, "bond"},
+	{cellBond, xdpmode.Generic, "bond"},
 }
 
 // TestEntryPathsRoot injects frames on every supported entry path and checks
@@ -60,7 +64,17 @@ var cells = []struct {
 func TestEntryPathsRoot(t *testing.T) {
 	for _, cell := range cells {
 		t.Run(fmt.Sprintf("%s-%s", cell.name, cell.mode), func(t *testing.T) {
-			r := newRig(t, cell.name+"-"+cell.mode.String(), cell.mode)
+			r := newRig(t, cell.name, cell.mode)
+			r.in(r.node, func() error {
+				l, err := netlink.LinkByName(r.rx)
+				if err != nil {
+					return err
+				}
+				if l.Type() != cell.kind {
+					return fmt.Errorf("the receiving device %s is a %s, want a %s", r.rx, l.Type(), cell.kind)
+				}
+				return nil
+			})
 			for _, v := range r.vpcs {
 				claims := r.claims(v)
 				st := r.reconcile(v.vpc, claims)
