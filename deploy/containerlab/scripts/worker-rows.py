@@ -3,8 +3,8 @@
 Reads `bpftool -j map dump` output on stdin, formatted or raw, and prints one
 line per entry whose table is not in argv[1], a "|"-separated list of table
 IDs, as verify-worker.sh snapshots it. argv[2], when given, lists the tables
-a VRF on the node holds; an entry of any other table is garbage the router's
-GC sweeps, and is printed as stale_egress_row instead. The raw layout is
+a VRF on the node holds. Entries of other tables are printed as
+stale_egress_row. The raw layout is
 struct egress_route_key and egress_route_value, packed and little endian, as
 worker-fabric.sh decodes it.
 """
@@ -24,8 +24,9 @@ def raw(field):
 try:
     entries = json.load(sys.stdin)
 except ValueError:
-    print("egress_route_table unreadable")
-    sys.exit(0)
+    sys.exit("egress_route_table unreadable")
+if not isinstance(entries, list):
+    sys.exit("egress_route_table dump is not a list")
 out = []
 for e in entries:
     f = e.get("formatted")
