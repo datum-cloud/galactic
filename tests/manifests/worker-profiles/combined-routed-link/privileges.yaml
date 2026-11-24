@@ -261,9 +261,11 @@ roles:
     - galactic.datumapis.com/vpcattachments:list
     - galactic.datumapis.com/vpcattachments:watch
   Role/galactic-system/galactic-worker:
+    - galactic.datumapis.com/bgpadvertisements:create
     - galactic.datumapis.com/bgpadvertisements:delete
     - galactic.datumapis.com/bgpadvertisements:get
     - galactic.datumapis.com/bgpadvertisements:list
+    - galactic.datumapis.com/bgpadvertisements:update
     - galactic.datumapis.com/bgpvrfinstances:create
     - galactic.datumapis.com/bgpvrfinstances:delete
     - galactic.datumapis.com/bgpvrfinstances:get

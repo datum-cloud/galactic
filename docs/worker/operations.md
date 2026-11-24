@@ -52,9 +52,9 @@ with `hostNetwork`, `hostPID` and the capabilities `NET_ADMIN`, which
 programs VRFs, links, routes, neighbors and tc filters, and `BPF`, which
 opens the pinned maps and loads the Local programs.
 
-Routed links (`local.routed_link` and `local.socket`, which the galactic-vrf
-sidecar uses) need two more. Compose `config/galactic-worker/profiles/routed-link`
-into a placement whose allowlist grants either:
+Compose `config/galactic-worker/profiles/routed-link` into a placement whose
+allowlist grants `local.routed_link` or `local.socket`, which the galactic-vrf
+sidecar uses. The Component adds:
 
 - `SYS_PTRACE`, because Worker finds a routed link's pod end through the
   pod's `/proc/<pid>/ns/net`, and the kernel's ptrace access check refuses
@@ -62,6 +62,8 @@ into a placement whose allowlist grants either:
 - `SYS_ADMIN`, because setting the pod end up enters that namespace with
   `setns`. Kubernetes refuses `allowPrivilegeEscalation: false` beside it, so
   the Component removes that setting.
+- Permission to create and update BGPAdvertisements in `galactic-system`,
+  where Worker publishes return prefixes for routed-link and socket claims.
 
 Without the Component, Worker detects the missing capabilities at start,
 logs it, and reports both capabilities unavailable with

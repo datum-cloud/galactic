@@ -576,28 +576,26 @@ over the routed link. Worker writes the BGPVRFInstance of any VPC with claims
 through `nodevpc.Ensure`, under the Argument lock; the sidecar writes neither
 resource.
 
-| Field                                            | Value                                                                                                                                                         |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Name                                             | The attachment's own advertisement name, `<vpc>-<vpcAttachment>-<node>` (`crdnames.BGPAdvertisementName`); from its UID when its status records no identifier |
-| Label `galactic.datumapis.com/worker-vpc`        | The VPC                                                                                                                                                       |
-| Label `galactic.datumapis.com/worker-node`       | The node                                                                                                                                                      |
-| Label `galactic.datumapis.com/worker-attachment` | The claim attachment                                                                                                                                          |
-| Annotation `galactic.datumapis.com/worker-pod`   | The UID of the pod the claim serves                                                                                                                           |
+| Field                                            | Value                                                                                                                                                                                   |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Name                                             | The tenant name (`crdnames.BGPAdvertisementName`) when available to Worker. The UID name (`crdnames.WorkerAdvertisementName`) when another writer owns it or no identifier is recorded. |
+| Label `galactic.datumapis.com/worker-vpc`        | The VPC                                                                                                                                                                                 |
+| Label `galactic.datumapis.com/worker-node`       | The node                                                                                                                                                                                |
+| Label `galactic.datumapis.com/worker-attachment` | The claim attachment                                                                                                                                                                    |
+| Annotation `galactic.datumapis.com/worker-pod`   | The UID of the pod the claim serves                                                                                                                                                     |
 
-Naming the advertisement after the attachment makes it the attachment's
-tenant advertisement for galactic-controller, so the attachment reports
-Programmed once galactic-router advertises it. No CNI advertisement changes:
-CNI names an advertisement after an attachment it attached, which a proxy
-attachment never is, and Worker refuses to replace an advertisement of that
-name it did not write. An advertisement an earlier Worker named after the
-attachment's UID is deleted and replaced on the next commit of its scope, since
-Worker keeps exactly the advertisements it wants for a VPC.
+For a Worker-only proxy attachment, galactic-controller uses the tenant
+advertisement to project the attachment's Programmed condition once
+galactic-router advertises it. If CNI already owns the tenant advertisement,
+Worker leaves it intact and publishes the claim's return prefixes under the
+attachment's UID. Worker withdraws only its own advertisements when a claim
+ends or its advertisement name changes.
 
 The advertisement has no netns annotation, so galactic-router GC never judges
 it. Worker rewrites it when the claim moves to the owner's new pod, and
 withdraws it when the pod is gone, on release, on lease expiry, and before it
-reclaims a VPC with no claims. Worker needs RBAC to write BGPAdvertisements;
-[#1441](https://github.com/datum-cloud/galactic/issues/1441) packages it.
+reclaims a VPC with no claims. The routed-link Component grants Worker
+permission to create and update BGPAdvertisements in `galactic-system`.
 
 **Placement.** The Worker on a node that runs the proxy must be deployed
 with the routed-link profile Component

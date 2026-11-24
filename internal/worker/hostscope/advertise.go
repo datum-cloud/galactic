@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,10 +25,9 @@ import (
 // node's host VRF, where the routed link's /128 routes deliver it.
 type Advertisement struct {
 	AttachmentUID string
-	// AttachmentID is the attachment's base62 identifier. With it the
-	// advertisement is named as the attachment's own tenant advertisement,
-	// so galactic-controller projects the attachment's Programmed condition
-	// and node from it; without it, the name uses the UID.
+	// AttachmentID is the attachment's base62 identifier. Worker uses the
+	// tenant advertisement name to support status projection when it has
+	// this identifier and the name is available to Worker.
 	AttachmentID string
 	// PodUID is the pod the claim's routed link serves.
 	PodUID    string
@@ -67,7 +67,10 @@ func (k *Kernel) Advertise(ctx context.Context, vpc string, want []Advertisement
 			return fmt.Errorf("BGPVRFInstance %s names no router or export route target", key.Name)
 		}
 		for _, a := range want {
-			name := advertisementName(vpc, a, k.Node)
+			name, err := k.advertisementName(ctx, vpc, a)
+			if err != nil {
+				return err
+			}
 			keep[name] = true
 			if err := k.applyAdvertisement(ctx, vpc, name, a, inst); err != nil {
 				return err
@@ -78,7 +81,8 @@ func (k *Kernel) Advertise(ctx context.Context, vpc string, want []Advertisement
 		if keep[adv.Name] {
 			continue
 		}
-		if err := k.K8s.Delete(ctx, &adv); err != nil && !apierrors.IsNotFound(err) {
+		err := k.K8s.Delete(ctx, &adv, client.Preconditions{UID: &adv.UID, ResourceVersion: &adv.ResourceVersion})
+		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete BGPAdvertisement %s: %w", adv.Name, err)
 		}
 	}
@@ -109,8 +113,13 @@ func (k *Kernel) Current(ctx context.Context, vpc string, want []Advertisement) 
 		byName[adv.Name] = adv
 	}
 	for _, a := range want {
-		adv, ok := byName[advertisementName(vpc, a, k.Node)]
-		if !ok || adv.Annotations[crdnames.AnnotationWorkerPod] != a.PodUID ||
+		name, err := k.advertisementName(ctx, vpc, a)
+		if err != nil {
+			return false, err
+		}
+		adv, ok := byName[name]
+		if !ok || adv.Labels[crdnames.LabelWorkerAttachment] != a.AttachmentUID ||
+			adv.Annotations[crdnames.AnnotationWorkerPod] != a.PodUID ||
 			!slices.Equal(adv.Spec.Prefixes, advertisedPrefixes(a.Addresses)) || !matchesInstance(adv, inst) {
 			return false, nil
 		}
@@ -125,7 +134,9 @@ func (k *Kernel) listAdvertisements(ctx context.Context, vpc string) ([]bgpv1alp
 		client.MatchingLabels{crdnames.LabelWorkerVPC: vpc, crdnames.LabelWorkerNode: k.Node}); err != nil {
 		return nil, fmt.Errorf("list Worker BGPAdvertisements of VPC %s: %w", vpc, err)
 	}
-	return list.Items, nil
+	return slices.DeleteFunc(list.Items, func(adv bgpv1alpha1.BGPAdvertisement) bool {
+		return hasCNIContainer(&adv)
+	}), nil
 }
 
 // applyAdvertisement creates or updates the advertisement name for a.
@@ -134,19 +145,12 @@ func (k *Kernel) applyAdvertisement(ctx context.Context, vpc, name string, a Adv
 	prefixes := advertisedPrefixes(a.Addresses)
 	vrfID := inst.Spec.VRFID
 	function := bgpv1alpha1.SRv6FunctionEndDT46
-	// The name is the attachment's tenant advertisement name, which CNI
-	// would use for an attachment it attached. Worker never takes over an
-	// advertisement it did not write.
-	var existing bgpv1alpha1.BGPAdvertisement
-	err := k.K8s.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: name}, &existing)
-	switch {
-	case err == nil && existing.Labels[crdnames.LabelWorkerVPC] != vpc:
-		return fmt.Errorf("BGPAdvertisement %s exists and is not Worker's; not replacing it", name)
-	case err != nil && !apierrors.IsNotFound(err):
-		return fmt.Errorf("read BGPAdvertisement %s: %w", name, err)
-	}
 	adv := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: k.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, k.K8s, adv, func() error {
+		// CNI can claim the tenant name between name selection and this read.
+		if adv.ResourceVersion != "" && !k.ownsAdvertisement(adv, vpc) {
+			return fmt.Errorf("BGPAdvertisement %s is owned by another writer", name)
+		}
 		if adv.Labels == nil {
 			adv.Labels = map[string]string{}
 		}
@@ -199,11 +203,40 @@ func matchesInstance(adv bgpv1alpha1.BGPAdvertisement, inst *bgpv1alpha1.BGPVRFI
 			[]bgpv1alpha1.Community{bgpv1alpha1.Community(inst.Spec.ExportRouteTargets[0].Value)})
 }
 
-// advertisementName names a's advertisement: the attachment's tenant
-// advertisement name when its identifier is known, else a name from its UID.
-func advertisementName(vpc string, a Advertisement, node string) string {
-	if a.AttachmentID != "" {
-		return crdnames.BGPAdvertisementName(vpc, a.AttachmentID, node)
+// advertisementName uses the tenant name for status projection when Worker can
+// own it. An attachment already advertised by CNI gets a separate return route.
+func (k *Kernel) advertisementName(ctx context.Context, vpc string, a Advertisement) (string, error) {
+	if a.AttachmentID == "" {
+		return crdnames.WorkerAdvertisementName(vpc, a.AttachmentUID, k.Node), nil
 	}
-	return crdnames.WorkerAdvertisementName(vpc, a.AttachmentUID, node)
+	name := crdnames.BGPAdvertisementName(vpc, a.AttachmentID, k.Node)
+	var existing bgpv1alpha1.BGPAdvertisement
+	err := k.K8s.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: name}, &existing)
+	if apierrors.IsNotFound(err) {
+		return name, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read BGPAdvertisement %s: %w", name, err)
+	}
+	if k.ownsAdvertisement(&existing, vpc) {
+		return name, nil
+	}
+	return crdnames.WorkerAdvertisementName(vpc, a.AttachmentUID, k.Node), nil
+}
+
+func (k *Kernel) ownsAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, vpc string) bool {
+	return adv.Labels[crdnames.LabelWorkerVPC] == vpc &&
+		adv.Labels[crdnames.LabelWorkerNode] == k.Node &&
+		!hasCNIContainer(adv)
+}
+
+// CNI ADD can reuse the tenant name after Worker publishes it, leaving the
+// Worker labels in place. Its container annotation takes precedence.
+func hasCNIContainer(adv *bgpv1alpha1.BGPAdvertisement) bool {
+	for key := range adv.Annotations {
+		if strings.HasPrefix(key, crdnames.AnnotationNetNS+".") {
+			return true
+		}
+	}
+	return false
 }

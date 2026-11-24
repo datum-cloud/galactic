@@ -487,12 +487,16 @@ if [ "${caps}" != "${want_caps}" ]; then
   fail "privileges: Worker's effective capabilities are ${caps}, want ${want_names} only (${want_caps})"
 fi
 SA=system:serviceaccount:${NS}:galactic-worker
+advertisement_writes=no
+if [ "${PROFILE}" = combined ]; then
+  advertisement_writes=yes
+fi
 while read -r want verb resource ns; do
   # </dev/null: kc runs docker exec -i, which would read the rest of this list.
   got=$(kc auth can-i --as="${SA}" "${verb}" "${resource}" ${ns:+-n "${ns}"} </dev/null 2>/dev/null || true)
   echo "${verb} ${resource} ${ns:-cluster}: ${got}" >>"${OUT}/rbac.txt"
   [ "${got}" = "${want}" ] || fail "privileges: ${SA} can-i ${verb} ${resource} ${ns}: ${got}, want ${want}"
-done <<'EOF'
+done <<EOF
 yes create tokenreviews.authentication.k8s.io
 yes watch vpcattachments.galactic.datumapis.com
 yes create bgpvrfinstances.galactic.datumapis.com galactic-system
@@ -501,7 +505,10 @@ no update vpcattachments.galactic.datumapis.com ns80
 no delete bgprouters.galactic.datumapis.com galactic-system
 no create pods
 no get secrets galactic-system
-no create bgpadvertisements.galactic.datumapis.com galactic-system
+${advertisement_writes} create bgpadvertisements.galactic.datumapis.com galactic-system
+${advertisement_writes} update bgpadvertisements.galactic.datumapis.com galactic-system
+no create bgpadvertisements.galactic.datumapis.com ns80
+no update bgpadvertisements.galactic.datumapis.com ns80
 EOF
 
 log "claims"
