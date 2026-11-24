@@ -123,8 +123,7 @@ gateways from its own addresses, and the Block and Argument from the
 master plugin routes a family's guest prefix only when that family has a
 gateway, while ADD registers it either way (#806). It only writes a
 row that is missing, and never one under the ingress sidecar's Block. The
-retired sidecar return path's tables, which an older node may still hold until
-its start-up prune, are excluded by their reserved table ID range, since the
+legacy sidecar return path's tables are excluded by their reserved table ID range, since the
 sidecar's own `vrf_table` rows that also mark them may be among the rows lost. A VPC's shared `vrf_table` and `vpc_attribution_table` rows are
 rebuilt from its lowest-ifindex attachment, while ADD leaves whichever
 attachment registered last, so those two may differ from before the loss;
@@ -144,17 +143,12 @@ periodic sweep reads its rows back, the traffic policy row included, and
 rewrites them when one is missing. A new sidecar removes, at startup, every
 sidecar row its own VRFs do not account for
 (`internal/plumbing/ebpf/sidecarmap`, #773), which is how a deleted pod's rows
-go. `galactic-cni` no longer reaps them: its sidecar return path, with the
-sweep and the reaper, is retired (#1439). Galactic Worker programs the return
-path of a sidecar's `socket` claim instead
-([contract](../worker/contract.md#envoy-and-the-galactic-vrf-sidecar)). At
-start, `galactic-cni` runs one prune that removes what earlier versions left:
-routes in tables `0xF000` to `0xFFFF`, their permanent neighbors and
-`tp_iface_table` infra rows, and `vrf_table` rows that point at `0xF000` plus
-the Argument with `EgressKindVeth`, under `vpcfence.Write`
-(`internal/installer/sidecarreturnprune.go`). Until the next sidecar on the
-node starts, a deleted pod's rows stay in the shared maps. They are inert
-meanwhile. Because the startup prune can take a live sidecar's rows when two
+go. Galactic Worker programs the return path of a sidecar's `socket` claim
+([contract](../worker/contract.md#envoy-and-the-galactic-vrf-sidecar)).
+The installer maintains the host return path for live legacy sidecars during
+[rollout and rollback](../worker/operations.md#roll-out-ingress-sidecars-separately).
+Until the next sidecar on the node starts, a deleted pod's pod-side rows stay
+in the shared maps. They are inert meanwhile. Because the startup prune can take a live sidecar's rows when two
 sidecar pods overlap on a node, every sidecar reads its own `vrf_table` and
 `ifindex_vrf_table` rows back on each sweep and reapplies its VRFs and routes
 when any are missing, the same reapply a datapath reload triggers.

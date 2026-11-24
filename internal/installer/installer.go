@@ -1153,9 +1153,8 @@ func Run(ctx context.Context, grpcHealthPort, metricsPort int) error {
 	// the BGPRouter carrying the locator may not exist yet.
 	reconcileLocatorLocalRoute(ctx, ebpfState)
 
-	// Once, off this goroutine: remove what the retired host-side return path
-	// of the ingress sidecar left on this node.
-	startRetiredSidecarReturnPrune(ctx, ebpfState)
+	// Legacy ingress sidecars can still run on a node using Worker.
+	go runSidecarReturn(ctx, ebpfState)
 
 	// Rebuild the attachment rows only CNI ADD otherwise writes, which a map
 	// recreated by this load has lost. Off this goroutine and retried while a

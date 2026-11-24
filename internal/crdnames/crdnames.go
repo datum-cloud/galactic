@@ -140,6 +140,18 @@ func NetNSKey(containerID string) string {
 	return fmt.Sprintf("%s.%s", AnnotationNetNS, truncate(containerID))
 }
 
+// HasCNIContainer reports whether the advertisement carries a CNI container's
+// network namespace annotation. CNI can inherit Worker labels when it uses
+// the same tenant advertisement name, so the container annotation takes precedence.
+func HasCNIContainer(annotations map[string]string) bool {
+	for key := range annotations {
+		if strings.HasPrefix(key, AnnotationNetNS+".") {
+			return true
+		}
+	}
+	return false
+}
+
 // nameSegmentHashLen is the number of hex characters kept from the SHA-256 fallback.
 const nameSegmentHashLen = 12
 

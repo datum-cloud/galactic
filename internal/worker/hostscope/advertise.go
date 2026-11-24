@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
-	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -135,7 +134,7 @@ func (k *Kernel) listAdvertisements(ctx context.Context, vpc string) ([]bgpv1alp
 		return nil, fmt.Errorf("list Worker BGPAdvertisements of VPC %s: %w", vpc, err)
 	}
 	return slices.DeleteFunc(list.Items, func(adv bgpv1alpha1.BGPAdvertisement) bool {
-		return hasCNIContainer(&adv)
+		return crdnames.HasCNIContainer(adv.Annotations)
 	}), nil
 }
 
@@ -227,16 +226,5 @@ func (k *Kernel) advertisementName(ctx context.Context, vpc string, a Advertisem
 func (k *Kernel) ownsAdvertisement(adv *bgpv1alpha1.BGPAdvertisement, vpc string) bool {
 	return adv.Labels[crdnames.LabelWorkerVPC] == vpc &&
 		adv.Labels[crdnames.LabelWorkerNode] == k.Node &&
-		!hasCNIContainer(adv)
-}
-
-// CNI ADD can reuse the tenant name after Worker publishes it, leaving the
-// Worker labels in place. Its container annotation takes precedence.
-func hasCNIContainer(adv *bgpv1alpha1.BGPAdvertisement) bool {
-	for key := range adv.Annotations {
-		if strings.HasPrefix(key, crdnames.AnnotationNetNS+".") {
-			return true
-		}
-	}
-	return false
+		!crdnames.HasCNIContainer(adv.Annotations)
 }

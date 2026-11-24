@@ -46,8 +46,8 @@ func datapathRepairEnabled(st ebpfDatapathState) bool {
 }
 
 // isSidecarReturnTable reports whether tableID is one of the routing tables
-// the retired sidecar return path allocated, which a node may still hold until
-// its startup prune removes them. The datapath repair must never treat one
+// older installers allocated for ingress sidecar replies. The datapath
+// repair must never treat one
 // as an attachment's VRF, and this range check is what stops it: the
 // sidecar's own vrf_table rows, which also mark such tables, may be among the
 // rows a recreated map has lost.

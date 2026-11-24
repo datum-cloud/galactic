@@ -137,7 +137,7 @@ func TestPruneRetiredSidecarReturn(t *testing.T) {
 		}
 		return "", false
 	}
-	pruned, err := pruneRetiredSidecarReturn(context.Background(), pinDir, vpcOf)
+	pruned, err := pruneRetiredSidecarReturn(context.Background(), pinDir, vpcOf, sidecarReturnKeep{})
 	if err != nil {
 		t.Fatalf("pruneRetiredSidecarReturn: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestPruneRetiredSidecarReturn(t *testing.T) {
 
 	checkRetiredSidecarReturnPruned(t, registry, policy, ifindex, gateway)
 
-	again, err := pruneRetiredSidecarReturn(context.Background(), pinDir, vpcOf)
+	again, err := pruneRetiredSidecarReturn(context.Background(), pinDir, vpcOf, sidecarReturnKeep{})
 	if err != nil {
 		t.Fatalf("second pruneRetiredSidecarReturn: %v", err)
 	}

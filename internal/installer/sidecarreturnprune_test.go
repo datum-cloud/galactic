@@ -81,13 +81,13 @@ func TestSidecarReturnVPCs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got[5] != "vpcone" {
-		t.Errorf("VRFID 5 = %q, want vpcone", got[5])
+	if got[5] != (sidecarReturnVPC{"vpcone", "router-a"}) {
+		t.Errorf("VRFID 5 = %v, want vpcone", got[5])
 	}
 	if _, ok := got[6]; ok {
-		t.Errorf("VRFID 6 resolved from another node's router: %q", got[6])
+		t.Errorf("VRFID 6 resolved from another node's router: %v", got[6])
 	}
 	if _, ok := got[7]; ok {
-		t.Errorf("VRFID 7, claimed by two VPCs, resolved to %q", got[7])
+		t.Errorf("VRFID 7, claimed by two VPCs, resolved to %v", got[7])
 	}
 }
