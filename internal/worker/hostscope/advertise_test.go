@@ -7,9 +7,11 @@ package hostscope
 import (
 	"context"
 	"net/netip"
+	"reflect"
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -22,11 +24,12 @@ import (
 )
 
 const (
-	testPod  = "pod-1"
-	testAtt  = "att-1"
-	testNS   = "galactic-system"
-	testNode = "node-a"
-	testVPC  = "AbC123"
+	testPod   = "pod-1"
+	testAtt   = "att-1"
+	testAttID = "e80"
+	testNS    = "galactic-system"
+	testNode  = "node-a"
+	testVPC   = "AbC123"
 )
 
 func advScheme() *runtime.Scheme {
@@ -35,12 +38,12 @@ func advScheme() *runtime.Scheme {
 	return s
 }
 
-func instance(vpc string, vrfID int32) *bgpv1alpha1.BGPVRFInstance {
+func instance() *bgpv1alpha1.BGPVRFInstance {
 	return &bgpv1alpha1.BGPVRFInstance{
-		ObjectMeta: metav1.ObjectMeta{Name: crdnames.BGPVRFInstanceName(vpc, testNode), Namespace: testNS},
+		ObjectMeta: metav1.ObjectMeta{Name: crdnames.BGPVRFInstanceName(testVPC, testNode), Namespace: testNS},
 		Spec: bgpv1alpha1.BGPVRFInstanceSpec{
 			RouterTarget:       bgpv1alpha1.RouterTarget{RouterRef: &bgpv1alpha1.RouterRef{Name: "router-a"}},
-			VRFID:              vrfID,
+			VRFID:              9,
 			ExportRouteTargets: []bgpv1alpha1.RouteTarget{{Value: "64512:7"}},
 		},
 	}
@@ -58,7 +61,7 @@ func TestAdvertise(t *testing.T) {
 	otherNode := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{Name: "other-node", Namespace: testNS,
 		Labels: map[string]string{crdnames.LabelWorkerVPC: testVPC, crdnames.LabelWorkerNode: "node-b"}}}
 	k8s := fake.NewClientBuilder().WithScheme(advScheme()).
-		WithObjects(instance(testVPC, 9), cni, otherNode).Build()
+		WithObjects(instance(), cni, otherNode).Build()
 	k := &Kernel{K8s: k8s, Namespace: testNS, Node: testNode}
 
 	gw := netip.MustParseAddr("2001:db8:ff::1")
@@ -166,22 +169,21 @@ func checkAdvertisement(t *testing.T, k8s client.Client, name, pod string) {
 // TestAdvertiseNamesTheAttachmentsOwnAdvertisement names the advertisement
 // after the attachment's base62 identifier, the name galactic-controller
 // reads an attachment's tenant advertisement by, replaces a UID-named one an
-// earlier Worker left, and never replaces an advertisement Worker did not
-// write.
+// earlier Worker left.
 func TestAdvertiseNamesTheAttachmentsOwnAdvertisement(t *testing.T) {
 	ctx := context.Background()
 	gw := []netip.Addr{netip.MustParseAddr("2001:db8:ff::1")}
 	old := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
 		Name: crdnames.WorkerAdvertisementName(testVPC, testAtt, testNode), Namespace: testNS,
 		Labels: map[string]string{crdnames.LabelWorkerVPC: testVPC, crdnames.LabelWorkerNode: testNode}}}
-	k8s := fake.NewClientBuilder().WithScheme(advScheme()).WithObjects(instance(testVPC, 9), old).Build()
+	k8s := fake.NewClientBuilder().WithScheme(advScheme()).WithObjects(instance(), old).Build()
 	k := &Kernel{K8s: k8s, Namespace: testNS, Node: testNode}
-	want := []Advertisement{{AttachmentUID: testAtt, AttachmentID: "e80", PodUID: testPod, Addresses: gw}}
+	want := []Advertisement{{AttachmentUID: testAtt, AttachmentID: testAttID, PodUID: testPod, Addresses: gw}}
 	if err := k.Advertise(ctx, testVPC, want); err != nil {
 		t.Fatal(err)
 	}
-	name := crdnames.BGPAdvertisementName(testVPC, "e80", testNode)
-	if identity := galactic.AdvertisementName(testVPC, "e80"); name != identity+"-"+testNode {
+	name := crdnames.BGPAdvertisementName(testVPC, testAttID, testNode)
+	if identity := galactic.AdvertisementName(testVPC, testAttID); name != identity+"-"+testNode {
 		t.Fatalf("name %s is not the controller's %s-%s", name, identity, testNode)
 	}
 	var list bgpv1alpha1.BGPAdvertisementList
@@ -191,21 +193,108 @@ func TestAdvertiseNamesTheAttachmentsOwnAdvertisement(t *testing.T) {
 	if len(list.Items) != 1 || list.Items[0].Name != name {
 		t.Fatalf("advertisements = %v, want only %s", list.Items, name)
 	}
+	if ok, err := k.Current(ctx, testVPC, want); err != nil || !ok {
+		t.Fatalf("Current with the canonical name = %t, %v; want true", ok, err)
+	}
 
-	// An advertisement of that name that Worker did not write, as CNI's for
-	// an attachment it attached, is never replaced.
-	cni := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
-		Name: crdnames.BGPAdvertisementName(testVPC, "e81", testNode), Namespace: testNS}}
-	if err := k8s.Create(ctx, cni); err != nil {
+	// A recreated attachment can keep the same tenant ID and get a new UID.
+	// The controller still needs the canonical advertisement.
+	want[0].AttachmentUID = "att-2"
+	if ok, err := k.Current(ctx, testVPC, want); err != nil || ok {
+		t.Fatalf("Current with a replaced attachment UID = %t, %v; want false", ok, err)
+	}
+	if err := k.Advertise(ctx, testVPC, want); err != nil {
 		t.Fatal(err)
 	}
-	err := k.Advertise(ctx, testVPC, []Advertisement{{AttachmentUID: "att-2", AttachmentID: "e81", PodUID: testPod,
-		Addresses: gw}})
-	if err == nil {
-		t.Fatal("Advertise replaced an advertisement Worker did not write")
+	var adv bgpv1alpha1.BGPAdvertisement
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: testNS, Name: name}, &adv); err != nil {
+		t.Fatal(err)
+	}
+	if uid := adv.Labels[crdnames.LabelWorkerAttachment]; uid != want[0].AttachmentUID {
+		t.Fatalf("canonical advertisement attachment UID = %q, want %q", uid, want[0].AttachmentUID)
+	}
+}
+
+func TestIssue1494WorkerAndCNIAdvertisementsCoexist(t *testing.T) {
+	ctx := context.Background()
+	cni := &bgpv1alpha1.BGPAdvertisement{ObjectMeta: metav1.ObjectMeta{
+		Namespace:   testNS,
+		Name:        crdnames.BGPAdvertisementName(testVPC, testAttID, testNode),
+		Annotations: map[string]string{crdnames.AnnotationNoAddressing: crdnames.AnnotationNoAddressingValue},
+	}}
+	k8s := fake.NewClientBuilder().WithScheme(advScheme()).WithObjects(instance(), cni).Build()
+	k := &Kernel{K8s: k8s, Namespace: testNS, Node: testNode}
+	var original bgpv1alpha1.BGPAdvertisement
+	if err := k8s.Get(ctx, client.ObjectKeyFromObject(cni), &original); err != nil {
+		t.Fatal(err)
+	}
+	checkCNI := func() {
+		t.Helper()
+		var got bgpv1alpha1.BGPAdvertisement
+		if err := k8s.Get(ctx, client.ObjectKeyFromObject(cni), &got); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, original) {
+			t.Fatalf("CNI advertisement changed: got %+v, want %+v", got, original)
+		}
+	}
+	want := []Advertisement{{AttachmentUID: testAtt, AttachmentID: testAttID, PodUID: testPod,
+		Addresses: []netip.Addr{netip.MustParseAddr("2001:db8:ff::1")}}}
+	if err := k.Advertise(ctx, testVPC, want); err != nil {
+		t.Fatalf("publish Worker return route alongside CNI: %v", err)
+	}
+	name := crdnames.WorkerAdvertisementName(testVPC, testAtt, testNode)
+	checkAdvertisement(t, k8s, name, testPod)
+	if ok, err := k.Current(ctx, testVPC, want); err != nil || !ok {
+		t.Fatalf("Current with the UID name = %t, %v; want true", ok, err)
+	}
+	checkCNI()
+
+	if err := k.Advertise(ctx, testVPC, nil); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKey{Namespace: testNS, Name: name}
+	if err := k8s.Get(ctx, key, &bgpv1alpha1.BGPAdvertisement{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("Worker advertisement after cleanup: %v; want NotFound", err)
+	}
+	checkCNI()
+}
+
+func TestAdvertisePreservesCNIAfterItReusesWorkerName(t *testing.T) {
+	ctx := context.Background()
+	k8s := fake.NewClientBuilder().WithScheme(advScheme()).WithObjects(instance()).Build()
+	k := &Kernel{K8s: k8s, Namespace: testNS, Node: testNode}
+	want := []Advertisement{{AttachmentUID: testAtt, AttachmentID: testAttID, PodUID: testPod,
+		Addresses: []netip.Addr{netip.MustParseAddr("2001:db8:ff::1")}}}
+	if err := k.Advertise(ctx, testVPC, want); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKey{Namespace: testNS, Name: crdnames.BGPAdvertisementName(testVPC, testAttID, testNode)}
+	var cni bgpv1alpha1.BGPAdvertisement
+	if err := k8s.Get(ctx, key, &cni); err != nil {
+		t.Fatal(err)
+	}
+	// CNI ADD records its container and prefixes on the canonical object.
+	cni.Annotations[crdnames.NetNSKey("sandbox-a")] = "/run/netns/sandbox-a"
+	cni.Spec.Prefixes = []bgpv1alpha1.Prefix{"2001:db8:ab::/64"}
+	if err := k8s.Update(ctx, &cni); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Advertise(ctx, testVPC, want); err != nil {
+		t.Fatal(err)
+	}
+	checkAdvertisement(t, k8s, crdnames.WorkerAdvertisementName(testVPC, testAtt, testNode), testPod)
+	if ok, err := k.Current(ctx, testVPC, want); err != nil || !ok {
+		t.Fatalf("Current after CNI reused the tenant name = %t, %v; want true", ok, err)
+	}
+	if err := k.Advertise(ctx, testVPC, nil); err != nil {
+		t.Fatal(err)
 	}
 	var got bgpv1alpha1.BGPAdvertisement
-	if err := k8s.Get(ctx, client.ObjectKeyFromObject(cni), &got); err != nil || len(got.Labels) != 0 {
-		t.Fatalf("CNI's advertisement changed: %v %v", got.Labels, err)
+	if err := k8s.Get(ctx, key, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, cni) {
+		t.Fatalf("CNI advertisement changed: got %+v, want %+v", got, cni)
 	}
 }
