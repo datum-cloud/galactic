@@ -17,6 +17,7 @@ import (
 	"go.datum.net/galactic/internal/crdnames"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 func TestIsRetiredSidecarReturnRow(t *testing.T) {
@@ -29,18 +30,21 @@ func TestIsRetiredSidecarReturnRow(t *testing.T) {
 		egressKind uint32
 		want       bool
 	}{
-		{"RetiredRow", block, 5, sidecarReturnTableBase + 5, usidmap.EgressKindVeth, true},
+		{"RetiredRow", block, 5, sidecarreturn.TableBase + 5, usidmap.EgressKindVeth, true},
 		{"MaxArgument", block, uformat.ArgumentMax, sidecarReturnTableMax, usidmap.EgressKindVeth, true},
 		{"HostVRFTable", block, 5, 42, usidmap.EgressKindVeth, false},
-		{"OtherArgumentsTable", block, 5, sidecarReturnTableBase + 6, usidmap.EgressKindVeth, false},
-		{"TapKind", block, 5, sidecarReturnTableBase + 5, usidmap.EgressKindTap, false},
-		{"SidecarBlock", uformat.BlockIngressSidecar, 5, sidecarReturnTableBase + 5, usidmap.EgressKindVeth, false},
-		{"ZeroArgument", block, 0, sidecarReturnTableBase, usidmap.EgressKindVeth, false},
+		{"OtherArgumentsTable", block, 5, sidecarreturn.TableBase + 6, usidmap.EgressKindVeth, false},
+		{"TapKind", block, 5, sidecarreturn.TableBase + 5, usidmap.EgressKindTap, false},
+		{"SidecarBlock", uformat.BlockIngressSidecar, 5, sidecarreturn.TableBase + 5, usidmap.EgressKindVeth, false},
+		{"ZeroArgument", block, 0, sidecarreturn.TableBase, usidmap.EgressKindVeth, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isRetiredSidecarReturnRow(tt.block, tt.argument, tt.tableID, tt.egressKind); got != tt.want {
-				t.Errorf("isRetiredSidecarReturnRow(%#x, %d, %#x, %d) = %v, want %v",
+			row := usidmap.VRFEntry{
+				VRFKey: usidmap.VRFKey{Block: tt.block, Argument: tt.argument}, VRFTableID: tt.tableID, EgressKind: tt.egressKind,
+			}
+			if got := sidecarreturn.LegacyRow(row); got != tt.want {
+				t.Errorf("LegacyRow(%#x, %d, %#x, %d) = %v, want %v",
 					tt.block, tt.argument, tt.tableID, tt.egressKind, got, tt.want)
 			}
 		})

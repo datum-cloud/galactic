@@ -5,6 +5,7 @@
 package installer
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -29,12 +30,16 @@ import (
 	bgpv1alpha1 "go.datum.net/galactic/api/network/v1alpha1"
 	"go.datum.net/galactic/internal/cni/vpcfence"
 	"go.datum.net/galactic/internal/crdnames"
+	"go.datum.net/galactic/internal/gc"
+	"go.datum.net/galactic/internal/nodevpc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
+	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/intf"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 func TestSidecarReturnMixedVersion(t *testing.T) {
@@ -62,7 +67,7 @@ func TestSidecarReturnMixedVersion(t *testing.T) {
 		vpc        = "vpcone"
 		hostTable  = 200
 		argument   = 5
-		oldTable   = sidecarReturnTableBase + argument
+		oldTable   = sidecarreturn.TableBase + argument
 		attachment = "proxy-attachment"
 	)
 	sidecarTestVRF(t, vpc, hostTable)
@@ -77,10 +82,10 @@ func TestSidecarReturnMixedVersion(t *testing.T) {
 	endDT46 := bgpv1alpha1.SRv6FunctionEndDT46
 	advertisement := &bgpv1alpha1.BGPAdvertisement{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: crdnames.BGPAdvertisementName(vpc, legacyIngressAttachment, node), Namespace: testNamespace,
+			Name: crdnames.BGPAdvertisementName(vpc, sidecarreturn.Attachment, node), Namespace: testNamespace,
 			Annotations: map[string]string{
-				legacyIngressHostIfindex: strconv.Itoa(legacy),
-				legacyIngressHostMAC:     legacyMAC.String(),
+				sidecarreturn.HostIfindex: strconv.Itoa(legacy),
+				sidecarreturn.HostMAC:     legacyMAC.String(),
 			},
 		},
 		Spec: bgpv1alpha1.BGPAdvertisementSpec{
@@ -131,6 +136,13 @@ func TestSidecarReturnMixedVersion(t *testing.T) {
 	// Upgrading the installer preserves the main sidecar and prepares the
 	// route in the canonical table before switching the shared SRv6 entry.
 	reply(legacyPeer, "legacy before installer upgrade")
+	scope := sidecarreturn.Scope{K8s: k8s, Namespace: testNamespace, Node: node, VPC: vpc, Router: r.Name}
+	fallback := sidecarreturn.Endpoint{Prefix: netip.MustParsePrefix(gateway.String()), Ifindex: legacy}.Route(hostTable)
+	key := usidmap.VRFKey{Block: block, Argument: argument}
+	checkSidecarReturnWriters(t, k8s, scope, pinDir, registry.VRF, key, fallback, func(writer string) {
+		assertRoute(hostTable, legacy, true)
+		reply(legacyPeer, "legacy when "+writer+" runs before the installer")
+	})
 	reconcile()
 	assertRoute(oldTable, legacy, true)
 	assertRoute(hostTable, legacy, true)
@@ -170,7 +182,7 @@ func TestSidecarReturnMixedVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherAdvertisement := advertisement.DeepCopy()
-	otherAdvertisement.Name = crdnames.BGPAdvertisementName(otherVPC, legacyIngressAttachment, node)
+	otherAdvertisement.Name = crdnames.BGPAdvertisementName(otherVPC, sidecarreturn.Attachment, node)
 	otherAdvertisement.ResourceVersion = ""
 	otherAdvertisement.Spec.VRFID = &otherInstance.Spec.VRFID
 	if err := k8s.Create(ctx, otherAdvertisement); err != nil {
@@ -214,8 +226,8 @@ func TestSidecarReturnMixedVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	rolledBack, rollbackMAC, rollbackPeer := sidecarReturnTestLink(t, "legacy1", "")
-	advertisement.Annotations[legacyIngressHostIfindex] = strconv.Itoa(rolledBack)
-	advertisement.Annotations[legacyIngressHostMAC] = rollbackMAC.String()
+	advertisement.Annotations[sidecarreturn.HostIfindex] = strconv.Itoa(rolledBack)
+	advertisement.Annotations[sidecarreturn.HostMAC] = rollbackMAC.String()
 	if err := k8s.Update(ctx, advertisement); err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +296,75 @@ func sidecarReturnTestSID(t *testing.T, k8s client.Client, node string, argument
 		t.Fatal(err)
 	}
 	return sid, block
+}
+
+// checkSidecarReturnWriters lets each competing writer promote a VPC while
+// only the old installer has set up the legacy return path.
+func checkSidecarReturnWriters(
+	t *testing.T, k8s client.Client, scope sidecarreturn.Scope, pinDir string, vrfs *usidmap.VRFTable,
+	key usidmap.VRFKey, fallback netlink.Route, check func(string),
+) {
+	t.Helper()
+	ctx := t.Context()
+	argumentLockDir := nodevpc.ArgumentLockDir
+	nodevpc.ArgumentLockDir = t.TempDir()
+	t.Cleanup(func() { nodevpc.ArgumentLockDir = argumentLockDir })
+	const tenantAttachment = "2"
+	if err := netlink.LinkAdd(&netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{Name: intf.GenerateInterfaceNameHost(scope.VPC, tenantAttachment)},
+		PeerName:  "tenant-peer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, writer := range []struct {
+		name  string
+		write func() error
+	}{
+		{"Worker", func() error {
+			return vpcfence.Write(ctx, scope.VPC, func() error {
+				_, err := nodevpc.Ensure(ctx, nodevpc.Config{
+					K8s: k8s, Namespace: scope.Namespace, Node: scope.Node, PinDir: pinDir,
+				}, scope.VPC)
+				return err
+			})
+		}},
+		{"CNI ADD", func() error {
+			return vpcfence.Write(ctx, scope.VPC, func() error {
+				_, err := attachreg.RegisterDatapath(pinDir, attachreg.Registration{
+					Node: attachreg.Node{Locator: testLocator, NodeID: 1}, VPC: scope.VPC, VPCAttachment: tenantAttachment,
+					InterfaceType: attachreg.InterfaceTypeVeth, Argument: key.Argument,
+					PreserveLegacyReturn: func(row usidmap.VRFEntry, table uint32) error {
+						return scope.Preserve(ctx, row, table)
+					},
+				})
+				return err
+			})
+		}},
+		{"GC", func() error {
+			result := gc.SweepEBPFVRFTable(ctx, k8s, scope.Namespace, scope.Node, pinDir,
+				func(ctx context.Context, vpc string, write func() error) error {
+					return vpcfence.Write(ctx, vpc, write)
+				})
+			if result.Errors != 0 || result.EBPFVRFEntriesRewritten != 1 {
+				return fmt.Errorf("sweep = %+v, want one rewrite and no errors", result)
+			}
+			return nil
+		}},
+	} {
+		if err := writer.write(); err != nil {
+			t.Fatalf("%s writes the shared row: %v", writer.name, err)
+		}
+		check(writer.name)
+
+		// Start the next writer with only the old installer's state.
+		legacyTable := sidecarreturn.TableBase + uint32(key.Argument)
+		if err := vrfs.Register(key.Block, key.Argument, legacyTable, usidmap.EgressKindVeth); err != nil {
+			t.Fatal(err)
+		}
+		if err := netlink.RouteDel(&fallback); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func sidecarReturnTestDatapath(t *testing.T) (string, *ebpf.Program, *usidmap.Registry, *tpmap.Maps) {

@@ -54,7 +54,7 @@ func blockFromLocator(locator string) (uint64, error) {
 func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "", nodeID: 0}
 	registered, err := registerEBPFDatapath(
-		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist", nil)
+		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist", nil, nil)
 	if err != nil {
 		t.Errorf("registerEBPFDatapath with unconfigured BGPRouter = %v, want nil (no-op)", err)
 	}
@@ -71,7 +71,7 @@ func TestRegisterEBPFDatapath_NotConfiguredIsNoOp(t *testing.T) {
 func TestRegisterEBPFDatapath_RejectsOutOfRangeNodeID(t *testing.T) {
 	cfg := bgpConfig{srv6Locator: "2001:db8:1::/48", nodeID: 0x10001} // wraps to uint16(1) if narrowed unchecked
 	registered, err := registerEBPFDatapath(
-		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist", nil)
+		cfg, testVPC, testAttachment, ifaceTypeVeth, 42, "/sys/fs/bpf/galactic-does-not-exist", nil, nil)
 	if err == nil {
 		t.Fatal("registerEBPFDatapath with nodeID=0x10001 = nil error, want an out-of-range rejection")
 	}
@@ -121,7 +121,7 @@ func TestRegisterEBPFDatapath_RegistersAllThreeTables(t *testing.T) {
 	t.Cleanup(func() { _ = loaderObjs.Close() })
 
 	cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
-	registered, err := registerEBPFDatapath(cfg, vpc, testAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, nil)
+	registered, err := registerEBPFDatapath(cfg, vpc, testAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, nil, nil)
 	if err != nil {
 		t.Fatalf("registerEBPFDatapath: %v", err)
 	}
@@ -285,14 +285,14 @@ func TestRegisterEBPFDatapath_SecondAttachmentSharesEntry(t *testing.T) {
 		IPv6Subnet: mustParseCIDR(t, secondPrefix), IPv6Gateway: net.ParseIP("fd20:30::1"),
 	})
 	if _, err := registerEBPFDatapath(
-		cfg, vpc, firstAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, firstLocal,
+		cfg, vpc, firstAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, firstLocal, nil,
 	); err != nil {
 		t.Fatalf("first attachment's registerEBPFDatapath: %v", err)
 	}
 	// A second attachment on the same VPC/node resolves the same Argument
 	// (allocateArgument's idempotent lookup) and re-registers the same key.
 	registered, err := registerEBPFDatapath(
-		cfg, vpc, secondAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, secondLocal,
+		cfg, vpc, secondAttachment, ifaceTypeVeth, uint16(vrfID), pinDir, secondLocal, nil,
 	)
 	if err != nil {
 		t.Fatalf("second attachment's registerEBPFDatapath: %v", err)
@@ -401,7 +401,7 @@ func TestRegisterEBPFDatapath_MixedInterfaceTypesKeepOwnEgressKind(t *testing.T)
 
 			cfg := bgpConfig{srv6Locator: locator, nodeID: nodeID}
 			for _, a := range tt.order {
-				if _, err := registerEBPFDatapath(cfg, vpc, a.name, a.ifaceType, uint16(vrfID), pinDir, nil); err != nil {
+				if _, err := registerEBPFDatapath(cfg, vpc, a.name, a.ifaceType, uint16(vrfID), pinDir, nil, nil); err != nil {
 					t.Fatalf("registerEBPFDatapath(%s): %v", a.name, err)
 				}
 			}

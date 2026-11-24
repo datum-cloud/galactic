@@ -16,6 +16,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/attach"
 	"go.datum.net/galactic/internal/plumbing/ebpf/ifindexvrfmap"
 	"go.datum.net/galactic/internal/plumbing/nldump"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 // datapathRepairRetryInterval is the first wait between startup repair passes
@@ -52,7 +53,7 @@ func datapathRepairEnabled(st ebpfDatapathState) bool {
 // sidecar's own vrf_table rows, which also mark such tables, may be among the
 // rows a recreated map has lost.
 func isSidecarReturnTable(tableID uint32) bool {
-	return tableID >= sidecarReturnTableBase && tableID <= sidecarReturnTableMax
+	return tableID >= sidecarreturn.TableBase && tableID <= sidecarReturnTableMax
 }
 
 // runDatapathRepair runs one gc.RepairAttachmentDatapath pass and logs one

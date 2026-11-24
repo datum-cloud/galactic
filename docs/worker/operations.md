@@ -84,11 +84,12 @@ endpoint. You can upgrade Worker and the node installer before rolling the
 cluster's sidecar image and controller.
 
 The installer keeps a fallback route in the VPC's host table while the legacy
-sidecar runs. When Worker advertises the same gateway and its routed link can
-deliver replies, the installer retires the fallback. A replacement sidecar
-running the legacy build can publish its gateway again on rollback and the
-installer restores the path. The proxy pod replacement still interrupts the
-connections held by that pod.
+sidecar runs. If Worker, CNI ADD, or garbage collection repoints the shared
+SRv6 entry first, it carries the active legacy route into the VPC table before
+switching the entry. When Worker advertises the same gateway and its routed
+link can deliver replies, the installer retires the fallback. On rollback,
+the replacement sidecar can publish its legacy gateway again and the installer
+restores the path. Replacing the proxy pod interrupts the connections it held.
 
 ## Read the diagnostics
 

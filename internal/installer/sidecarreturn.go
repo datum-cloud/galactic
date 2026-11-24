@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"strconv"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -28,30 +27,16 @@ import (
 	"go.datum.net/galactic/internal/plumbing/ebpf/tpmap"
 	"go.datum.net/galactic/internal/plumbing/ebpf/uformat"
 	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
-	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/vrf"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
-const (
-	sidecarReturnInterval = 5 * time.Second
-	// A protocol marks the compatibility route for cleanup in the shared VRF
-	// table. Its metric is less preferred than Worker's IPv6 route (1024).
-	sidecarReturnProtocol netlink.RouteProtocol = 249
-	sidecarReturnMetric   int                   = 2048
-
-	// These values are part of the advertisement format emitted by legacy
-	// galactic-vrf builds.
-	legacyIngressAttachment  = "ingress"
-	legacyIngressHostIfindex = "galactic.datum.net/ingress-host-ifindex"
-	legacyIngressHostMAC     = "galactic.datum.net/ingress-host-mac"
-)
+const sidecarReturnInterval = 5 * time.Second
 
 type legacySidecarEndpoint struct {
+	sidecarreturn.Endpoint
 	vpc      string
 	argument uint16
-	prefix   netip.Prefix
-	ifindex  int
-	mac      net.HardwareAddr
 	adv      *bgpv1alpha1.BGPAdvertisement
 	node     string
 }
@@ -173,7 +158,7 @@ func sidecarReturnEndpoints(
 			attachment := adv.Labels[crdnames.LabelWorkerAttachment]
 			if vpc != "" && attachment != "" {
 				for _, raw := range adv.Spec.Prefixes {
-					if prefix, ok := sidecarHostPrefix(raw); ok {
+					if prefix, ok := sidecarreturn.HostPrefix(raw); ok {
 						key := workerSidecarRoute{vpc, prefix}
 						worker[key] = append(worker[key], attach.InternalAliasPrefix+vpc+"/"+attachment)
 					}
@@ -183,34 +168,20 @@ func sidecarReturnEndpoints(
 		}
 
 		argument := adv.Spec.VRFID
-		if argument == nil || *argument < uformat.ArgumentMin || *argument > uformat.ArgumentMax ||
-			adv.Spec.Function == nil || *adv.Spec.Function != bgpv1alpha1.SRv6FunctionEndDT46 {
+		if argument == nil || *argument < uformat.ArgumentMin || *argument > uformat.ArgumentMax {
 			continue
 		}
 		id := uint16(*argument)
 		vpc, ok := vpcs[id]
-		if !ok || adv.Spec.RouterRef.Name != vpc.router ||
-			adv.Name != crdnames.BGPAdvertisementName(vpc.name, legacyIngressAttachment, node) {
+		if !ok {
 			continue
 		}
-		ifindex, indexErr := strconv.Atoi(adv.Annotations[legacyIngressHostIfindex])
-		mac, macErr := net.ParseMAC(adv.Annotations[legacyIngressHostMAC])
-		if indexErr != nil || ifindex <= 0 || macErr != nil || len(mac) != 6 {
-			continue
-		}
-		for _, raw := range adv.Spec.Prefixes {
-			if prefix, ok := sidecarHostPrefix(raw); ok {
-				endpoints = append(endpoints, legacySidecarEndpoint{vpc.name, id, prefix, ifindex, mac, adv, node})
-			}
+		scope := sidecarreturn.Scope{Node: node, VPC: vpc.name, Router: vpc.router}
+		for _, endpoint := range scope.Endpoints(adv, id) {
+			endpoints = append(endpoints, legacySidecarEndpoint{endpoint, vpc.name, id, adv, node})
 		}
 	}
 	return endpoints, worker
-}
-
-func sidecarHostPrefix(raw bgpv1alpha1.Prefix) (netip.Prefix, bool) {
-	prefix, err := netip.ParsePrefix(string(raw))
-	return prefix, err == nil && prefix.Bits() == 128 && prefix.Addr().Is6() &&
-		!prefix.Addr().Is4In6() && prefix.Addr().IsGlobalUnicast()
 }
 
 type sidecarReturnMaps struct {
@@ -245,7 +216,7 @@ func reconcileLegacySidecarEndpoints(
 	maps := sidecarReturnMaps{registry, policy, kinds}
 	var errs []error
 	for _, e := range endpoints {
-		aliases := worker[workerSidecarRoute{e.vpc, e.prefix}]
+		aliases := worker[workerSidecarRoute{e.vpc, e.Prefix}]
 		if err := maps.reconcileEndpoint(ctx, k8s, block, e, aliases, keep); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile sidecar return for VPC %s: %w", e.vpc, err))
 		}
@@ -257,14 +228,14 @@ func (m sidecarReturnMaps) reconcileEndpoint(
 	ctx context.Context, k8s client.Client, block uint64, e legacySidecarEndpoint,
 	workerAliases []string, keep *sidecarReturnKeep,
 ) error {
-	link, err := netlink.LinkByIndex(e.ifindex)
+	link, err := netlink.LinkByIndex(e.Ifindex)
 	var missing netlink.LinkNotFoundError
 	switch {
 	case errors.As(err, &missing):
 		return m.reapLegacyEndpoint(ctx, k8s, e)
 	case err != nil:
 		return err
-	case link.Type() != "veth" || intf.IsGalacticLinkName(link.Attrs().Name) || attach.IsInternalLink(link):
+	case !sidecarreturn.LegacyLink(link):
 		return nil
 	}
 
@@ -272,7 +243,7 @@ func (m sidecarReturnMaps) reconcileEndpoint(
 	if err != nil && !errors.Is(err, vrf.ErrNotFound) {
 		return err
 	}
-	route := e.route(table)
+	route := e.Route(table)
 	// Orphan cleanup must leave the active endpoint alone. Takeover removes
 	// its routes only after checking under the same fence as Worker.
 	keep.arguments[e.argument] = true
@@ -306,7 +277,7 @@ func (m sidecarReturnMaps) reconcileEndpoint(
 		keep.retired = append(keep.retired, route)
 	} else {
 		keep.routes[compatibilityRouteKey(route)] = true
-		keep.ifindexes[uint32(e.ifindex)] = true //nolint:gosec // positive kernel ifindex
+		keep.ifindexes[uint32(e.Ifindex)] = true //nolint:gosec // positive kernel ifindex
 		keep.neighbors[sidecarNeighborKey(route)] = true
 	}
 	return nil
@@ -332,7 +303,7 @@ func (m sidecarReturnMaps) updateEndpoint(
 	if err != nil {
 		return netlink.Route{}, false, err
 	}
-	route := e.route(table)
+	route := e.Route(table)
 	var advertisements bgpv1alpha1.BGPAdvertisementList
 	if err := k8s.List(ctx, &advertisements, client.InNamespace(e.adv.Namespace), client.MatchingLabels{
 		crdnames.LabelWorkerNode: e.node, crdnames.LabelWorkerVPC: e.vpc,
@@ -340,7 +311,7 @@ func (m sidecarReturnMaps) updateEndpoint(
 		return route, false, err
 	}
 	_, worker := sidecarReturnEndpoints(advertisements.Items, nil, e.node)
-	served, inPlace, err := m.endpointState(block, e, route, worker[workerSidecarRoute{e.vpc, e.prefix}])
+	served, inPlace, err := m.endpointState(block, e, route, worker[workerSidecarRoute{e.vpc, e.Prefix}])
 	if err != nil {
 		return route, false, err
 	}
@@ -375,15 +346,15 @@ func (e legacySidecarEndpoint) isCurrent(ctx context.Context, k8s client.Client)
 
 func (e legacySidecarEndpoint) ownedRoutes(table uint32) ([]netlink.Route, error) {
 	var owned []netlink.Route
-	for _, id := range []uint32{table, sidecarReturnTableBase + uint32(e.argument)} {
-		filter := e.route(id)
+	for _, id := range []uint32{table, sidecarreturn.TableBase + uint32(e.argument)} {
+		filter := e.Route(id)
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6, &filter,
 			netlink.RT_FILTER_TABLE|netlink.RT_FILTER_DST|netlink.RT_FILTER_OIF)
 		if err != nil {
 			return nil, err
 		}
 		for _, route := range routes {
-			if id != table || route.Protocol == sidecarReturnProtocol {
+			if id != table || route.Protocol == sidecarreturn.RouteProtocol {
 				owned = append(owned, route)
 			}
 		}
@@ -407,7 +378,7 @@ func (e legacySidecarEndpoint) retireRoutes(table uint32) error {
 func (m sidecarReturnMaps) reapLegacyEndpoint(ctx context.Context, k8s client.Client, e legacySidecarEndpoint) error {
 	// An absent veth has already lost its routes and neighbors in the
 	// kernel. The advertisement still identifies the old map entries.
-	ifindex := uint32(e.ifindex) //nolint:gosec // positive kernel ifindex
+	ifindex := uint32(e.Ifindex) //nolint:gosec // positive kernel ifindex
 	infra, err := m.policy.IsInfra(ifindex)
 	if err != nil {
 		return err
@@ -426,14 +397,6 @@ func (m sidecarReturnMaps) reapLegacyEndpoint(ctx context.Context, k8s client.Cl
 		return nil
 	}
 	return client.IgnoreNotFound(err)
-}
-
-func (e legacySidecarEndpoint) route(table uint32) netlink.Route {
-	return netlink.Route{
-		Dst:       &net.IPNet{IP: e.prefix.Addr().AsSlice(), Mask: net.CIDRMask(128, 128)},
-		LinkIndex: e.ifindex, Table: int(table), Scope: netlink.SCOPE_LINK,
-		Priority: sidecarReturnMetric, Protocol: sidecarReturnProtocol,
-	}
 }
 
 func (m sidecarReturnMaps) endpointState(
@@ -455,7 +418,8 @@ func (m sidecarReturnMaps) endpointState(
 	for _, route := range routes {
 		hasRoute = hasRoute ||
 			(route.Protocol == want.Protocol && route.Priority == want.Priority && route.LinkIndex == want.LinkIndex)
-		if canonical && len(workerAliases) > 0 && route.Protocol != sidecarReturnProtocol && route.Priority < want.Priority {
+		if canonical && len(workerAliases) > 0 &&
+			route.Protocol != sidecarreturn.RouteProtocol && route.Priority < want.Priority {
 			ready, err := m.workerRouteReady(route.LinkIndex, workerAliases)
 			if err != nil || ready {
 				return ready, false, err
@@ -465,7 +429,7 @@ func (m sidecarReturnMaps) endpointState(
 	if !hasRoute || !canonical {
 		return false, false, nil
 	}
-	ifindex := uint32(e.ifindex) //nolint:gosec // positive kernel ifindex
+	ifindex := uint32(e.Ifindex) //nolint:gosec // positive kernel ifindex
 	infra, err := m.policy.IsInfra(ifindex)
 	if err != nil || !infra {
 		return false, false, err
@@ -474,13 +438,13 @@ func (m sidecarReturnMaps) endpointState(
 	if err != nil || !present || kind != usidmap.EgressKindVeth {
 		return false, false, err
 	}
-	neighbors, err := netlink.NeighList(e.ifindex, netlink.FAMILY_V6)
+	neighbors, err := netlink.NeighList(e.Ifindex, netlink.FAMILY_V6)
 	if err != nil {
 		return false, false, err
 	}
 	for _, neighbor := range neighbors {
 		if neighbor.IP.Equal(want.Dst.IP) && neighbor.State&netlink.NUD_PERMANENT != 0 &&
-			bytes.Equal(neighbor.HardwareAddr, e.mac) {
+			bytes.Equal(neighbor.HardwareAddr, e.MAC) {
 			return false, true, nil
 		}
 	}
@@ -510,7 +474,7 @@ func (m sidecarReturnMaps) workerRouteReady(ifindex int, aliases []string) (bool
 func (m sidecarReturnMaps) installEndpoint(block uint64, e legacySidecarEndpoint, route netlink.Route) error {
 	// The legacy advertisement's ifindex must never exempt a Galactic tenant
 	// interface from policy. PutInfra guards this even if the index was reused.
-	ifindex := uint32(e.ifindex) //nolint:gosec // positive kernel ifindex
+	ifindex := uint32(e.Ifindex) //nolint:gosec // positive kernel ifindex
 	if err := m.policy.PutInfra(ifindex); err != nil {
 		return err
 	}
@@ -518,8 +482,8 @@ func (m sidecarReturnMaps) installEndpoint(block uint64, e legacySidecarEndpoint
 		return err
 	}
 	if err := netlink.NeighSet(&netlink.Neigh{
-		LinkIndex: e.ifindex, Family: netlink.FAMILY_V6, State: netlink.NUD_PERMANENT,
-		IP: route.Dst.IP, HardwareAddr: e.mac,
+		LinkIndex: e.Ifindex, Family: netlink.FAMILY_V6, State: netlink.NUD_PERMANENT,
+		IP: route.Dst.IP, HardwareAddr: e.MAC,
 	}); err != nil {
 		return err
 	}

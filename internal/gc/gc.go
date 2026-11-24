@@ -34,6 +34,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/nptv6"
 	"go.datum.net/galactic/internal/plumbing/vrf"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 // annotationNetNS is the annotation key prefix the CNI plugin uses to record
@@ -808,11 +809,11 @@ func SweepEBPFVRFTable(
 	}
 
 	live := make(map[usidmap.VRFKey]struct{}, len(vrfInstList.Items))
-	// liveCRDNames tracks the BGPVRFInstance name each key came from. The
+	// liveInstances tracks the BGPVRFInstance each key came from. The
 	// repair step below needs the name back to re-derive vrfTableID and
 	// egressKind, while Reconcile needs only the key, so this stays separate
 	// rather than widening live's value type.
-	liveCRDNames := make(map[usidmap.VRFKey]string, len(vrfInstList.Items))
+	liveInstances := make(map[usidmap.VRFKey]vrfRowInstance, len(vrfInstList.Items))
 	for _, inst := range vrfInstList.Items {
 		if inst.Spec.RouterRef == nil {
 			continue
@@ -846,7 +847,7 @@ func SweepEBPFVRFTable(
 		}
 		key := usidmap.VRFKey{Block: block, Argument: uint16(inst.Spec.VRFID)}
 		live[key] = struct{}{}
-		liveCRDNames[key] = inst.Name
+		liveInstances[key] = vrfRowInstance{name: inst.Name, router: router.Name}
 	}
 
 	// The ingress sidecar registers its own vrf_table entries under a reserved
@@ -892,7 +893,7 @@ func SweepEBPFVRFTable(
 		live[key] = struct{}{}
 	}
 
-	repairVRFRows(ctx, reg.VRF, nodeName, liveCRDNames, existingRows, write, &result)
+	repairVRFRows(ctx, reg.VRF, k8s, namespace, nodeName, liveInstances, existingRows, write, &result)
 
 	removed, err := reg.VRF.Reconcile(live, cutoff)
 	for _, e := range removed {
@@ -921,17 +922,21 @@ func SweepEBPFVRFTable(
 
 	// Last, once the entries of VPCs gone from the node are removed above, so
 	// their table IDs can be released on this same pass.
-	instNames := make(map[string]struct{}, len(liveCRDNames))
-	for _, name := range liveCRDNames {
-		instNames[name] = struct{}{}
+	instNames := make(map[string]struct{}, len(liveInstances))
+	for _, inst := range liveInstances {
+		instNames[inst.name] = struct{}{}
 	}
 	sweepVRFTableState(reg.VRF, pinDir, nodeName, instNames, &result)
 
 	return result
 }
 
-// repairVRFRows registers the vrf_table entry each live BGPVRFInstance in
-// liveCRDNames expects but vrf_table lacks. A reload that changes vrf_table's
+type vrfRowInstance struct {
+	name, router string
+}
+
+// repairVRFRows registers the vrf_table entry each live BGPVRFInstance
+// expects but vrf_table lacks. A reload that changes vrf_table's
 // layout recreates it empty, and CNI ADD never re-registers an attachment that
 // already succeeded. RepairAttachmentDatapath, started on the same tick,
 // rebuilds them from each attachment's interface; this covers a VRF it
@@ -941,10 +946,10 @@ func SweepEBPFVRFTable(
 // was recreated on another table with no CNI ADD to re-register it, and the
 // datapath would otherwise route the VPC through a table another VPC can be
 // given (#1270). The egress kind the CNI wrote is kept.
-func repairVRFRows(ctx context.Context, table *usidmap.VRFTable, nodeName string,
-	liveCRDNames map[usidmap.VRFKey]string, existingRows map[usidmap.VRFKey]usidmap.VRFEntry, write VPCWriter,
+func repairVRFRows(ctx context.Context, table *usidmap.VRFTable, k8s client.Reader, namespace, nodeName string,
+	liveInstances map[usidmap.VRFKey]vrfRowInstance, existingRows map[usidmap.VRFKey]usidmap.VRFEntry, write VPCWriter,
 	result *CleanupResult) {
-	if len(liveCRDNames) == 0 {
+	if len(liveInstances) == 0 {
 		return
 	}
 	kernel, err := listKernelVRFs()
@@ -953,7 +958,8 @@ func repairVRFRows(ctx context.Context, table *usidmap.VRFTable, nodeName string
 		result.Errors++
 		return
 	}
-	for key, instName := range liveCRDNames {
+	for key, inst := range liveInstances {
+		instName := inst.name
 		vrfTableID, egressKind, ok := kernel.resolve(nodeName, instName)
 		if !ok {
 			// No matching kernel VRF interface right now, because teardown is
@@ -961,45 +967,46 @@ func repairVRFRows(ctx context.Context, table *usidmap.VRFTable, nodeName string
 			// to repopulate from this tick.
 			continue
 		}
-		row, present := existingRows[key]
+		if row, present := existingRows[key]; present && row.VRFTableID == vrfTableID {
+			continue
+		}
+		vpc := instanceNameVPC(instName)
+		var changed, present bool
+		var old usidmap.VRFEntry
+		err := writeVPC(ctx, write, vpc, func() error {
+			var err error
+			old, present, err = table.Get(key.Block, key.Argument)
+			if err != nil || (present && old.VRFTableID == vrfTableID) {
+				return err
+			}
+			if present {
+				scope := sidecarreturn.Scope{K8s: k8s, Namespace: namespace, Node: nodeName, VPC: vpc, Router: inst.router}
+				if err := scope.Preserve(ctx, old, vrfTableID); err != nil {
+					return err
+				}
+				egressKind = old.EgressKind
+			}
+			changed = true
+			return table.Register(key.Block, key.Argument, vrfTableID, egressKind)
+		})
 		switch {
+		case errors.Is(err, ownership.ErrWorkerOwned):
+			slog.Debug("GC: left eBPF vrf_table repair to the VPC's galactic-worker",
+				"vrfInstance", instName, "block", key.Block, "argument", key.Argument)
+		case err != nil:
+			slog.Error("GC: failed to repair eBPF vrf_table entry",
+				"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
+			result.Errors++
+		case !changed:
 		case !present:
-			err := writeVPC(ctx, write, instanceNameVPC(instName), func() error {
-				return table.Register(key.Block, key.Argument, vrfTableID, egressKind)
-			})
-			if errors.Is(err, ownership.ErrWorkerOwned) {
-				slog.Debug("GC: left a missing eBPF vrf_table entry to the VPC's galactic-worker",
-					"vrfInstance", instName, "block", key.Block, "argument", key.Argument)
-				continue
-			}
-			if err != nil {
-				slog.Error("GC: failed to repair missing eBPF vrf_table entry",
-					"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
-				result.Errors++
-				continue
-			}
 			slog.Info("GC: repaired missing eBPF vrf_table entry",
 				"vrfInstance", instName, "block", key.Block, "argument", key.Argument,
 				"vrfTableID", vrfTableID, "egressKind", egressKind)
 			result.EBPFVRFEntriesRegistered++
-		case row.VRFTableID != vrfTableID:
-			err := writeVPC(ctx, write, instanceNameVPC(instName), func() error {
-				return table.Register(key.Block, key.Argument, vrfTableID, row.EgressKind)
-			})
-			if errors.Is(err, ownership.ErrWorkerOwned) {
-				slog.Debug("GC: left an eBPF vrf_table entry with a stale table ID to the VPC's galactic-worker",
-					"vrfInstance", instName, "block", key.Block, "argument", key.Argument)
-				continue
-			}
-			if err != nil {
-				slog.Error("GC: failed to rewrite eBPF vrf_table entry with a stale table ID",
-					"vrfInstance", instName, "block", key.Block, "argument", key.Argument, "err", err)
-				result.Errors++
-				continue
-			}
+		default:
 			slog.Warn("GC: rewrote eBPF vrf_table entry with a stale table ID",
 				"vrfInstance", instName, "block", key.Block, "argument", key.Argument,
-				"from", row.VRFTableID, "to", vrfTableID)
+				"from", old.VRFTableID, "to", vrfTableID)
 			result.EBPFVRFEntriesRewritten++
 		}
 	}

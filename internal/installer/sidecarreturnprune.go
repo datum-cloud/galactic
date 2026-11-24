@@ -26,6 +26,7 @@ import (
 	"go.datum.net/galactic/internal/plumbing/intf"
 	"go.datum.net/galactic/internal/plumbing/nldump"
 	"go.datum.net/galactic/internal/plumbing/vrf"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 // Leftovers of the retired host-side return path of the ingress sidecar.
@@ -33,7 +34,7 @@ import (
 // galactic-worker now gives the sidecar its return path. Earlier installers
 // built one themselves, per advertised gateway address, from:
 //
-//   - a routing table sidecarReturnTableBase+VRFID holding a /128 device route
+//   - a routing table sidecarreturn.TableBase+VRFID holding a /128 device route
 //     for the gateway address out the host side of the sidecar pod's primary
 //     interface;
 //   - a PERMANENT neighbor for that address on the same interface;
@@ -46,14 +47,7 @@ import (
 // leads to the sidecar. The prune below removes them after the endpoint no
 // longer needs it, as part of the installer reconciliation.
 
-const (
-	// sidecarReturnTableBase and sidecarReturnTableMax bound the host routing
-	// table IDs the retired return path allocated, one per Argument. No other
-	// writer uses them: host tenant VRF tables stop at vrf.HostTableIDMax,
-	// below the range, and sidecar VRF tables live in pod namespaces.
-	sidecarReturnTableBase = 0xF000
-	sidecarReturnTableMax  = sidecarReturnTableBase + uformat.ArgumentMax
-)
+const sidecarReturnTableMax = sidecarreturn.TableBase + uformat.ArgumentMax
 
 // retiredSidecarReturnPruned counts what one prune removed.
 type retiredSidecarReturnPruned struct {
@@ -91,11 +85,11 @@ func pruneRetiredSidecarReturn(
 	var leftover []netlink.Route
 	for _, r := range routes {
 		switch {
-		case r.Table >= sidecarReturnTableBase && r.Table <= sidecarReturnTableMax:
-			if !keep.arguments[uint16(r.Table-sidecarReturnTableBase)] { //nolint:gosec // reserved range is bounded
+		case r.Table >= sidecarreturn.TableBase && r.Table <= sidecarReturnTableMax:
+			if !keep.arguments[uint16(r.Table-sidecarreturn.TableBase)] { //nolint:gosec // reserved range is bounded
 				leftover = append(leftover, r)
 			}
-		case r.Protocol == sidecarReturnProtocol && !keep.routes[compatibilityRouteKey(r)]:
+		case r.Protocol == sidecarreturn.RouteProtocol && !keep.routes[compatibilityRouteKey(r)]:
 			leftover = append(leftover, r)
 		}
 	}
@@ -142,21 +136,6 @@ func pruneRetiredSidecarReturn(
 	return pruned, errors.Join(errs...)
 }
 
-// isRetiredSidecarReturnRow reports whether a vrf_table row with this key and
-// value is one the retired return path wrote: under a Block other than the
-// ingress sidecar's, pointing at that Argument's table in the retired range,
-// with EgressKindVeth. CNI and galactic-worker point a VPC's row at its host
-// VRF table, which is never in that range.
-func isRetiredSidecarReturnRow(block uint64, argument uint16, tableID, egressKind uint32) bool {
-	if block == uformat.BlockIngressSidecar {
-		return false
-	}
-	if argument < uformat.ArgumentMin || argument > uformat.ArgumentMax {
-		return false
-	}
-	return tableID == sidecarReturnTableBase+uint32(argument) && egressKind == usidmap.EgressKindVeth
-}
-
 // pruneRetiredSidecarReturnVRFRows repairs every retired vrf_table row whose
 // Argument vpcOf resolves, each under its VPC's write fence: CNI writes a row
 // with the same key for that VPC, so the row is re-read under the fence and
@@ -182,7 +161,7 @@ func pruneRetiredSidecarReturnVRFRows(
 	}
 	var errs []error
 	for _, row := range rows {
-		if keep[row.Argument] || !isRetiredSidecarReturnRow(row.Block, row.Argument, row.VRFTableID, row.EgressKind) {
+		if keep[row.Argument] || !sidecarreturn.LegacyRow(row) {
 			continue
 		}
 		vpc, ok := vpcOf(row.Argument)
@@ -194,7 +173,7 @@ func pruneRetiredSidecarReturnVRFRows(
 		err := vpcfence.Write(ctx, vpc, func() error {
 			cur, present, err := registry.VRF.Get(row.Block, row.Argument)
 			if err != nil || !present ||
-				!isRetiredSidecarReturnRow(cur.Block, cur.Argument, cur.VRFTableID, cur.EgressKind) {
+				!sidecarreturn.LegacyRow(cur) {
 				return err
 			}
 			// The retired path overwrote the VPC's canonical row, the one CNI

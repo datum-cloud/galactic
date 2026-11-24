@@ -17,6 +17,7 @@ import (
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
 	"go.datum.net/galactic/internal/plumbing/ebpf/prog"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 // withRepairFn replaces repairDatapathFn for one test with fn, stubs out the
@@ -83,7 +84,7 @@ func TestStartDatapathRepair_RetriesUntilAPassSucceeds(t *testing.T) {
 	if cfg.NodeName != "worker-a" || cfg.Namespace != testNamespace || cfg.Egress.ShardSIDs == "" {
 		t.Errorf("repair config = %+v, want the state's node, namespace and egress config", cfg)
 	}
-	if cfg.ForeignTableID == nil || !cfg.ForeignTableID(sidecarReturnTableBase+1) {
+	if cfg.ForeignTableID == nil || !cfg.ForeignTableID(sidecarreturn.TableBase+1) {
 		t.Error("repair config does not treat the sidecar return tables as foreign")
 	}
 	select {
@@ -215,8 +216,8 @@ func TestIsSidecarReturnTable(t *testing.T) {
 		tableID uint32
 		want    bool
 	}{
-		{name: "BelowRange", tableID: sidecarReturnTableBase - 1, want: false},
-		{name: "Base", tableID: sidecarReturnTableBase, want: true},
+		{name: "BelowRange", tableID: sidecarreturn.TableBase - 1, want: false},
+		{name: "Base", tableID: sidecarreturn.TableBase, want: true},
 		{name: "Max", tableID: sidecarReturnTableMax, want: true},
 		{name: "AboveRange", tableID: sidecarReturnTableMax + 1, want: false},
 		{name: "TenantTable", tableID: 7, want: false},

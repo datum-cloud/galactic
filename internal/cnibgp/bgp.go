@@ -47,7 +47,9 @@ import (
 	"go.datum.net/galactic/internal/gc"
 	"go.datum.net/galactic/internal/nodevpc"
 	"go.datum.net/galactic/internal/plumbing/ebpf/attachreg"
+	"go.datum.net/galactic/internal/plumbing/ebpf/usidmap"
 	"go.datum.net/galactic/internal/plumbing/srv6"
+	"go.datum.net/galactic/internal/sidecarreturn"
 )
 
 // maxRetries is the number of retry attempts for transient Kubernetes API
@@ -364,8 +366,10 @@ func publishFenced(
 
 	// Not tracked for rollback: the vrf_table entry is shared by every
 	// attachment on this VPC and node, like the BGPVRFInstance above.
+	scope := sidecarreturn.Scope{K8s: k8s, Namespace: namespace, Node: nodeName, VPC: cfg.vpc, Router: bgp.routerName}
 	registered, err := registerEBPFDatapath(
 		bgp, cfg.vpc, cfg.vpcAttachment, cfg.ifaceType, uint16(vrfID), ebpfPinDir, localEgressPrefixes(ipamResult),
+		func(row usidmap.VRFEntry, table uint32) error { return scope.Preserve(ctx, row, table) },
 	)
 	if err != nil {
 		return fmt.Errorf("register eBPF uSID datapath: %w", err)
@@ -572,15 +576,17 @@ func egressConfig() attachreg.EgressConfig {
 // localEgressPrefixes produces them.
 func registerEBPFDatapath(
 	bgp bgpConfig, vpc, vpcAttachment, ifaceType string, argument uint16, pinDir string, prefixes []string,
+	preserveLegacyReturn func(usidmap.VRFEntry, uint32) error,
 ) (registered bool, err error) {
 	return attachreg.RegisterDatapath(pinDir, attachreg.Registration{
-		Node:          attachreg.Node{Locator: bgp.srv6Locator, NodeID: bgp.nodeID},
-		VPC:           vpc,
-		VPCAttachment: vpcAttachment,
-		InterfaceType: ifaceType,
-		Argument:      argument,
-		LocalPrefixes: prefixes,
-		Egress:        egressConfig(),
+		Node:                 attachreg.Node{Locator: bgp.srv6Locator, NodeID: bgp.nodeID},
+		VPC:                  vpc,
+		VPCAttachment:        vpcAttachment,
+		InterfaceType:        ifaceType,
+		Argument:             argument,
+		LocalPrefixes:        prefixes,
+		Egress:               egressConfig(),
+		PreserveLegacyReturn: preserveLegacyReturn,
 	})
 }
 
