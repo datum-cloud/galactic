@@ -297,6 +297,11 @@ These amend the mechanisms the qualification plan first named:
   kernel's untag. With VLAN receive offload, as on veth and most NICs, XDP on
   the lower device sees the frame untagged and cannot tell VLANs apart, so the
   slot program selects by destination, never by VLAN.
+- **A return into a pair can carry the receiving VLAN's tag in skb metadata.**
+  Generic XDP runs before the kernel's untag, and its `XDP_REDIRECT` transmits
+  the received skb, `vlan_tci` included, into the pair's NAT end. XDP cannot
+  clear it, so `local_pair_rx` pops it before delivering to the TAP, which
+  would otherwise write it back into the guest's frame.
 - **`local_rx` runs where the dispatcher does, ahead of the bond master.**
   The kernel runs every tcx program before every clsact filter, and a
   cluster CNI attaches to a bond master through tcx and ends the packet's
