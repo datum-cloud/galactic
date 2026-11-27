@@ -41,9 +41,6 @@ tests:
         alertname: FabricBGPSessionAdminDown
         exp_alerts: []
 
-  # A cordoned fabric-router node in the cluster mutes sessions to a loopback
-  # peer while it reboots and for 5m after it uncordons; the same outage with
-  # no cordoned node, or only a cordoned non-fabric-router node, still fires.
   - interval: 30s
     input_series:
       - series: 'frr_bgp_peer_state{job="fabric-router",cluster="lab",node="edge-a",peer="fd00:231:2014::1",peer_as="33438",afi="ipv6",safi="unicast"}'
@@ -141,8 +138,6 @@ tests:
                 Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
                 any NOTIFICATION.
 
-  # A cordoned node whose InternalIP is the peer mutes that peer in every
-  # cluster, so a session in another cluster to a rebooting node stays quiet.
   - interval: 30s
     input_series:
       - series: 'frr_bgp_peer_state{job="fabric-router",cluster="far",node="fabric-x",peer="2600:9c07:0:44::2",peer_as="33438",afi="ipv6",safi="unicast"}'
@@ -3521,7 +3516,6 @@ tests:
                 attachment comparison. GalacticInstanceAttachmentNotProgrammed cannot fire until it returns.
 
 
-  # A node cordoned for over 3h stops muting its cluster.
   - interval: 1m
     input_series:
       - series: 'frr_bgp_peer_state{job="fabric-router",cluster="lab",node="edge-a",peer="fd00:231:2014::1",peer_as="33438",afi="ipv6",safi="unicast"}'
@@ -3556,7 +3550,6 @@ tests:
                 Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
                 any NOTIFICATION.
 
-  # A node whose series began cordoned mutes until the series is 3h old.
   - interval: 1m
     input_series:
       - series: 'frr_bgp_peer_state{job="fabric-router",cluster="lab",node="edge-a",peer="fd00:231:2014::1",peer_as="33438",afi="ipv6",safi="unicast"}'
@@ -3570,7 +3563,6 @@ tests:
         alertname: FabricBGPSessionDown
         exp_alerts: []
 
-  # One uncordon blip does not re-arm the mute of a long cordon.
   - interval: 1m
     input_series:
       - series: 'frr_bgp_peer_state{job="fabric-router",cluster="lab",node="edge-a",peer="fd00:231:2014::1",peer_as="33438",afi="ipv6",safi="unicast"}'
@@ -3602,7 +3594,6 @@ tests:
                 Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
                 any NOTIFICATION.
 
-  # Without kube-state-metrics the alert still fires.
   - interval: 1m
     input_series:
       - series: 'frr_bgp_peer_state{job="fabric-router",cluster="lab",node="edge-a",peer="fd00:231:2014::1",peer_as="33438",afi="ipv6",safi="unicast"}'
@@ -3632,7 +3623,6 @@ tests:
                 Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
                 any NOTIFICATION.
 
-  # A session series with no cluster label is never muted.
   - interval: 1m
     input_series:
       - series: 'frr_bgp_peer_state{job="fabric-router",node="edge-a",peer="fd00:231:2014::1",peer_as="33438",afi="ipv6",safi="unicast"}'
@@ -3662,3 +3652,31 @@ tests:
                 fabric-router on edge-a has not had its ipv6 unicast session to fd00:231:2014::1 (AS 33438)
                 Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
                 any NOTIFICATION.
+
+  - interval: 1m
+    input_series:
+      - series: 'frr_bgp_peer_state{job="fabric-router",cluster="lab",node="edge-a",peer="fd00:231:2014::1",peer_as="33438",afi="ipv6",safi="unicast"}'
+        values: "1x260 0x40"
+      - series: 'frr_status_up{job="fabric-router",cluster="lab",node="compute-a"}'
+        values: "1x300"
+      - series: 'kube_node_spec_unschedulable{cluster="lab",node="compute-a"}'
+        values: "0x250 1x50"
+    alert_rule_test:
+      - eval_time: 290m
+        alertname: FabricBGPSessionDown
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'frr_bgp_peer_state{job="fabric-router",cluster="lab",node="edge-a",peer="fd00:231:2014::1",peer_as="33438",afi="ipv6",safi="unicast"}'
+        values: "1x260 0x40"
+      - series: 'frr_status_up{job="fabric-router",cluster="lab",node="compute-a"}'
+        values: "1x300"
+      - series: 'kube_node_spec_unschedulable{cluster="lab",node="compute-a",pod="ksm-a"}'
+        values: "0x255 1x20 _x25"
+      - series: 'kube_node_spec_unschedulable{cluster="lab",node="compute-a",pod="ksm-b"}'
+        values: "_x275 1x25"
+    alert_rule_test:
+      - eval_time: 290m
+        alertname: FabricBGPSessionDown
+        exp_alerts: []
