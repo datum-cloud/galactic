@@ -13,7 +13,7 @@ carries `service: galactic`, `team: connect` and a `runbook_url`.
 
 | Alert                                     | Fires when                                                                  | For   | Severity   |
 | ----------------------------------------- | --------------------------------------------------------------------------- | ----- | ---------- |
-| FabricBGPSessionDown                      | `frr_bgp_peer_state == 0`                                                   | 5m    | critical   |
+| FabricBGPSessionDown                      | `frr_bgp_peer_state == 0`, muted while a fabric-router node is cordoned     | 5m    | critical   |
 | FabricBGPSessionAdminDown                 | `frr_bgp_peer_state == 2`                                                   | 1h    | warning    |
 | FabricBGPSessionFlapping                  | `resets(frr_bgp_peer_uptime_seconds[30m]) >= 3`                             | 0     | warning    |
 | FabricBGPPrefixesDropped                  | received prefixes under half of an hour ago, session up                     | 15m   | warning    |

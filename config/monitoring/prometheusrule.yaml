@@ -35,7 +35,19 @@ spec:
         # 2 for a neighbor that is administratively shut down. Only 0 is an
         # outage; a deliberate shutdown is covered by the next rule.
         - alert: FabricBGPSessionDown
-          expr: frr_bgp_peer_state{job="fabric-router"} == 0
+          expr: |
+            frr_bgp_peer_state{job="fabric-router"} == 0
+            unless on (cluster) (
+              count by (cluster) (
+                max_over_time(kube_node_spec_unschedulable[5m]) == 1
+                and on (cluster, node) group by (cluster, node) (last_over_time(frr_status_up{job="fabric-router"}[1h]))
+              )
+            )
+            unless on (peer) label_replace(
+              kube_node_status_addresses{type="InternalIP"}
+                and on (cluster, node) (max_over_time(kube_node_spec_unschedulable[5m]) == 1),
+              "peer", "$1", "address", "(.*)"
+            )
           for: 5m
           labels:
             severity: critical

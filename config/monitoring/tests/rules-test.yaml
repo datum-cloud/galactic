@@ -41,6 +41,124 @@ tests:
         alertname: FabricBGPSessionAdminDown
         exp_alerts: []
 
+  # A cordoned fabric-router node in the cluster mutes sessions to a loopback
+  # peer while it reboots and for 5m after it uncordons; the same outage with
+  # no cordoned node, or only a cordoned non-fabric-router node, still fires.
+  - interval: 30s
+    input_series:
+      - series: 'frr_bgp_peer_state{job="fabric-router",cluster="lab",node="edge-a",peer="fd00:231:2014::1",peer_as="33438",afi="ipv6",safi="unicast"}'
+        values: "1x10 0x50"
+      - series: 'frr_status_up{job="fabric-router",cluster="lab",node="compute-a"}'
+        values: "1x60"
+      - series: 'kube_node_spec_unschedulable{cluster="lab",node="compute-a"}'
+        values: "0x8 1x14 0x38"
+      - series: 'frr_bgp_peer_state{job="fabric-router",cluster="other",node="edge-b",peer="fd00:231:2010::1",peer_as="33438",afi="ipv6",safi="unicast"}'
+        values: "1x10 0x50"
+      - series: 'frr_status_up{job="fabric-router",cluster="other",node="compute-b"}'
+        values: "1x60"
+      - series: 'kube_node_spec_unschedulable{cluster="other",node="cp-b"}'
+        values: "0x8 1x14 0x38"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FabricBGPSessionDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: fabric-router
+              cluster: other
+              node: edge-b
+              peer: fd00:231:2010::1
+              peer_as: "33438"
+              afi: ipv6
+              safi: unicast
+            exp_annotations:
+              summary: "Underlay BGP session edge-b -> fd00:231:2010::1 (ipv6) is down"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpsessiondown"
+              description: >-
+                fabric-router on edge-b has not had its ipv6 unicast session to fd00:231:2010::1 (AS 33438)
+                Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
+                any NOTIFICATION.
+      - eval_time: 22m
+        alertname: FabricBGPSessionDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: fabric-router
+              cluster: lab
+              node: edge-a
+              peer: fd00:231:2014::1
+              peer_as: "33438"
+              afi: ipv6
+              safi: unicast
+            exp_annotations:
+              summary: "Underlay BGP session edge-a -> fd00:231:2014::1 (ipv6) is down"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpsessiondown"
+              description: >-
+                fabric-router on edge-a has not had its ipv6 unicast session to fd00:231:2014::1 (AS 33438)
+                Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
+                any NOTIFICATION.
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: fabric-router
+              cluster: other
+              node: edge-b
+              peer: fd00:231:2010::1
+              peer_as: "33438"
+              afi: ipv6
+              safi: unicast
+            exp_annotations:
+              summary: "Underlay BGP session edge-b -> fd00:231:2010::1 (ipv6) is down"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpsessiondown"
+              description: >-
+                fabric-router on edge-b has not had its ipv6 unicast session to fd00:231:2010::1 (AS 33438)
+                Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
+                any NOTIFICATION.
+
+  # A cordoned node whose InternalIP is the peer mutes that peer in every
+  # cluster, so a session in another cluster to a rebooting node stays quiet.
+  - interval: 30s
+    input_series:
+      - series: 'frr_bgp_peer_state{job="fabric-router",cluster="far",node="fabric-x",peer="2600:9c07:0:44::2",peer_as="33438",afi="ipv6",safi="unicast"}'
+        values: "1x10 0x50"
+      - series: 'kube_node_status_addresses{cluster="lab",node="compute-a",type="InternalIP",address="2600:9c07:0:44::2"}'
+        values: "1x60"
+      - series: 'kube_node_spec_unschedulable{cluster="lab",node="compute-a"}'
+        values: "0x8 1x14 0x38"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FabricBGPSessionDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: FabricBGPSessionDown
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: FabricBGPSessionDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              service: galactic
+              team: connect
+              job: fabric-router
+              cluster: far
+              node: fabric-x
+              peer: 2600:9c07:0:44::2
+              peer_as: "33438"
+              afi: ipv6
+              safi: unicast
+            exp_annotations:
+              summary: "Underlay BGP session fabric-x -> 2600:9c07:0:44::2 (ipv6) is down"
+              runbook_url: "https://github.com/datum-cloud/infra/blob/main/docs/runbooks/galactic/README.md#fabricbgpsessiondown"
+              description: >-
+                fabric-router on fabric-x has not had its ipv6 unicast session to 2600:9c07:0:44::2 (AS 33438)
+                Established for 5 minutes. The BMP collector's Peer Down for this session carries the reason and
+                any NOTIFICATION.
+
   # Shut down for an hour fires.
   - interval: 30s
     input_series:
