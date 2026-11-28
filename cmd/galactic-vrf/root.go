@@ -76,7 +76,16 @@ func runCmd(cfg *config.VRFConfig) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(bgpv1alpha1.AddToScheme(scheme))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restCfg := ctrl.GetConfigOrDie()
+	if cfg.APISocket != "" {
+		// Every client below derives from this one config: the watch, the
+		// uncached reader, the RBAC pre-flight, the gateway publisher and the
+		// node-source resolver.
+		dialAPIThroughSocket(restCfg, cfg.APISocket)
+		log.Printf("reaching the Kubernetes API through unix socket %s", cfg.APISocket)
+	}
+
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: "0",
 		Metrics: metricsserver.Options{
@@ -226,6 +235,10 @@ func newRootCommand() *cobra.Command {
 			"return-path gateway address from -- must be address space no tenant IPAM (this repo's own or "+
 			"external) ever allocates from; only takes effect when --node-name is also set (env "+
 			config.EnvVRFGatewayPrefix+")")
+	cmd.Flags().StringP("api-socket", "", "",
+		"Absolute path to a unix socket served by a per-node proxy that forwards bytes to the Kubernetes API "+
+			"server; when set, every API connection is dialed through it while TLS and credentials stay "+
+			"end to end (env "+config.EnvVRFAPISocket+")")
 	cmd.Flags().Bool("build-info", false, "Print build information and exit")
 	cmd.Flags().BoolP("version", "V", false, "Print version and exit")
 	logOpts.BindFlags(cmd.PersistentFlags())
