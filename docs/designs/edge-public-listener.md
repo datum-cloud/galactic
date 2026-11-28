@@ -1,6 +1,6 @@
 # Galactic Edge public listener
 
-Status: proposed. Nothing in this design is implemented. It extends the [Galactic Edge Foundation](galactic-edge.md) and reuses the [XDP/DSR gateway](../gateway/architecture.md). The [provider contract](../edge/provider-contract.md) remains the reference for behavior that exists today.
+Status: proposed, with its open decisions settled. Nothing in this design is implemented. It extends the [Galactic Edge Foundation](galactic-edge.md) and reuses the [XDP/DSR gateway](../gateway/architecture.md). The [provider contract](../edge/provider-contract.md) remains the reference for behavior that exists today.
 
 This design follows the [Datum enhancement template](https://github.com/datum-cloud/enhancements/blob/main/enhancements/template/README.md).
 
@@ -15,19 +15,19 @@ This design follows the [Datum enhancement template](https://github.com/datum-cl
 
 ## Summary
 
-`PublicListener/v1` gives an approved edge provider a public, anycast address on the existing gateway nodes, delivered to the provider's pods through Galactic rather than through Kubernetes Services. The platform authority declares an `EdgeListener` with the public addresses and ports. Core turns it into a gateway-namespace `NetworkService` whose backends are the provider instances' `SocketAccess` attachments in a platform-owned ingress gVPC. The gateway keeps its datapath: Maglev selection, SRv6 delivery to the backend node, address translation on the backend node and direct server return. Each provider instance serves the listener from a socket bound to its pod VRF, so the provider still needs no host privilege.
+`PublicListener/v1` gives an approved edge provider a public address in its cell, advertised by that cell's gateway nodes and delivered to the provider's pods through Galactic rather than through Kubernetes Services. The platform authority declares an `EdgeListener` with the public addresses and ports. Core turns it into gateway-namespace `NetworkService`s, one per port, whose backends are the provider instances' `SocketAccess` attachments in a platform-owned ingress gVPC. The gateway keeps its datapath: Maglev selection, SRv6 delivery to the backend node, address translation on the backend node and direct server return. Each provider instance serves the listener from a socket bound to its pod VRF, so the provider still needs no host privilege.
 
 ## Motivation
 
 An edge provider has two sides. Galactic Edge owns the inside: attachments into tenant gVPCs, prefix publication, fencing and policy. The outside, the address clients connect to, has no Galactic contract. The MASQUE provider's Service manifest calls its `ClusterIP` a placeholder that "an overlay exposes", and the only overlays available are Kubernetes mechanisms on the cluster pod network: a `LoadBalancer` Service with the CNI's address pools and BGP, a `NodePort`, or `hostPort`.
 
-Those overlays sit outside everything the Edge foundation guarantees. Their addresses are allocated per site by hand, their reachability is not tied to instance leases or drain, traffic policy does not see them, and the gateway's anycast, Maglev and health machinery does not apply. Each new provider (MASQUE, iroh, tailnet) would repeat the same per-site work.
+Those overlays sit outside everything the Edge foundation guarantees. Their addresses are allocated per site by hand, their reachability is not tied to instance leases or drain, traffic policy does not see them, and the gateway's multi-node advertisement, Maglev and health machinery does not apply. Each new provider (MASQUE, iroh, tailnet) would repeat the same per-site work.
 
-The gateway already serves public VIPs with anycast and direct server return, but only for backends that are tenant `VPCAttachment`s. A provider pod is not one. This design closes that gap without a second ingress datapath.
+The gateway already serves public VIPs from every gateway node in a cell, with direct server return, but only for backends that are tenant `VPCAttachment`s. A provider pod is not one. This design closes that gap without a second ingress datapath.
 
 ### Goals
 
-1. An approved provider can be reached on a public IPv6 and IPv4 address and port, served identically by every gateway node.
+1. An approved provider can be reached on a public IPv6 and IPv4 address and port that belongs to one cell and is served identically by every gateway node in that cell.
 2. The public address, ports and the provider allowed to receive them are platform decisions, recorded in one object and validated by core. The provider cannot choose or change them.
 3. Instances join and leave the backend set from Edge state (attachment programmed, provider `Ready`, lease valid), within the foundation's existing deadlines.
 4. Replies leave by direct server return with the public address as source, exactly as tenant VIP replies do today.
@@ -48,7 +48,7 @@ The gateway already serves public VIPs with anycast and direct server return, bu
 
 ```
                  internet client
-                        │  VIP:443 (UDP and TCP), anycast
+                        │  VIP:443 (UDP and TCP), advertised by every gateway node in the cell
           ┌─────────────┴─────────────┐
           ▼                           ▼
    gateway node A               gateway node B        galactic-gateway XDP: VIP match, Maglev
@@ -61,7 +61,7 @@ The gateway already serves public VIPs with anycast and direct server return, bu
    edge node: usid_egress ◄── attachment address:8443 → VIP:443 ◄────────────────────┘
           │  direct server return, unencapsulated
           ▼
-   public uplink → internet client
+   node uplink → internet client
 ```
 
 ### Core concepts
@@ -90,11 +90,25 @@ The Kubernetes Service and any `LoadBalancer`, `NodePort` or `hostPort` overlay 
 | --- | --- |
 | Maglev is stateless. A change in the backend set moves about 1/N of flows, which breaks QUIC and TLS connections on the moved flows. | Default affinity is `ClientIPAndProtocol`. Drain removes an instance from new selection only after `drainSeconds`, so providers can send HTTP/3 GOAWAY or HTTP/2 GOAWAY first. Connection-ID routing is a follow-up, not part of v1. |
 | An edge node that also runs the gateway can select a backend on itself. The gateway has no qualified local-delivery branch: a node's own locator can match a discard route. | Phase 0 qualifies local delivery on the containerlab gvpc lab. Until it passes, the listener controller excludes backends on nodes that advertise the listener's VIPs, and reports `LocalBackendsExcluded`. |
-| The return rewrite needs the listener attachment's host veth in `ifindex_vrf_table`, which the CNI datapath owns today. | The node agent registers the veth through the same datapath interface the CNI uses, never by writing the map directly. Ownership is fixed in Phase 1 before any code lands. |
-| A compromised provider could try to originate internet traffic through the listener. | The ingress VRF has no default route and no egress shard. Only replies that match a VIP translation row leave on the public uplink. Anything else is dropped and counted. |
+| The return rewrite needs the listener attachment's host veth in `ifindex_vrf_table` with `usid_egress` attached. | The node agent already does this for every edge attachment. Phase 0 confirms that `usid_egress` applies the VIP reverse translation on an edge host link. See [Decisions](#decisions). |
+| A client reaches a cell that does not hold its grant. | A listener's addresses belong to one cell. Each cell's gateway VIP prefixes are disjoint from every other cell's, and core refuses an address outside its own prefixes. |
+| A compromised provider could try to originate internet traffic through the listener. | The ingress VRF has no default route and no egress shard. Only replies that match a VIP translation row leave through the node's uplink. Anything else is dropped and counted. |
 | One provider's listener reaches another provider or a tenant. | One ingress gVPC per provider, no route leaking, and the `PublicService` traffic policy path on the listener attachment. |
 
 ## Design Details
+
+### Decisions
+
+These were open when the design was proposed and were settled in [#1506](https://github.com/datum-cloud/galactic/issues/1506).
+
+| Question | Decision | Reason |
+| --- | --- | --- |
+| Who supplies listener addresses | The platform authority, from the cell's gateway VIP prefixes. Core refuses any other address with `AddressOutsidePool`. | This is how gateway-namespace services get addresses today. An allocator can follow later without an API change. |
+| How many ingress gVPCs exist | One per provider type, not one per listener | It isolates providers from each other at the cost of one VPC identifier each. A provider has one listener, so a gVPC per listener adds no isolation. |
+| Who registers a listener attachment's host veth in `ifindex_vrf_table` | No new component. The node agent (`galactic-edge`) already registers every edge host link through `attachreg.RegisterHostLink`, which writes the `ifindex_vrf_table` row, sets the veth egress kind and attaches `usid_egress`. | The registration a listener needs exists today. What remains unproven is that the gateway's VIP reverse translation applies on an edge host link, which Phase 0 tests. |
+| What happens to a backend on a node that also advertises the VIP | It is excluded, and the listener reports `LocalBackendsExcluded`, until Phase 0 qualifies gateway local delivery. The exclusion is removed once it passes. | Local delivery is unqualified today, and excluding those backends keeps the rest of the work unblocked. |
+
+A listener's addresses belong to one cell. Grants are scoped to one cell, so an address announced from two cells would send some clients to a cell that cannot authorize them. Core in one cell cannot see other cells' addresses, so address planning enforces the rule: each cell's gateway VIP prefixes are disjoint from every other cell's.
 
 ### Responsibility split
 
@@ -102,8 +116,8 @@ The Kubernetes Service and any `LoadBalancer`, `NodePort` or `hostPort` overlay 
 | --- | --- | --- |
 | Operator | `EdgeProvider.spec` (adds `PublicListener/v1`), gateway VIP prefixes | `EdgeListener` |
 | Platform authority | `EdgeService` for the ingress gVPC, `EdgeListener.spec` | `NetworkService`, `ServiceVIPBinding` |
-| Core (`galactic-controller --role=cell`) | Ingress gVPC, `EdgeListener.status`, the gateway-namespace `NetworkService`, the `/128` advertisement for each listener attachment | `EdgeListener.spec` |
-| Node agent (`galactic-edge`) | Listener attachment programming, veth registration with the datapath | Gateway VIP state |
+| Core (`galactic-controller --role=cell`) | Ingress gVPC, `EdgeListener.status`, one gateway-namespace `NetworkService` per listener port, the `/128` advertisement for each listener attachment | `EdgeListener.spec` |
+| Node agent (`galactic-edge`) | Listener attachment programming and host link registration, as for every edge attachment | Gateway VIP state |
 | Gateway (`galactic-gateway`, router) | VIP rules, `ServiceVIPBinding`, VIP advertisements | Edge objects |
 | Provider | Listener `EdgeAttachment`, `Ready`, instance and lease | `EdgeListener`, `EdgeService`, `NetworkService` |
 
@@ -121,15 +135,16 @@ metadata:
   namespace: galactic-system
 spec:
   providerRef: {name: masque}              # immutable
-  serviceRef: {namespace: masque-system, name: masque-ingress}   # grants SocketAccess + PublicListener on the ingress gVPC
+  serviceRef: {namespace: galactic-system, name: masque-ingress}  # in the ingress gVPC's namespace; grants SocketAccess + PublicListener
   addresses:                               # at most one per family; must fall in the gateway VIP prefixes
     - 2001:db8:100::10
     - 192.0.2.10
   ports:
     - {name: h3, protocol: UDP, port: 443, backendPort: 8443}
     - {name: h2, protocol: TCP, port: 443, backendPort: 8443}
+  healthPort: 8443                         # TCP backend port probed for health; defaults to the first TCP backendPort, required when every port is UDP
   sessionAffinity: ClientIPAndProtocol     # defaults to ClientIPAndProtocol
-  failurePolicy: FailClosed                # withdraw the VIPs when no listener backend exists
+  failurePolicy: FailClosed                # copied into each NetworkService's healthCheck
 status:
   conditions:
     - {type: Accepted, reason: Accepted}            # or ProviderNotApproved, CapabilityNotGranted, AddressOutsidePool, AddressClaimed
@@ -138,7 +153,11 @@ status:
     - {attachment: ea-…, node: edge-1, address: 'fd00:e1::101', serving: true}
 ```
 
-**`NetworkService`** gains `spec.edgeListenerRef`, mutually exclusive with `backendSelector`. Core sets it on the gateway-namespace service it writes for each `EdgeListener`. Gateways resolve backends from the listener's backends instead of from `VPCAttachment`s. The service's `vpcRef` is the ingress gVPC identifier. Project namespaces cannot set `edgeListenerRef`.
+**`NetworkService`** gains `spec.edgeListenerRef`. A `NetworkService` serves one protocol and port, so core writes one gateway-namespace service per listener port, each with `edgeListenerRef` set and the port's `protocol`, `port` and `backendPort`. Gateways resolve backends from the listener's backends instead of from `VPCAttachment`s. The service's `vpcRef` is the ingress gVPC identifier. Project namespaces cannot set `edgeListenerRef`.
+
+`backendSelector` is required today, with a rule that it is not empty. The change makes exactly one of `backendSelector` and `edgeListenerRef` required, and keeps the non-empty rule for `backendSelector` when it is set.
+
+`NetworkService` has a failure policy only inside `spec.healthCheck`, where the default is `FailOpen`. Core therefore sets `spec.healthCheck` on every listener service, with the listener's `failurePolicy` and a TCP probe on `healthPort`. `healthPort` defaults to the first TCP `backendPort`, and the API refuses a listener whose ports are all UDP unless it sets `healthPort`.
 
 ### Ingress gVPC
 
@@ -146,10 +165,10 @@ Core creates one gVPC per provider holding `PublicListener`, named `edge-ingress
 
 ### Control path
 
-1. Core admits the `EdgeListener`: the provider is approved and lists `PublicListener`, the service grants `SocketAccess` and `PublicListener` on the provider's ingress gVPC, each address falls in a gateway VIP prefix, and no other service claims the address and port.
+1. Core admits the `EdgeListener`: the provider is approved and lists `PublicListener`, the service grants `SocketAccess` and `PublicListener` on the provider's ingress gVPC, each address falls in one of this cell's gateway VIP prefixes, and no other service claims the address and port.
 2. A provider instance creates a listener attachment. Admission, allocation and programming follow the existing attachment state machine.
 3. Once the attachment is programmed, core writes a `BGPAdvertisement` for the attachment's `/128` into the ingress VRF with `VRFID` and `End.DT46`, the same shape as edge route publication. This lets the gateway resolve the backend's uSID.
-4. Core writes or updates the gateway-namespace `NetworkService` with the listener's addresses, ports, affinity, failure policy and `edgeListenerRef`.
+4. Core writes or updates one gateway-namespace `NetworkService` per listener port, each with the listener's addresses, the port, affinity, health check and `edgeListenerRef`.
 5. Each gateway computes the backend set from listener backends, programs its Maglev table, and writes a `ServiceVIPBinding` for each backend on the backend's node. The router advertises the VIPs once at least one binding is `Bound`.
 
 ### Data path
@@ -166,13 +185,13 @@ For an IPv4 VIP, step 3 also applies the gateway's stateless IPv4-to-IPv6 transl
 **Reply.**
 
 1. The provider replies from `attachment-address:8443`. The pod VRF's default route sends the packet over the veth.
-2. `usid_egress` on the host veth finds the veth in `ifindex_vrf_table`, rewrites the source to `VIP:443` (or translates back to IPv4), and sends the packet unencapsulated to the public uplink neighbor.
+2. `usid_egress` on the host veth finds the veth in `ifindex_vrf_table`, rewrites the source to `VIP:443` (or translates back to IPv4), and sends the packet unencapsulated to the node's uplink neighbor, exactly as for tenant VIP replies. Where that neighbor is a fabric router, the site's routing carries the reply to the client, so the listener's edge nodes need an uplink path back to the internet.
 
 ### Backend eligibility and failure
 
 A listener attachment is a listener backend only while all of these hold:
 
-- the attachment is `Programmed` and not `Draining`;
+- the attachment is `Programmed`, and if it is `Draining`, its drain deadline has not passed;
 - the provider has set `Ready` on the attachment;
 - the instance lease is valid by the foundation's rules;
 - its node is not excluded by the local-delivery rule.
@@ -185,7 +204,7 @@ A listener attachment is a listener backend only while all of these hold:
 | Last listener backend leaves | With `FailClosed`, every gateway withdraws the VIPs | The gateway's existing withdrawal path |
 | Gateway node fails | ECMP moves flows to the remaining gateways. Maglev selects the same backend there. | Underlay convergence |
 
-Gateway health checks stay available as a second signal. The router's TCP probe from the host link-local address reaches the provider's TCP listener in the pod VRF.
+Every listener service also carries a gateway health check, as a second signal beside Edge state. The router probes `healthPort` over TCP from the host link-local address, so each provider instance needs a TCP listener on that port in its pod VRF.
 
 ### Policy
 
@@ -195,10 +214,10 @@ Listener attachments use the `PublicService` traffic policy path in both directi
 
 | Phase | Work | Gate |
 | --- | --- | --- |
-| 0 | On the containerlab gvpc lab, hand-wire a `SocketAccess` attachment as a DSR backend: veth registration, `/128` advertisement, binding. Qualify local and remote delivery. | Bidirectional UDP and TCP to a pod VRF socket through a gateway VIP, for both families, with a backend on a gateway node and on a node that is not a gateway |
-| 1 | API: capability enums, `EdgeListener`, `NetworkService.spec.edgeListenerRef`. Fix datapath ownership of veth registration. | API review and CRD validation tests |
+| 0 | On the containerlab gvpc lab, hand-wire a `SocketAccess` attachment as a DSR backend: `/128` advertisement and binding, relying on the existing host link registration. Confirm the VIP reply translation on the edge host link, and qualify local and remote delivery. | Bidirectional UDP and TCP to a pod VRF socket through a gateway VIP, for both families, with a backend on a gateway node and on a node that is not a gateway |
+| 1 | API: capability enums, `EdgeListener`, `NetworkService.spec.edgeListenerRef` and its rule against `backendSelector` | API review and CRD validation tests |
 | 2 | Core: ingress gVPC, listener admission and status, `/128` publication, `NetworkService` writer | envtest coverage of every status reason |
-| 3 | Node agent: veth registration, unmatched-egress drop | Lab packet tests, including negative egress |
+| 3 | Node agent and datapath: VIP reply translation on edge host links if Phase 0 shows a gap, unmatched-egress drop | Lab packet tests, including negative egress |
 | 4 | Gateway: backend resolution from listener backends, eligibility, local-delivery exclusion | Lab failover: drain, lease expiry, API outage, gateway loss |
 | 5 | MASQUE: listener attachment, sockets bound to the pod VRF, public `--authority`. Remove the Service overlay in deployment. | An independent client passes HTTP/3 and HTTP/2 through the VIP, IPv6 and IPv4 |
 
@@ -206,7 +225,7 @@ Listener attachments use the `PublicService` traffic policy path in both directi
 
 ### Feature Enablement and Rollback
 
-The feature is enabled per provider by listing `PublicListener/v1` and creating an `EdgeListener`. Deleting the `EdgeListener` withdraws the VIPs through the gateway's drain path, then removes the `NetworkService`. Rolling back the controllers leaves `EdgeListener` objects unserved and the VIPs withdrawn. Providers keep working on tenant attachments.
+The feature is enabled per provider by listing `PublicListener/v1` and creating an `EdgeListener`. Deleting the `EdgeListener` withdraws the VIPs through the gateway's drain path, then removes the listener's `NetworkService`s. Rolling back the controllers leaves `EdgeListener` objects unserved and the VIPs withdrawn. Providers keep working on tenant attachments.
 
 ### Rollout, Upgrade and Rollback Planning
 
@@ -221,11 +240,11 @@ Roll out to the staging labs first, with the existing overlay left in place on a
 
 ### Dependencies
 
-The gateway VIP prefixes must cover the listener addresses. Gateway nodes must run with IPv4 VIPs enabled to serve an IPv4 address. Edge nodes need the canonical host VRF for the ingress gVPC.
+The gateway VIP prefixes must cover the listener addresses. Gateway nodes must run with IPv4 VIPs enabled to serve an IPv4 address. Edge nodes need the canonical host VRF for the ingress gVPC, and an uplink path that carries VIP-sourced replies to the internet.
 
 ### Scalability
 
-Each listener is one `NetworkService` with up to 16 ports and two addresses. Each listener backend costs one `/128` advertisement, one `ServiceVIPBinding` and one Maglev slot per gateway. One ingress gVPC per provider uses one VPC identifier per provider.
+Each listener has up to 16 ports and two addresses, and each port is one `NetworkService`. Each listener backend costs one `/128` advertisement, one `ServiceVIPBinding` and one Maglev slot per gateway. One ingress gVPC per provider uses one VPC identifier per provider.
 
 ### Troubleshooting
 
@@ -234,11 +253,12 @@ Each listener is one `NetworkService` with up to 16 ports and two addresses. Eac
 | `Accepted=False` | The reason names the failed rule: provider approval, capability grant, address pool or address claim. |
 | `Programmed=False, NoBackends` | Listener attachments: `Programmed`, provider `Ready`, lease valid. |
 | VIP answers on some gateways only | `ServiceVIPBinding` status on the backend nodes, and the `/128` advertisement in the ingress VRF. |
-| Replies are missing | The veth registration on the backend node and `ListenerUnmatchedEgress`. |
+| Replies are missing | The host link's `ifindex_vrf_table` row and `usid_egress` attachment on the backend node, the VIP translation rows, and `ListenerUnmatchedEgress`. |
 
 ## Implementation History
 
 - 2026-11-27: proposed, after a staging test reached MASQUE only through a hand-made `NodePort`.
+- 2026-11-28: open decisions settled in [#1506](https://github.com/datum-cloud/galactic/issues/1506), and listener addresses scoped to one cell.
 
 ## Drawbacks
 
@@ -250,9 +270,10 @@ Each listener is one `NetworkService` with up to 16 ports and two addresses. Eac
 
 | Alternative | Why not |
 | --- | --- |
-| `LoadBalancer` Service with the CNI's address pools and BGP | It works today, but it is outside Galactic: no Edge fencing, policy or drain, per-site manual addressing, and no anycast. |
+| `LoadBalancer` Service with the CNI's address pools and BGP | It works today, but it is outside Galactic: no Edge fencing, policy or drain, per-site manual addressing, and no failover across gateway nodes. |
 | `hostPort` on the edge node | The address follows the pod between nodes, it binds a host port against the foundation's privilege rule, and it offers no failover. |
 | A new gateway endpoint kind that delivers to any pod address | Direct server return needs a Galactic VRF, a registered host interface and an IPv6 backend. A pod on the cluster pod network has none of these, so the gateway would need a second delivery and return path. |
 | Publish a per-instance public prefix through `PrefixReachability` into the underlay | Edge publication is single-owner and fail-closed, which fits per-connector prefixes but not a replicated listener. It would also add a new path from Edge into the underlay. |
 | Datum Network Load Balancer | Its routes send traffic only to tenant `NetworkService` ports in the load balancer's project. |
 | Reuse a tenant gVPC for the listener | Mixes public ingress with tenant traffic and makes listener isolation depend on per-tenant policy. |
+| Announce one listener address from several cells | Grants are scoped to one cell, so a client routed to another cell is refused. Sharing an address would first need grants that every cell can authorize. |
