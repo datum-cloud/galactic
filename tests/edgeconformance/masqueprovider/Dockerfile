@@ -1,6 +1,6 @@
 # Build the conformance suite's MASQUE fixture provider. It is a test
 # fixture, not a product image: the lab loads it into its edge nodes.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 

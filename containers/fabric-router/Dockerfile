@@ -8,7 +8,7 @@ ARG FRR_VERSION=10.7.1
 
 # Build fabric-config-agent. It imports no eBPF packages, so unlike the other
 # Go images this needs no clang or go generate step.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
