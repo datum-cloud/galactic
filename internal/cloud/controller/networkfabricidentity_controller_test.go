@@ -65,6 +65,16 @@ type fakeIdentityIPAM struct {
 	// claim was deleted under Retain. It is what makes a second claim of the
 	// same name a conflict rather than a fresh allocation.
 	retained map[string]string
+	// limit is the platform project's quota on claims, when set. Quota
+	// admission counts live claims and refuses a create before the address
+	// service sees it, so a retained allocation holds no unit.
+	limit int
+	// refuseDelete stands in for an identity not yet granted delete on claims.
+	refuseDelete bool
+	// recordPolicy, when set, is the policy the address service records on a
+	// new allocation instead of the claim's own: a class default that differs,
+	// or a claim whose policy was changed after it bound.
+	recordPolicy ipamv1alpha1.ReclaimPolicy
 }
 
 func allocationNameFor(claimName string) string { return "alloc-" + claimName }
@@ -114,6 +124,9 @@ func newFakeIdentityIPAM(t *testing.T) *fakeIdentityIPAM {
 			}
 			f.created = append(f.created, ipClaim.Name)
 
+			if err := f.refuseOverQuota(ctx, c, ipClaim); err != nil {
+				return err
+			}
 			if err := refuseWhatTheServerWouldRefuse(ipClaim); err != nil {
 				return err
 			}
@@ -132,10 +145,83 @@ func newFakeIdentityIPAM(t *testing.T) *fakeIdentityIPAM {
 			f.next++
 			ipClaim.Status.Phase = ipamv1alpha1.ClaimBound
 			ipClaim.Status.AllocatedCIDR = blockForIndex(index)
-			return c.Create(ctx, obj, opts...)
+			ipClaim.Status.BoundAllocationRef = &ipamv1alpha1.LocalRef{Name: allocationName}
+			if err := c.Create(ctx, obj, opts...); err != nil {
+				return err
+			}
+			return c.Create(ctx, f.allocationFor(ipClaim))
+		},
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, ok := obj.(*ipamv1alpha1.IPClaim); !ok {
+				return c.Delete(ctx, obj, opts...)
+			}
+			if f.refuseDelete {
+				return apierrors.NewForbidden(ipamv1alpha1.SchemeGroupVersion.WithResource("ipclaims").GroupResource(),
+					obj.GetName(), errors.New("delete is not granted"))
+			}
+			return f.retain(ctx, c, obj.GetName(), opts...)
 		},
 	}).Build()
 	return f
+}
+
+// refuseOverQuota mirrors the platform's quota admission on claims: a create
+// that would pass the limit is refused before the address service runs.
+func (f *fakeIdentityIPAM) refuseOverQuota(ctx context.Context, c client.WithWatch, ipClaim *ipamv1alpha1.IPClaim) error {
+	if f.limit == 0 {
+		return nil
+	}
+	var live ipamv1alpha1.IPClaimList
+	if err := c.List(ctx, &live, client.InNamespace(ipClaim.Namespace)); err != nil {
+		return err
+	}
+	if len(live.Items) >= f.limit {
+		return apierrors.NewForbidden(ipamv1alpha1.SchemeGroupVersion.WithResource("ipclaims").GroupResource(),
+			ipClaim.Name, fmt.Errorf("You've reached your quota of %d", f.limit))
+	}
+	return nil
+}
+
+// retain deletes a claim the way the address service does under Retain: the
+// claim goes and its allocation stays, holding the block under the claim's
+// name so that no other claim is ever handed it.
+func (f *fakeIdentityIPAM) retain(ctx context.Context, c client.WithWatch, claimName string, opts ...client.DeleteOption) error {
+	var ipClaim ipamv1alpha1.IPClaim
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: claimName}, &ipClaim); err != nil {
+		return err
+	}
+	var allocation ipamv1alpha1.IPAllocation
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: allocationNameFor(claimName)}, &allocation); err != nil {
+		return err
+	}
+	// The policy recorded on the allocation at bind time decides, not the
+	// claim's: under Retain the allocation stays with its claim reference
+	// cleared, and under anything else its block goes back to the pool.
+	if allocation.Spec.ReclaimPolicy == ipamv1alpha1.ReclaimRetain {
+		allocation.Spec.ClaimRef = nil
+		if err := c.Update(ctx, &allocation); err != nil {
+			return err
+		}
+		f.retained[allocation.Name] = allocation.Status.AllocatedCIDR
+	} else if err := c.Delete(ctx, &allocation); err != nil {
+		return err
+	}
+	return c.Delete(ctx, &ipClaim, opts...)
+}
+
+// allocationFor is the allocation the address service binds a new claim to,
+// recording the policy that will decide its fate when the claim goes.
+func (f *fakeIdentityIPAM) allocationFor(ipClaim *ipamv1alpha1.IPClaim) *ipamv1alpha1.IPAllocation {
+	allocation := &ipamv1alpha1.IPAllocation{}
+	allocation.Namespace = ipClaim.Namespace
+	allocation.Name = allocationNameFor(ipClaim.Name)
+	allocation.Spec.ClaimRef = &ipamv1alpha1.LocalRef{Name: ipClaim.Name}
+	allocation.Spec.ReclaimPolicy = ipClaim.Spec.ReclaimPolicy
+	if f.recordPolicy != "" {
+		allocation.Spec.ReclaimPolicy = f.recordPolicy
+	}
+	allocation.Status.AllocatedCIDR = ipClaim.Status.AllocatedCIDR
+	return allocation
 }
 
 // blockForIndex renders the block a pool rooted at fc00::/32 hands out for an
@@ -161,22 +247,12 @@ func hex16(v int) string {
 // stays, and the block it holds becomes readable through the allocation.
 func (f *fakeIdentityIPAM) release(t *testing.T, ctx context.Context, claimName string) {
 	t.Helper()
-	var ipClaim ipamv1alpha1.IPClaim
-	if err := f.client.Get(ctx, client.ObjectKey{Namespace: "default", Name: claimName}, &ipClaim); err != nil {
-		t.Fatalf("read the claim being released: %v", err)
+	ipClaim := &ipamv1alpha1.IPClaim{}
+	ipClaim.Namespace = "default"
+	ipClaim.Name = claimName
+	if err := f.client.Delete(ctx, ipClaim); err != nil {
+		t.Fatalf("release the claim: %v", err)
 	}
-
-	allocation := &ipamv1alpha1.IPAllocation{}
-	allocation.Namespace = "default"
-	allocation.Name = allocationNameFor(claimName)
-	allocation.Status.AllocatedCIDR = ipClaim.Status.AllocatedCIDR
-	if err := f.client.Create(ctx, allocation); err != nil {
-		t.Fatalf("retain the allocation: %v", err)
-	}
-	if err := f.client.Delete(ctx, &ipClaim); err != nil {
-		t.Fatalf("delete the claim: %v", err)
-	}
-	f.retained[allocation.Name] = ipClaim.Status.AllocatedCIDR
 }
 
 func (f *fakeIdentityIPAM) ClientForPlatform() (client.Client, error) { return f.client, nil }
@@ -236,6 +312,7 @@ func newIdentityFixture(t *testing.T, presences ...string) *identityFixture {
 		ipam:     ipam,
 		reconciler: &NetworkFabricIdentityReconciler{
 			Networks:          networks,
+			NetworkReader:     networks,
 			Hub:               hub,
 			IPAM:              ipam,
 			IdentityClass:     testClass,

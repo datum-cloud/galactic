@@ -78,6 +78,10 @@ type Request struct {
 	// installed in a remote location's import policy would then merge an
 	// unrelated network into a dead one's routes. Inheritance is confined to
 	// one namespace and one name; reissue is not confined to anything.
+	//
+	// Inheritance lasts only while the block is held. If the identity class
+	// sets a retention lease, a name that returns after the lease runs out gets
+	// a new identity; see Release.
 	NetworkNamespace string
 	NetworkName      string
 }
@@ -129,10 +133,12 @@ func Claim(ctx context.Context, ipamClient client.Client, request Request) (int6
 		Target:       ipamv1alpha1.TargetBlock,
 		PrefixLength: ptr.To(int32(BlockBits)),
 
-		// An identity is never given back. A Route Target still installed in a
-		// remote location's import policy would silently merge a new network
-		// into a dead one's routes, so holding the block forever is the safe
-		// failure and reissuing it is not a failure anything can see.
+		// The block is not handed back to the pool on release. A Route Target
+		// still installed in a remote location's import policy would silently
+		// merge a new network into a dead one's routes, so holding the block is
+		// the safe failure and reissuing it early is not a failure anything can
+		// see. Retain holds it until the identity class's retention lease runs
+		// out, or forever if the class sets none; see Release.
 		ReclaimPolicy: ipamv1alpha1.ReclaimRetain,
 	}
 
@@ -166,6 +172,64 @@ func Claim(ctx context.Context, ipamClient client.Client, request Request) (int6
 	}
 
 	return FromBlock(ipClaim.Status.AllocatedCIDR)
+}
+
+// Release gives a gone network's claim back.
+//
+// Under Retain, the address service keeps the claim's allocation, so the block
+// stays held under the network's name and is never handed to another network.
+// What goes is the claim, and with it the quota unit it held in the platform's
+// one project. A network of the same name that returns adopts the block it gave
+// up. A claim already gone is released.
+//
+// The policy that keeps the block is the one recorded on the allocation when
+// the claim bound, not the claim's own, which can change. So the claim is
+// deleted only once that allocation reads Retain, and only the claim that was
+// read.
+//
+// This frees the quota unit, never the block. The address service frees the
+// block: it holds a retained allocation for the retention lease its class or
+// pool sets, then returns the block to the pool. With no lease it holds the
+// block forever. For an identity, a lease is safe only if it outlasts the time
+// any location can still import the block's Route Target, since a block freed
+// sooner can be reissued into a dead network's routes.
+func Release(ctx context.Context, ipamClient client.Client, request Request) error {
+	ipClaim := &ipamv1alpha1.IPClaim{}
+	key := client.ObjectKey{Namespace: request.Namespace, Name: ClaimName(request.NetworkNamespace, request.NetworkName)}
+	if err := ipamClient.Get(ctx, key, ipClaim); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("read the identity claim %q before releasing it: %w", key.Name, err)
+	}
+	if err := requireRetained(ctx, ipamClient, ipClaim); err != nil {
+		return err
+	}
+	if err := ipamClient.Delete(ctx, ipClaim, client.Preconditions{UID: &ipClaim.UID}); err != nil &&
+		!apierrors.IsNotFound(err) {
+		return fmt.Errorf("release the identity claim %q: %w", key.Name, err)
+	}
+	return nil
+}
+
+// requireRetained refuses a claim whose bound allocation is not recorded as
+// Retain: deleting that claim would put the network's block back in the pool,
+// where any network could be handed it.
+func requireRetained(ctx context.Context, ipamClient client.Client, ipClaim *ipamv1alpha1.IPClaim) error {
+	ref := ipClaim.Status.BoundAllocationRef
+	if ref == nil {
+		return fmt.Errorf("keep the identity claim %q: it names no bound allocation, so its policy cannot be read",
+			ipClaim.Name)
+	}
+	allocation := &ipamv1alpha1.IPAllocation{}
+	if err := ipamClient.Get(ctx, client.ObjectKey{Namespace: ipClaim.Namespace, Name: ref.Name}, allocation); err != nil {
+		return fmt.Errorf("keep the identity claim %q: read its allocation %q: %w", ipClaim.Name, ref.Name, err)
+	}
+	if allocation.Spec.ReclaimPolicy != ipamv1alpha1.ReclaimRetain {
+		return fmt.Errorf("keep the identity claim %q: its allocation %q is recorded %q, not Retain, "+
+			"so a delete would free the block for reissue", ipClaim.Name, ref.Name, allocation.Spec.ReclaimPolicy)
+	}
+	return nil
 }
 
 // adopt reads the identity out of an allocation this network already holds.
