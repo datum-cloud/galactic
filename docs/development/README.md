@@ -89,6 +89,11 @@ bundle. A local `task build` is not an image release. Component docs describe
 their runtime requirements; the workflow and Dockerfiles define release
 artifacts and build dependencies.
 
+The [project sync workflow](../../.github/workflows/project-sync.yaml) runs
+every 30 minutes to keep the Galactic project board in line with this
+repository's issues. The [project-sync command](../../hack/project-sync/main.go)
+documents its rules.
+
 When a failure occurs, record the failing command, commit, toolchain, relevant
 kernel capabilities and any skipped checks. Do not infer production readiness
 from an unprivileged test run or a documentation-only CI result.

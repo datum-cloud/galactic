@@ -1,0 +1,66 @@
+# ---
+# Workflow: Project sync
+# Keeps the Galactic project board in line with this repository's issues:
+# every open issue is on the board, pull requests are not, an issue with an
+# open ready pull request is In review, and Done issues closed more than two
+# weeks ago are archived. hack/project-sync documents the rules.
+# Runs on a schedule and on demand; pull requests that change the tool only
+# run its tests. Needs the organization's project automation GitHub App.
+# ---
+name: Project sync
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Print the changes without making them
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - hack/project-sync/**
+      - .github/workflows/project-sync.yaml
+permissions:
+  contents: read
+concurrency:
+  group: project-sync-${{ github.event_name == 'pull_request' && github.ref || 'board' }}
+  cancel-in-progress: false
+jobs:
+  test:
+    name: Test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./hack/project-sync/
+  sync:
+    name: Sync
+    # The App token writes the live board, so only code on main gets it.
+    if: github.event_name != 'pull_request' && github.repository == 'datum-cloud/galactic' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Mint a token for the project board
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        with:
+          app-id: ${{ secrets.DATUM_PROJECT_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.DATUM_PROJECT_AUTOMATION_PRIVATE_KEY }}
+          owner: datum-cloud
+          # Issues and pull requests here are public, so the token needs
+          # only project write.
+          permission-organization-projects: write
+      - name: Sync the board
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DRY_RUN: ${{ inputs.dry-run || false }}
+        run: go run ./hack/project-sync -org datum-cloud -project 88 -repo "$GITHUB_REPOSITORY" -dry-run="$DRY_RUN"
