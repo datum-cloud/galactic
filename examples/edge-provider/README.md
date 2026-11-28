@@ -13,19 +13,18 @@ For each `EdgeService` it is configured with, it:
 1. creates its pod's `EdgeInstance` and holds the instance's lease, renewing it
    every 5 s;
 2. requests an `EdgeAttachment` and, once `galactic-edge` reports it
-   `Programmed`, answers UDP and TCP on the attachment's address (`SocketAccess`) and
-   sets `Ready`;
+   `Programmed`, answers UDP and TCP on the attachment's address
+   (`SocketAccess`) and sets `Ready`;
 3. for `PacketAccess`, opens the attachment's TUN device and answers ICMPv6
    echo and UDP for every address in the prefixes it claims;
 4. claims an `EdgeRoute` for each configured prefix while its lease is held.
 
-Every UDP and TCP reply starts with `<provider>/<pod>/<service>`, so a client can tell
-which instance answered. On SIGTERM it stops forwarding, then releases its
-routes, deletes its attachments and releases its lease. SIGUSR1 freezes it: it
-stops renewing and writing to the API while its data planes keep answering,
-past its lease's deadline too.
-The conformance suite uses that to show that `galactic-edge` stops forwarding
-on its own.
+Every UDP and TCP reply starts with `<provider>/<pod>/<service>`, so a client
+can tell which instance answered. On SIGTERM it stops forwarding, then releases
+its routes, deletes its attachments and releases its lease. SIGUSR1 freezes it:
+it stops renewing and writing to the API while its data planes keep answering,
+past its lease's deadline too. The conformance suite uses that to show that
+`galactic-edge` stops forwarding on its own.
 
 ## Build
 
