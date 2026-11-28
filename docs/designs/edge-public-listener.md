@@ -157,6 +157,8 @@ status:
 
 `backendSelector` is required today, with a rule that it is not empty. The change makes exactly one of `backendSelector` and `edgeListenerRef` required, and keeps the non-empty rule for `backendSelector` when it is set.
 
+Draft PR #845 ("Allow NLB backends by address within a VPC") also changes this rule: it makes `backendSelector` optional and adds `backendAddresses`, so a service needs a non-empty selector or an address list. The two changes stay compatible, because `edgeListenerRef` selects backends from an `EdgeListener` while #845 selects `VPCAttachment`s within a VPC, and a service uses one model or the other. Whichever change lands second reconciles the validation, so that exactly one of the selector-or-address model and `edgeListenerRef` is required.
+
 `NetworkService` has a failure policy only inside `spec.healthCheck`, where the default is `FailOpen`. Core therefore sets `spec.healthCheck` on every listener service, with the listener's `failurePolicy` and a TCP probe on `healthPort`. `healthPort` defaults to the first TCP `backendPort`, and the API refuses a listener whose ports are all UDP unless it sets `healthPort`.
 
 ### Ingress gVPC
