@@ -18,12 +18,14 @@ EdgeProviderApproval and EdgeService, the Galactic Edge provider
 registration, its operator approval and a tenant grant,
 EdgeInstance and EdgeAttachment, a provider pod and its connection to a
 granted VPC, and EdgeRoute and EdgeRouteIndex, a prefix's forwarding claim
-and the record of every claim accepted in a VPC (see
+and the record of every claim accepted in a VPC, and EdgeListener, a
+provider's public addresses and ports (see
 docs/enhancements/networking/galactic-edge).
 
 ### Resource Types
 - [EdgeAttachment](#edgeattachment)
 - [EdgeInstance](#edgeinstance)
+- [EdgeListener](#edgelistener)
 - [EdgeProvider](#edgeprovider)
 - [EdgeProviderApproval](#edgeproviderapproval)
 - [EdgeRoute](#edgeroute)
@@ -218,7 +220,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | Name is the capability's name. |  | Enum: [SocketAccess PacketAccess PrefixReachability] <br /> |
+| `name` _string_ | Name is the capability's name. |  | Enum: [SocketAccess PacketAccess PrefixReachability PublicListener] <br /> |
 | `version` _string_ | Version is the capability's version. |  | Pattern: `^v[1-9][0-9]*$` <br /> |
 
 
@@ -284,6 +286,186 @@ _Appears in:_
 | `podUID` _string_ | PodUID is the provider pod's metadata.uid. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
 | `nodeName` _string_ | NodeName is the node the pod runs on. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
 | `bootID` _string_ | BootID is the node's boot ID (/proc/sys/kernel/random/boot_id) when<br />the instance was created. Its lease's renew start is on that boot's<br />CLOCK_BOOTTIME, so galactic-edge applies no renewal of an instance<br />whose boot ID is not the node's current one. |  | MaxLength: 36 <br />MinLength: 1 <br /> |
+
+
+#### EdgeListener
+
+
+
+EdgeListener gives an approved provider public addresses and ports, served
+by the gateway nodes of the cell. It lives in the gateway namespace. The
+platform authority writes its spec and core its status; no provider writes
+either. Core turns each port into a gateway NetworkService whose backends are
+the provider's listener attachments.
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `galactic.datumapis.com/v1alpha1` | | |
+| `kind` _string_ | `EdgeListener` | | |
+| `kind` _string_ | Kind is a string value representing the REST resource this object represents.<br />Servers may infer this from the endpoint the client submits requests to.<br />Cannot be updated.<br />In CamelCase.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds |  |  |
+| `apiVersion` _string_ | APIVersion defines the versioned schema of this representation of an object.<br />Servers should convert recognized schemas to the latest internal value, and<br />may reject unrecognized values.<br />More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources |  |  |
+| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
+| `spec` _[EdgeListenerSpec](#edgelistenerspec)_ |  |  |  |
+| `status` _[EdgeListenerStatus](#edgelistenerstatus)_ |  |  |  |
+
+
+#### EdgeListenerBackend
+
+
+
+EdgeListenerBackend is one listener attachment and whether it receives new
+flows.
+
+
+
+_Appears in:_
+- [EdgeListenerStatus](#edgelistenerstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `attachment` _string_ | Attachment is the EdgeAttachment's namespace and name. |  | MaxLength: 317 <br /> |
+| `node` _string_ | Node is the attachment's node. |  | MaxLength: 253 <br /> |
+| `address` _string_ | Address is the attachment's IPv6 address in the ingress gVPC. |  | MaxLength: 39 <br /> |
+| `serving` _boolean_ | Serving is whether the attachment receives new flows: it is<br />programmed, its instance lease is valid and its provider reports Ready. |  |  |
+
+
+#### EdgeListenerFailurePolicy
+
+_Underlying type:_ _string_
+
+EdgeListenerFailurePolicy decides whether backends of unknown health, and a
+set whose backends are all unhealthy, receive traffic.
+
+_Validation:_
+- Enum: [FailOpen FailClosed]
+
+_Appears in:_
+- [EdgeListenerSpec](#edgelistenerspec)
+
+| Field | Description |
+| --- | --- |
+| `FailOpen` |  |
+| `FailClosed` |  |
+
+
+#### EdgeListenerPort
+
+
+
+EdgeListenerPort is one public port and the port the provider's instances
+serve it on.
+
+
+
+_Appears in:_
+- [EdgeListenerSpec](#edgelistenerspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `protocol` _[EdgeListenerProtocol](#edgelistenerprotocol)_ | Protocol is tcp or udp. |  | Enum: [tcp udp] <br /> |
+| `port` _integer_ | Port is the public port on the listener's addresses. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `backendPort` _integer_ | BackendPort is the port each provider instance listens on, on its<br />listener attachment's address. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+
+
+#### EdgeListenerProtocol
+
+_Underlying type:_ _string_
+
+EdgeListenerProtocol is the transport protocol of one listener port.
+
+_Validation:_
+- Enum: [tcp udp]
+
+_Appears in:_
+- [EdgeListenerPort](#edgelistenerport)
+
+| Field | Description |
+| --- | --- |
+| `tcp` |  |
+| `udp` |  |
+
+
+#### EdgeListenerServiceReference
+
+
+
+EdgeListenerServiceReference names the EdgeService that grants a listener's
+provider SocketAccess and PublicListener on its ingress gVPC.
+
+
+
+_Appears in:_
+- [EdgeListenerSpec](#edgelistenerspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `namespace` _string_ | Namespace is the EdgeService's namespace, the ingress gVPC's namespace. |  | MaxLength: 63 <br />MinLength: 1 <br /> |
+| `name` _string_ | Name is the EdgeService's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+
+
+#### EdgeListenerSessionAffinity
+
+_Underlying type:_ _string_
+
+EdgeListenerSessionAffinity selects which parts of a flow the gateway hashes
+to pick a backend, as NetworkService's sessionAffinity does.
+
+_Validation:_
+- Enum: [None ClientIP ClientIPAndProtocol]
+
+_Appears in:_
+- [EdgeListenerSpec](#edgelistenerspec)
+
+| Field | Description |
+| --- | --- |
+| `None` |  |
+| `ClientIP` |  |
+| `ClientIPAndProtocol` |  |
+
+
+#### EdgeListenerSpec
+
+
+
+EdgeListenerSpec is the public addresses and ports the platform gives one
+provider. Only the platform authority writes it; no provider may.
+
+
+
+_Appears in:_
+- [EdgeListener](#edgelistener)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `providerRef` _[EdgeProviderReference](#edgeproviderreference)_ | ProviderRef is the provider the listener serves. It must list<br />PublicListener. |  |  |
+| `serviceRef` _[EdgeListenerServiceReference](#edgelistenerservicereference)_ | ServiceRef is the EdgeService granting the provider SocketAccess and<br />PublicListener on its ingress gVPC. The provider's listener<br />attachments are made against it. |  |  |
+| `addresses` _string array_ | Addresses are the public addresses, at most one IPv6 and one IPv4. Each<br />must fall in one of the cell's gateway VIP prefixes; core refuses any<br />other with AddressOutsidePool. An IPv4 address is written in dotted<br />form. |  | MaxItems: 2 <br />MinItems: 1 <br />items:MaxLength: 39 <br /> |
+| `ports` _[EdgeListenerPort](#edgelistenerport) array_ | Ports are the public ports. Core writes one gateway NetworkService per<br />port. Two ports of one protocol cannot share a backendPort, since a<br />backend's reply is translated back to one public port. |  | MaxItems: 16 <br />MinItems: 1 <br /> |
+| `healthPort` _integer_ | HealthPort is the TCP port probed on each backend. Unset, it is the<br />first tcp port's backendPort. It is required when every port is udp. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
+| `sessionAffinity` _[EdgeListenerSessionAffinity](#edgelistenersessionaffinity)_ | SessionAffinity is copied into each of the listener's NetworkServices. | ClientIPAndProtocol | Enum: [None ClientIP ClientIPAndProtocol] <br /> |
+| `failurePolicy` _[EdgeListenerFailurePolicy](#edgelistenerfailurepolicy)_ | FailurePolicy is copied into the health check of each of the listener's<br />NetworkServices. | FailOpen | Enum: [FailOpen FailClosed] <br /> |
+
+
+#### EdgeListenerStatus
+
+
+
+EdgeListenerStatus is written by core only.
+
+
+
+_Appears in:_
+- [EdgeListener](#edgelistener)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the generation Conditions describe. |  |  |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | Conditions are Accepted and Programmed. |  | MaxItems: 8 <br /> |
+| `backends` _[EdgeListenerBackend](#edgelistenerbackend) array_ | Backends are the provider's listener attachments. |  | MaxItems: 1024 <br /> |
 
 
 #### EdgePacketDevice
@@ -368,6 +550,7 @@ EdgeProviderReference names an EdgeProvider.
 _Appears in:_
 - [EdgeAttachmentSpec](#edgeattachmentspec)
 - [EdgeInstanceSpec](#edgeinstancespec)
+- [EdgeListenerSpec](#edgelistenerspec)
 - [EdgeRouteSpec](#edgeroutespec)
 - [EdgeServiceSpec](#edgeservicespec)
 
@@ -656,7 +839,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `providerRef` _[EdgeProviderReference](#edgeproviderreference)_ | ProviderRef is the only provider the grant authorizes. |  |  |
 | `vpcRef` _[EdgeVPCReference](#edgevpcreference)_ | VPCRef is the only VPC the grant authorizes. |  |  |
-| `capabilities` _string array_ | Capabilities are the capability names the provider may use in the VPC. |  | MaxItems: 3 <br />MinItems: 1 <br />items:Enum: [SocketAccess PacketAccess PrefixReachability] <br /> |
+| `capabilities` _string array_ | Capabilities are the capability names the provider may use in the VPC. |  | MaxItems: 4 <br />MinItems: 1 <br />items:Enum: [SocketAccess PacketAccess PrefixReachability PublicListener] <br /> |
 | `prefixes` _string array_ | Prefixes bound the prefixes the provider may request in the VPC. Each<br />is a masked CIDR. Grants of services granting the same VPC must not<br />overlap: galactic-controller refuses the attachments and routes of the<br />later of two services whose prefixes overlap. |  | MaxItems: 64 <br />items:MaxLength: 43 <br /> |
 | `validUntil` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | ValidUntil, when set, is the wall-clock time after which the grant<br />authorizes nothing. Admission refuses it, and revokes what it issued,<br />once fewer than the cell's maximum clock skew remain. |  |  |
 | `clientPool` _string_ | ClientPool is the IPv6 range, inside the VPC, that attachments take<br />their addresses from: a masked CIDR from /64 to /120. At most 1024 of<br />its addresses are allocated, whatever its size. Pools of services<br />granting the same VPC must not overlap; galactic-controller refuses<br />the attachments of the later of two overlapping services. Without a<br />pool, the service admits no attachment. A pool can be added to a<br />service that has none, and is fixed from then on. |  | MaxLength: 43 <br /> |

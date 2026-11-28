@@ -15,6 +15,7 @@ references:
         # Exclude collection wrappers by name: BGPPrefixList is a resource.
         - "[.]EdgeAttachmentList$"
         - "[.]EdgeInstanceList$"
+        - "[.]EdgeListenerList$"
         - "[.]EdgeProviderApprovalList$"
         - "[.]EdgeProviderList$"
         - "[.]EdgeRouteIndexList$"

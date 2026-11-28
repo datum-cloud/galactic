@@ -215,12 +215,20 @@ func selectRuleBackends(
 // from attachments, whatever other rules select, sorted by address, and the
 // selected attachments that are not backends yet, as "namespace/name: reason".
 // See selectRuleBackends for which attachments qualify.
+//
+// A rule that names an EdgeListener instead of a BackendSelector has no
+// backends yet: gateways do not resolve listener attachments, so its listener
+// is reported pending and its VIPs are never advertised.
 func ruleCandidateBackends(
 	rule *bgpv1alpha1.NetworkService, attachments []*cloudv1alpha1.VPCAttachment, objNS string,
 ) (backends []ruleBackend, pending []string, err error) {
 	_, port, err := rulePorts(rule)
 	if err != nil {
 		return nil, nil, err
+	}
+	if ref := rule.Spec.EdgeListenerRef; ref != nil {
+		key := types.NamespacedName{Namespace: rule.Namespace, Name: ref.Name}
+		return nil, []string{key.String() + ": edge listener backends are not resolved yet"}, nil
 	}
 	selector, err := ruleBackendSelector(rule)
 	if err != nil {

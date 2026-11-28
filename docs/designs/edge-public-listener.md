@@ -1,6 +1,6 @@
 # Galactic Edge public listener
 
-Status: proposed, with its open decisions settled. The Phase 0 lab proof is done (see [Phase 0 results](#phase-0-results)); nothing else in this design is implemented. It extends the [Galactic Edge Foundation](galactic-edge.md) and reuses the [XDP/DSR gateway](../gateway/architecture.md). The [provider contract](../edge/provider-contract.md) remains the reference for behavior that exists today.
+Status: proposed, with its open decisions settled. The Phase 0 lab proof is done (see [Phase 0 results](#phase-0-results)), and Phase 1, the API, is implemented: `EdgeListener`, the `PublicListener` capability and `NetworkService.spec.edgeListenerRef` exist, but nothing serves a listener yet. It extends the [Galactic Edge Foundation](galactic-edge.md) and reuses the [XDP/DSR gateway](../gateway/architecture.md). The [provider contract](../edge/provider-contract.md) remains the reference for behavior that exists today.
 
 This design follows the [Datum enhancement template](https://github.com/datum-cloud/enhancements/blob/main/enhancements/template/README.md).
 
