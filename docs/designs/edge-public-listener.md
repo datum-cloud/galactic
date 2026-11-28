@@ -1,6 +1,6 @@
 # Galactic Edge public listener
 
-Status: proposed, with its open decisions settled. Nothing in this design is implemented. It extends the [Galactic Edge Foundation](galactic-edge.md) and reuses the [XDP/DSR gateway](../gateway/architecture.md). The [provider contract](../edge/provider-contract.md) remains the reference for behavior that exists today.
+Status: proposed, with its open decisions settled. The Phase 0 lab proof is done (see [Phase 0 results](#phase-0-results)); nothing else in this design is implemented. It extends the [Galactic Edge Foundation](galactic-edge.md) and reuses the [XDP/DSR gateway](../gateway/architecture.md). The [provider contract](../edge/provider-contract.md) remains the reference for behavior that exists today.
 
 This design follows the [Datum enhancement template](https://github.com/datum-cloud/enhancements/blob/main/enhancements/template/README.md).
 
@@ -89,8 +89,8 @@ The Kubernetes Service and any `LoadBalancer`, `NodePort` or `hostPort` overlay 
 | Risk | Mitigation |
 | --- | --- |
 | Maglev is stateless. A change in the backend set moves about 1/N of flows, which breaks QUIC and TLS connections on the moved flows. | Default affinity is `ClientIPAndProtocol`. Drain removes an instance from new selection only after `drainSeconds`, so providers can send HTTP/3 GOAWAY or HTTP/2 GOAWAY first. Connection-ID routing is a follow-up, not part of v1. |
-| An edge node that also runs the gateway can select a backend on itself. The gateway has no qualified local-delivery branch: a node's own locator can match a discard route. | Phase 0 qualifies local delivery on the containerlab gvpc lab. Until it passes, the listener controller excludes backends on nodes that advertise the listener's VIPs, and reports `LocalBackendsExcluded`. |
-| The return rewrite needs the listener attachment's host veth in `ifindex_vrf_table` with `usid_egress` attached. | The node agent already does this for every edge attachment. Phase 0 confirms that `usid_egress` applies the VIP reverse translation on an edge host link. See [Decisions](#decisions). |
+| An edge node that also runs the gateway can select a backend on itself. The gateway has no local-delivery branch: its FIB lookup of a backend uSID on its own node meets the discard route for the node's locator. | Phase 0 showed every such flow dropped as `fib_unreachable`. The listener controller excludes backends on nodes that advertise the listener's VIPs, and reports `LocalBackendsExcluded`, until the gateway gains a local-delivery branch. |
+| The return rewrite needs the listener attachment's host veth in `ifindex_vrf_table` with `usid_egress` attached. | The node agent already does this for every edge attachment, and Phase 0 showed `usid_egress` applying the VIP reverse translation on an edge host link for both families. See [Decisions](#decisions). |
 | A client reaches a cell that does not hold its grant. | A listener's addresses belong to one cell. Each cell's gateway VIP prefixes are disjoint from every other cell's, and core refuses an address outside its own prefixes. |
 | A compromised provider could try to originate internet traffic through the listener. | The ingress VRF has no default route and no egress shard. Only replies that match a VIP translation row leave through the node's uplink. Anything else is dropped and counted. |
 | One provider's listener reaches another provider or a tenant. | One ingress gVPC per provider, no route leaking, and the `PublicService` traffic policy path on the listener attachment. |
@@ -105,8 +105,8 @@ These were open when the design was proposed and were settled in [#1506](https:/
 | --- | --- | --- |
 | Who supplies listener addresses | The platform authority, from the cell's gateway VIP prefixes. Core refuses any other address with `AddressOutsidePool`. | This is how gateway-namespace services get addresses today. An allocator can follow later without an API change. |
 | How many ingress gVPCs exist | One per provider type, not one per listener | It isolates providers from each other at the cost of one VPC identifier each. A provider has one listener, so a gVPC per listener adds no isolation. |
-| Who registers a listener attachment's host veth in `ifindex_vrf_table` | No new component. The node agent (`galactic-edge`) already registers every edge host link through `attachreg.RegisterHostLink`, which writes the `ifindex_vrf_table` row, sets the veth egress kind and attaches `usid_egress`. | The registration a listener needs exists today. What remains unproven is that the gateway's VIP reverse translation applies on an edge host link, which Phase 0 tests. |
-| What happens to a backend on a node that also advertises the VIP | It is excluded, and the listener reports `LocalBackendsExcluded`, until Phase 0 qualifies gateway local delivery. The exclusion is removed once it passes. | Local delivery is unqualified today, and excluding those backends keeps the rest of the work unblocked. |
+| Who registers a listener attachment's host veth in `ifindex_vrf_table` | No new component. The node agent (`galactic-edge`) already registers every edge host link through `attachreg.RegisterHostLink`, which writes the `ifindex_vrf_table` row, sets the veth egress kind and attaches `usid_egress`. | The registration a listener needs exists today, and Phase 0 showed the VIP reverse translation working on an edge host link. |
+| What happens to a backend on a node that also advertises the VIP | It is excluded, and the listener reports `LocalBackendsExcluded`. Phase 0 showed local delivery failing, so the exclusion stays until the gateway can deliver to its own node. | Excluding those backends keeps the rest of the work unblocked. |
 
 A listener's addresses belong to one cell. Grants are scoped to one cell, so an address announced from two cells would send some clients to a cell that cannot authorize them. Core in one cell cannot see other cells' addresses, so address planning enforces the rule: each cell's gateway VIP prefixes are disjoint from every other cell's.
 
@@ -216,12 +216,38 @@ Listener attachments use the `PublicService` traffic policy path in both directi
 
 | Phase | Work | Gate |
 | --- | --- | --- |
-| 0 | On the containerlab gvpc lab, hand-wire a `SocketAccess` attachment as a DSR backend: `/128` advertisement and binding, relying on the existing host link registration. Confirm the VIP reply translation on the edge host link, and qualify local and remote delivery. | Bidirectional UDP and TCP to a pod VRF socket through a gateway VIP, for both families, with a backend on a gateway node and on a node that is not a gateway |
+| 0 | On the containerlab gvpc lab, hand-wire a `SocketAccess` attachment as a DSR backend: `/128` advertisement and binding, relying on the existing host link registration. Confirm the VIP reply translation on the edge host link, and qualify local and remote delivery. | Bidirectional UDP and TCP to a pod VRF socket through a gateway VIP, for both families, when the backend is not on the receiving gateway's node; local delivery's outcome recorded. Done, see [Phase 0 results](#phase-0-results). |
 | 1 | API: capability enums, `EdgeListener`, `NetworkService.spec.edgeListenerRef` and its rule against `backendSelector` | API review and CRD validation tests |
 | 2 | Core: ingress gVPC, listener admission and status, `/128` publication, `NetworkService` writer | envtest coverage of every status reason |
-| 3 | Node agent and datapath: VIP reply translation on edge host links if Phase 0 shows a gap, unmatched-egress drop | Lab packet tests, including negative egress |
+| 3 | Node agent and datapath: unmatched-egress drop. Phase 0 found no gap in VIP reply translation on edge host links. | Lab packet tests, including negative egress |
 | 4 | Gateway: backend resolution from listener backends, eligibility, local-delivery exclusion | Lab failover: drain, lease expiry, API outage, gateway loss |
 | 5 | MASQUE: listener attachment, sockets bound to the pod VRF, public `--authority`. Remove the Service overlay in deployment. | An independent client passes HTTP/3 and HTTP/2 through the VIP, IPv6 and IPv4 |
+
+### Phase 0 results
+
+Run on 2026-11-28 on the containerlab gvpc lab by `task verify:edge-listener` (`TestListenerBackend` in `tests/edgeconformance`), for [#1507](https://github.com/datum-cloud/galactic/issues/1507). The test wires one backend by hand, with no controller change:
+
+1. A dedicated ingress VPC under the lab's `public-service` traffic policy, granted to the reference provider with `SocketAccess` only. The provider serves UDP and TCP echo from a socket bound to its pod VRF.
+2. A stand-in `VPCAttachment` naming the edge attachment's address and node, because the gateway and `galactic-router` select backends from `VPCAttachment`s.
+3. The attachment's `/128` `BGPAdvertisement` in the ingress VRF, with `VRFID` and `End.DT46`.
+4. One gateway-namespace `NetworkService` per protocol, each with an IPv6 and an IPv4 VIP and no health check.
+
+`galactic-router` on the backend's node bound all four VIP and protocol pairs. The off-fabric client then sent eight flows per protocol and family, with the VIP pinned on the transit router to one gateway at a time.
+
+| Case | Result |
+| --- | --- |
+| Remote delivery: the VIP pinned to the gateway that does not hold the backend | Every UDP and TCP flow answered, over IPv6 and IPv4. Replies came from the VIP. The backend saw the IPv6 client's own address, and the IPv4 client under `64:ff9b::/96`. |
+| Local delivery: the VIP pinned to the backend's own node | No flow answered. The gateway matched every packet and dropped each one as `fib_unreachable`. |
+
+What this settles:
+
+- `RegisterHostLink` and `usid_egress` already carry listener replies, including the IPv4 translation. Phase 3 needs no reply-translation work.
+- The gateway cannot deliver to a backend on its own node, so the `LocalBackendsExcluded` exclusion is required, not precautionary.
+
+Limits of the proof:
+
+- Every edge node in the lab also runs a gateway. The proof's "node that is not a gateway" is therefore a node that is not the gateway the packet arrives on. The receiving gateway's datapath is the same either way.
+- The stand-in attachment has no `hostInterface`, so the gateway health check was not exercised. Phase 4 covers it.
 
 ## Production Readiness Review Questionnaire
 
@@ -261,6 +287,7 @@ Each listener has up to 16 ports and two addresses, and each port is one `Networ
 
 - 2026-11-27: proposed, after a staging test reached MASQUE only through a hand-made `NodePort`.
 - 2026-11-28: open decisions settled in [#1506](https://github.com/datum-cloud/galactic/issues/1506), and listener addresses scoped to one cell.
+- 2026-11-28: Phase 0 proved remote delivery and the reply path, and showed local delivery failing ([#1507](https://github.com/datum-cloud/galactic/issues/1507)).
 
 ## Drawbacks
 
