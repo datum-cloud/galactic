@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -55,6 +56,10 @@ const (
 	// generic value could be right for which address space a platform
 	// reserves.
 	EnvVRFGatewayPrefix = "GALACTIC_VRF_GATEWAY_PREFIX"
+
+	// EnvVRFAPISocket configures a unix socket to reach the Kubernetes API
+	// through instead of the in-cluster address. Unset by default.
+	EnvVRFAPISocket = "GALACTIC_VRF_API_SOCKET"
 )
 
 // --- VRFConfig -----------------------------------------------------------
@@ -105,6 +110,14 @@ type VRFConfig struct {
 	// address, and an empty node identity makes every replica derive the same
 	// address for a given VPC.
 	GatewayPrefix string
+	// APISocket is an absolute path to a unix socket served by a per-node
+	// proxy that forwards bytes to the Kubernetes API server. When set, every
+	// API connection is dialed through it while the rest of the client config
+	// (host, CA, TLS server name, ServiceAccount token) stays as resolved, so
+	// the sidecar keeps its own identity and verifies the API server's
+	// certificate end to end. This lets the pod it shares drop network access
+	// to the API server. "" keeps the default in-cluster transport.
+	APISocket string
 }
 
 // NewVRFConfig creates a config resolver reading the GALACTIC_VRF environment
@@ -141,6 +154,7 @@ func (c *VRFConfig) BindFlags(flags *pflag.FlagSet) {
 		{"node-name", "node_name"},
 		{"namespace", "namespace"},
 		{"gateway-prefix", "gateway_prefix"},
+		{"api-socket", "api_socket"},
 	}
 	for _, b := range bindings {
 		if flags.Changed(b.flag) {
@@ -168,6 +182,7 @@ func (c *VRFConfig) readFields() {
 		c.NodeName = os.Getenv(EnvNodeNameLegacy)
 	}
 	c.GatewayPrefix = c.v.GetString("gateway_prefix")
+	c.APISocket = c.v.GetString("api_socket")
 }
 
 // Validate checks that the resolved configuration is usable.
@@ -195,6 +210,11 @@ func (c *VRFConfig) Validate() error {
 		if ones, _ := network.Mask.Size(); ones%8 != 0 {
 			return fmt.Errorf("gateway prefix %q must be byte-aligned (a multiple of /8)", c.GatewayPrefix)
 		}
+	}
+	// Only the path's form is checked. The socket need not exist yet: the
+	// node proxy may start after this container, and client-go retries.
+	if c.APISocket != "" && !filepath.IsAbs(c.APISocket) {
+		return fmt.Errorf("API socket %q must be an absolute path", c.APISocket)
 	}
 	return nil
 }

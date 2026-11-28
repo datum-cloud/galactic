@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/pflag"
 )
 
 func TestVRFConfigDefaults(t *testing.T) {
@@ -27,6 +29,9 @@ func TestVRFConfigDefaults(t *testing.T) {
 	}
 	if cfg.GatewayPrefix != "" {
 		t.Errorf("GatewayPrefix = %q, want empty (no generic default)", cfg.GatewayPrefix)
+	}
+	if cfg.APISocket != "" {
+		t.Errorf("APISocket = %q, want empty (in-cluster transport by default)", cfg.APISocket)
 	}
 }
 
@@ -102,6 +107,16 @@ func TestVRFConfigValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name:    "relative API socket",
+			envVars: map[string]string{EnvVRFAPISocket: "run/apiserver.sock"},
+			wantErr: "must be an absolute path",
+		},
+		{
+			name:    "absolute API socket need not exist",
+			envVars: map[string]string{EnvVRFAPISocket: "/nonexistent/apiserver.sock"},
+			wantErr: "",
+		},
+		{
 			name:    testCaseValidConfig,
 			envVars: map[string]string{},
 			wantErr: "",
@@ -129,5 +144,27 @@ func TestVRFConfigValidate(t *testing.T) {
 				t.Errorf("Validate() = %q, want error containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestVRFConfigAPISocket covers the API socket setting: unset by default, read
+// from the environment, and the flag taking precedence over the environment.
+func TestVRFConfigAPISocket(t *testing.T) {
+	const envPath, flagPath = "/run/env/apiserver.sock", "/run/flag/apiserver.sock"
+
+	t.Setenv(EnvVRFAPISocket, envPath)
+	if got := NewVRFConfig().APISocket; got != envPath {
+		t.Errorf("APISocket from env = %q, want %q", got, envPath)
+	}
+
+	cfg := NewVRFConfig()
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.String("api-socket", "", "")
+	if err := flags.Parse([]string{"--api-socket=" + flagPath}); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BindFlags(flags)
+	if cfg.APISocket != flagPath {
+		t.Errorf("APISocket with flag over env = %q, want %q", cfg.APISocket, flagPath)
 	}
 }
