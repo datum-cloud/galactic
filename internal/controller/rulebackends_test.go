@@ -121,6 +121,29 @@ func TestSelectRuleBackends_DropsConflictingBackends(t *testing.T) {
 	}
 }
 
+// TestSelectRuleBackends_EdgeListenerHasNoBackends covers a service that names
+// an EdgeListener in place of a BackendSelector: until gateways resolve
+// listener attachments it selects nothing, even an attachment in its VPC, and
+// reports the listener pending rather than failing on an empty selector.
+func TestSelectRuleBackends_EdgeListenerHasNoBackends(t *testing.T) {
+	rule := newTestRule(testRuleName, testVPCRef, testVIP)
+	rule.Spec.BackendSelector = metav1.LabelSelector{}
+	rule.Spec.EdgeListenerRef = &bgpv1alpha1.NetworkServiceEdgeListenerReference{Name: "masque-public"}
+	attachment := newBackendAttachment(testVPCRef, "fd00:10::1")
+
+	sel, err := selectRuleBackends(rule, []*cloudv1alpha1.VPCAttachment{attachment}, nil, familyIPv6, "")
+	if err != nil {
+		t.Fatalf("selectRuleBackends: %v", err)
+	}
+	if len(sel.backends) != 0 || len(sel.claimed) != 0 {
+		t.Errorf("backends = %+v, claimed = %+v, want none", sel.backends, sel.claimed)
+	}
+	const want = "/masque-public: edge listener backends are not resolved yet"
+	if len(sel.pending) != 1 || !strings.Contains(sel.pending[0], want) {
+		t.Errorf("pending = %v, want the listener reported", sel.pending)
+	}
+}
+
 // newSharingRule returns a rule named name with the IPv6 VIP vip, created at
 // second created, selecting newBackendAttachment's attachments in testVPCRef.
 func newSharingRule(name, vip string, created int64) *bgpv1alpha1.NetworkService {

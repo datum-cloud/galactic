@@ -68,7 +68,9 @@ spec:
           serve the service, so the backend set follows attachments as they are
           created, deleted or moved to another node, and galactic-router on each
           node generates the ServiceVIPBinding its backends need from the same
-          selection.
+          selection. A service in the gateway namespace can instead name an
+          EdgeListener with EdgeListenerRef, whose listener attachments are then its
+          backends.
         properties:
           apiVersion:
             description: |-
@@ -205,7 +207,8 @@ spec:
                   and from IPv6, and its IPv4 addresses are never backends. An attachment
                   with no status.node, or no IPv6 address, is not a backend until it has
                   both. An empty selector is rejected rather than read as "every
-                  attachment in the VPC".
+                  attachment in the VPC". Exactly one of BackendSelector and
+                  EdgeListenerRef is required.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -254,6 +257,23 @@ spec:
                 - message: backendSelector must not be empty
                   rule: (has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions)
                     && size(self.matchExpressions) > 0)
+              edgeListenerRef:
+                description: |-
+                  EdgeListenerRef names the EdgeListener, in the service's namespace,
+                  whose listener attachments are the service's backends, in place of
+                  BackendSelector. Core sets it on the services it writes for a
+                  listener, one per listener port. It is allowed only in the gateway
+                  namespace. Until gateways resolve listener backends, a service that
+                  sets it has no backends and its VIPs are not advertised.
+                properties:
+                  name:
+                    description: Name is the EdgeListener's name.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
               healthCheck:
                 description: |-
                   HealthCheck turns on health checks for the service's backends. Each
@@ -459,7 +479,6 @@ spec:
                 minLength: 1
                 type: string
             required:
-            - backendSelector
             - protocol
             - vipAddresses
             - vpcRef
@@ -488,6 +507,8 @@ spec:
             - message: 'healthCheck.port is required for udp: a health check probes
                 a TCP port'
               rule: self.protocol != 'udp' || !has(self.healthCheck) || has(self.healthCheck.port)
+            - message: exactly one of backendSelector and edgeListenerRef is required
+              rule: has(self.backendSelector) != has(self.edgeListenerRef)
           status:
             description: NetworkServiceStatus defines the observed state of a NetworkService.
             properties:

@@ -10,7 +10,8 @@
 // registration, its operator approval and a tenant grant,
 // EdgeInstance and EdgeAttachment, a provider pod and its connection to a
 // granted VPC, and EdgeRoute and EdgeRouteIndex, a prefix's forwarding claim
-// and the record of every claim accepted in a VPC (see
+// and the record of every claim accepted in a VPC, and EdgeListener, a
+// provider's public addresses and ports (see
 // docs/enhancements/networking/galactic-edge).
 // +kubebuilder:object:generate=true
 // +groupName=galactic.datumapis.com
@@ -44,6 +45,7 @@ func addKnownTypes(s *runtime.Scheme) error {
 		&EdgeAttachment{}, &EdgeAttachmentList{},
 		&EdgeRoute{}, &EdgeRouteList{},
 		&EdgeRouteIndex{}, &EdgeRouteIndexList{},
+		&EdgeListener{}, &EdgeListenerList{},
 	)
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil

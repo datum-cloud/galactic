@@ -118,7 +118,9 @@ const (
 // serve the service, so the backend set follows attachments as they are
 // created, deleted or moved to another node, and galactic-router on each
 // node generates the ServiceVIPBinding its backends need from the same
-// selection.
+// selection. A service in the gateway namespace can instead name an
+// EdgeListener with EdgeListenerRef, whose listener attachments are then its
+// backends.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -146,6 +148,7 @@ type NetworkService struct {
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.port)",message="port must not be set for esp, gre and icmp, which have no ports"
 // +kubebuilder:validation:XValidation:rule="!(self.protocol in ['esp', 'gre', 'icmp']) || !has(self.backendPort)",message="backendPort must not be set for esp, gre and icmp, which have no ports"
 // +kubebuilder:validation:XValidation:rule="self.protocol != 'udp' || !has(self.healthCheck) || has(self.healthCheck.port)",message="healthCheck.port is required for udp: a health check probes a TCP port"
+// +kubebuilder:validation:XValidation:rule="has(self.backendSelector) != has(self.edgeListenerRef)",message="exactly one of backendSelector and edgeListenerRef is required"
 type NetworkServiceSpec struct {
 	// VPCRef is the opaque identifier of the target VPC this service applies
 	// to, a VPC's status.vpc. In a gateway namespace, the platform API that
@@ -236,10 +239,20 @@ type NetworkServiceSpec struct {
 	// and from IPv6, and its IPv4 addresses are never backends. An attachment
 	// with no status.node, or no IPv6 address, is not a backend until it has
 	// both. An empty selector is rejected rather than read as "every
-	// attachment in the VPC".
-	// +kubebuilder:validation:Required
+	// attachment in the VPC". Exactly one of BackendSelector and
+	// EdgeListenerRef is required.
+	// +optional
 	// +kubebuilder:validation:XValidation:rule="(has(self.matchLabels) && size(self.matchLabels) > 0) || (has(self.matchExpressions) && size(self.matchExpressions) > 0)",message="backendSelector must not be empty"
-	BackendSelector metav1.LabelSelector `json:"backendSelector"`
+	BackendSelector metav1.LabelSelector `json:"backendSelector,omitzero"`
+
+	// EdgeListenerRef names the EdgeListener, in the service's namespace,
+	// whose listener attachments are the service's backends, in place of
+	// BackendSelector. Core sets it on the services it writes for a
+	// listener, one per listener port. It is allowed only in the gateway
+	// namespace. Until gateways resolve listener backends, a service that
+	// sets it has no backends and its VIPs are not advertised.
+	// +optional
+	EdgeListenerRef *NetworkServiceEdgeListenerReference `json:"edgeListenerRef,omitempty"`
 
 	// BackendPort is the destination port on every selected backend, 1-65535.
 	// Like Port, it is required for tcp, udp and sctp and must be unset for
@@ -278,6 +291,16 @@ type NetworkServiceSpec struct {
 	// and the replies back.
 	// +optional
 	HealthCheck *NetworkServiceHealthCheck `json:"healthCheck,omitempty"`
+}
+
+// NetworkServiceEdgeListenerReference names an EdgeListener
+// (galactic.datumapis.com/v1alpha1) in the service's namespace.
+type NetworkServiceEdgeListenerReference struct {
+	// Name is the EdgeListener's name.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
 }
 
 const (

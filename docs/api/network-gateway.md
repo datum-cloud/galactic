@@ -429,7 +429,9 @@ Backends are not listed. BackendSelector picks the VPCAttachments that
 serve the service, so the backend set follows attachments as they are
 created, deleted or moved to another node, and galactic-router on each
 node generates the ServiceVIPBinding its backends need from the same
-selection.
+selection. A service in the gateway namespace can instead name an
+EdgeListener with EdgeListenerRef, whose listener attachments are then its
+backends.
 
 
 
@@ -543,6 +545,23 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ |  |  |  |
 
 
+#### NetworkServiceEdgeListenerReference
+
+
+
+NetworkServiceEdgeListenerReference names an EdgeListener
+(galactic.datumapis.com/v1alpha1) in the service's namespace.
+
+
+
+_Appears in:_
+- [NetworkServiceSpec](#networkservicespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name is the EdgeListener's name. |  | MaxLength: 253 <br />MinLength: 1 <br /> |
+
+
 #### NetworkServiceHealthCheck
 
 
@@ -643,7 +662,8 @@ _Appears in:_
 | `port` _integer_ | Port is the ingress port on VIPAddresses that this service load-balances,<br />1-65535. It is required when PortRange is absent for tcp, udp and sctp<br />and must be unset for one without (esp, gre and icmp). Zero means unset<br />and is omitted when encoding, and an explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `portRange` _[PortRange](#portrange)_ | PortRange replaces Port for an inclusive IPv6 UDP interval. Backend ports<br />are preserved; BackendPort must be omitted. |  |  |
 | `addressGroup` _[NetworkServiceAddressGroup](#networkserviceaddressgroup)_ | AddressGroup binds this listener to a complete, authoritative address inventory. |  |  |
-| `backendSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1)<br />that serve this service, matched against each VPCAttachment object's own<br />labels: in any namespace for a service in a gateway namespace, and only<br />in its own namespace for a service in a project namespace. Only<br />attachments whose status.vpc equals VPCRef are candidates, whatever their<br />labels, so a selector cannot reach into another tenant's VPC. Each selected attachment contributes the<br />IPv6 addresses in its spec.interface.addresses as backends, on<br />BackendPort, for both VIPs: its node translates the IPv4 VIP's flows to<br />and from IPv6, and its IPv4 addresses are never backends. An attachment<br />with no status.node, or no IPv6 address, is not a backend until it has<br />both. An empty selector is rejected rather than read as "every<br />attachment in the VPC". |  | Required: \{\} <br /> |
+| `backendSelector` _[LabelSelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#labelselector-v1-meta)_ | BackendSelector selects the VPCAttachments (galactic.datumapis.com/v1alpha1)<br />that serve this service, matched against each VPCAttachment object's own<br />labels: in any namespace for a service in a gateway namespace, and only<br />in its own namespace for a service in a project namespace. Only<br />attachments whose status.vpc equals VPCRef are candidates, whatever their<br />labels, so a selector cannot reach into another tenant's VPC. Each selected attachment contributes the<br />IPv6 addresses in its spec.interface.addresses as backends, on<br />BackendPort, for both VIPs: its node translates the IPv4 VIP's flows to<br />and from IPv6, and its IPv4 addresses are never backends. An attachment<br />with no status.node, or no IPv6 address, is not a backend until it has<br />both. An empty selector is rejected rather than read as "every<br />attachment in the VPC". Exactly one of BackendSelector and<br />EdgeListenerRef is required. |  |  |
+| `edgeListenerRef` _[NetworkServiceEdgeListenerReference](#networkserviceedgelistenerreference)_ | EdgeListenerRef names the EdgeListener, in the service's namespace,<br />whose listener attachments are the service's backends, in place of<br />BackendSelector. Core sets it on the services it writes for a<br />listener, one per listener port. It is allowed only in the gateway<br />namespace. Until gateways resolve listener backends, a service that<br />sets it has no backends and its VIPs are not advertised. |  |  |
 | `backendPort` _integer_ | BackendPort is the destination port on every selected backend, 1-65535.<br />Like Port, it is required for tcp, udp and sctp and must be unset for<br />esp, gre and icmp. Zero means unset and is omitted when encoding, and an<br />explicit 0 is refused. |  | Maximum: 65535 <br />Minimum: 1 <br /> |
 | `sessionAffinity` _[NetworkServiceSessionAffinity](#networkservicesessionaffinity)_ | SessionAffinity selects which connections from one client share a<br />backend: None, the default, balances each connection on its own;<br />ClientIP pins a client address to one backend; ClientIPAndProtocol pins<br />a client address and protocol to one. Two services pin a client to the<br />same backend only if both set the same affinity and select the same<br />backend addresses. A change takes effect on every gateway node without a<br />restart, and rehashes every connection of the service, so most open<br />connections reach a different backend afterwards. | None | Enum: [None ClientIP ClientIPAndProtocol] <br /> |
 | `healthCheck` _[NetworkServiceHealthCheck](#networkservicehealthcheck)_ | HealthCheck turns on health checks for the service's backends. Each<br />backend's own node opens a TCP connection to it on the health check<br />port, from the link-local address of the backend's host-side interface,<br />and publishes a decision in status.health of the backend's<br />ServiceVIPBindings. The gateway nodes take a backend whose decision is<br />Unhealthy out of the service's Maglev table, and keep every backend<br />when all of them are Unhealthy by default. FailClosed instead requires<br />fresh Healthy results for the current configuration and withdraws a VIP<br />with no healthy backends. Unset, no backend is probed and every<br />one stays in the table.<br />Where interface traffic policy is enforced, the backend's policy must<br />allow TCP from fe80::/10 to the health check port on the Private path,<br />and the replies back. |  |  |

@@ -34,6 +34,7 @@ const (
 	routeExchange = "RouteExchange"
 
 	prefixReachability = "PrefixReachability"
+	publicListener     = "PublicListener"
 )
 
 var (
@@ -193,6 +194,7 @@ func TestAdmitCapabilityVersions(t *testing.T) {
 		{Name: socketAccess, Version: "v1"},
 		{Name: packetAccess, Version: "v1"},
 		{Name: prefixReachability, Version: "v1"},
+		{Name: publicListener, Version: "v1"},
 	}
 	providers := registry()
 	p := providers[connectIP]
@@ -226,6 +228,7 @@ func TestCoreImplements(t *testing.T) {
 		{Capability{Name: socketAccess, Version: "v1"}, true},
 		{Capability{Name: packetAccess, Version: "v1"}, true},
 		{Capability{Name: prefixReachability, Version: "v1"}, true},
+		{Capability{Name: publicListener, Version: "v1"}, true},
 		{Capability{Name: prefixReachability, Version: "v9"}, false},
 		{Capability{Name: routeExchange, Version: "v1"}, false},
 	} {

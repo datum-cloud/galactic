@@ -52,8 +52,8 @@ type EdgeServiceSpec struct {
 	// +required
 	// +listType=set
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=3
-	// +kubebuilder:validation:items:Enum=SocketAccess;PacketAccess;PrefixReachability
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:items:Enum=SocketAccess;PacketAccess;PrefixReachability;PublicListener
 	Capabilities []string `json:"capabilities"`
 
 	// Prefixes bound the prefixes the provider may request in the VPC. Each

@@ -13,7 +13,7 @@ import (
 type EdgeCapability struct {
 	// Name is the capability's name.
 	// +required
-	// +kubebuilder:validation:Enum=SocketAccess;PacketAccess;PrefixReachability
+	// +kubebuilder:validation:Enum=SocketAccess;PacketAccess;PrefixReachability;PublicListener
 	Name string `json:"name"`
 
 	// Version is the capability's version.

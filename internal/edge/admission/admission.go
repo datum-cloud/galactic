@@ -60,6 +60,7 @@ var supportedCapabilities = []Capability{
 	{Name: "SocketAccess", Version: "v1"},
 	{Name: "PacketAccess", Version: "v1"},
 	{Name: "PrefixReachability", Version: "v1"},
+	{Name: "PublicListener", Version: "v1"},
 }
 
 // CoreImplements reports whether this core implements capability c at its

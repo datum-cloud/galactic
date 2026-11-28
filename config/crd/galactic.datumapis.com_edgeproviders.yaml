@@ -65,6 +65,7 @@ spec:
                           - SocketAccess
                           - PacketAccess
                           - PrefixReachability
+                          - PublicListener
                         type: string
                       version:
                         description: Version is the capability's version.

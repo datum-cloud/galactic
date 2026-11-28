@@ -383,3 +383,89 @@ metadata:
 spec:
   policyName: galactic-edge-controller-lease
   validationActions: [Deny]
+---
+# A provider never writes its own public listener or the gateway services
+# core makes from it: the platform authority writes an EdgeListener's spec
+# and core its status and the NetworkServices. RBAC already grants a
+# provider neither, so this holds even where an operator binds a broader
+# role to a provider's ServiceAccount. One binding evaluates the policy
+# against every EdgeProvider, so it needs no per-provider binding, and
+# allows every request while no provider is registered.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: galactic-edge-provider-listener
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: galactic.datumapis.com/v1alpha1
+    kind: EdgeProvider
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [galactic.datumapis.com]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [edgelisteners, edgelisteners/status, networkservices, networkservices/status]
+  matchConditions:
+    - name: workload
+      expression: request.userInfo.username.startsWith('system:serviceaccount:')
+  variables:
+    # The resource written, with its subresource when there is one.
+    - name: resource
+      expression: >-
+        request.resource.resource +
+        (request.?subResource.orValue('') == '' ? '' : '/' + request.subResource)
+  validations:
+    - expression: >-
+        !params.spec.serviceAccounts.exists(sa,
+        request.userInfo.username == 'system:serviceaccount:' + sa.namespace + ':' + sa.name)
+      messageExpression: >-
+        'a ServiceAccount of provider ' + params.metadata.name + ' cannot write ' + variables.resource
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: galactic-edge-provider-listener
+spec:
+  policyName: galactic-edge-provider-listener
+  paramRef:
+    selector: {}
+    parameterNotFoundAction: Allow
+  validationActions: [Deny]
+---
+# An EdgeListener and every NetworkService naming one live in the gateway
+# namespace. A project-namespace NetworkService is trusted for nothing, so
+# it cannot take its backends from a provider's listener. The CRD's own
+# validation cannot read an object's namespace.
+# The policy assumes the gateway namespace is galactic-system, which this file
+# fixes because kustomize does not rewrite names inside expressions. A cell
+# that runs the gateway with another --gateway-namespace must change both
+# expressions.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: galactic-edge-listener-namespace
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [galactic.datumapis.com]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [edgelisteners, networkservices]
+  validations:
+    - expression: >-
+        request.resource.resource != 'edgelisteners' || object.metadata.namespace == 'galactic-system'
+      message: an EdgeListener lives only in the gateway namespace, galactic-system
+    - expression: >-
+        request.resource.resource != 'networkservices' || !has(object.spec.edgeListenerRef) ||
+        object.metadata.namespace == 'galactic-system'
+      message: edgeListenerRef is allowed only in the gateway namespace, galactic-system
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: galactic-edge-listener-namespace
+spec:
+  policyName: galactic-edge-listener-namespace
+  validationActions: [Deny]

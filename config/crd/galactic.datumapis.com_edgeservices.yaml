@@ -65,8 +65,9 @@ spec:
                       - SocketAccess
                       - PacketAccess
                       - PrefixReachability
+                      - PublicListener
                     type: string
-                  maxItems: 3
+                  maxItems: 4
                   minItems: 1
                   type: array
                   x-kubernetes-list-type: set
