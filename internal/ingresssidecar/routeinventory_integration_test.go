@@ -239,7 +239,7 @@ func TestListRoutes_SurvivesLinkAndRouteChurn(t *testing.T) {
 	}
 	churn(func(i int) {
 		_ = ensureRedirectRoute(mustPrefix(t, fmt.Sprintf("fd00:8::%x", i%4+1)), tableID)
-		_ = removeRedirectRoute(mustPrefix(t, fmt.Sprintf("fd00:8::%x", (i+2)%4+1)))
+		_ = removeRedirectRoute(mustPrefix(t, fmt.Sprintf("fd00:8::%x", (i+2)%4+1)), tableID)
 	})
 	t.Cleanup(func() {
 		close(stop)
