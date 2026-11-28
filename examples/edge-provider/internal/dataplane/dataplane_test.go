@@ -19,7 +19,9 @@ import (
 // capability, and checks that both protocols answer with the identity
 // prefix and that Close ends an open TCP connection.
 func TestEchoUDPAndTCP(t *testing.T) {
-	ln, err := net.Listen("tcp6", "[::1]:0")
+	ctx := context.Background()
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp6", "[::1]:0")
 	if err != nil {
 		t.Skipf("no IPv6 loopback: %v", err)
 	}
@@ -27,7 +29,8 @@ func TestEchoUDPAndTCP(t *testing.T) {
 	_ = ln.Close()
 	addr := net.JoinHostPort("::1", strconv.Itoa(port))
 
-	s, err := Echo(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), "lo",
+	d := net.Dialer{Timeout: 2 * time.Second}
+	s, err := Echo(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), "lo",
 		netip.MustParseAddr("::1"), uint16(port), "id-1")
 	if err != nil {
 		t.Skipf("cannot bind to lo: %v", err)
@@ -36,11 +39,11 @@ func TestEchoUDPAndTCP(t *testing.T) {
 
 	for _, network := range []string{"udp6", "tcp6"} {
 		t.Run(network, func(t *testing.T) {
-			c, err := net.DialTimeout(network, addr, 2*time.Second)
+			c, err := d.DialContext(ctx, network, addr)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			_ = c.SetDeadline(time.Now().Add(2 * time.Second))
 			if _, err := c.Write([]byte("ping")); err != nil {
 				t.Fatal(err)
@@ -58,11 +61,11 @@ func TestEchoUDPAndTCP(t *testing.T) {
 
 	// An answered exchange proves the server accepted the connection, so
 	// Close must end it rather than racing its accept.
-	c, err := net.Dial("tcp6", addr)
+	c, err := d.DialContext(ctx, "tcp6", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := c.Write([]byte("hold")); err != nil {
 		t.Fatal(err)
