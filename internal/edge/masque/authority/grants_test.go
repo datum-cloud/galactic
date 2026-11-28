@@ -7,6 +7,7 @@ package authority
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,70 @@ import (
 type recordWrites func() error
 
 var errLost = errors.New("reply lost")
+
+func TestConfiguredCellIsolation(t *testing.T) {
+	owner, ref := faultyGrants(t, func() error { return nil })
+	other := owner
+	other.Cell = "other-cell"
+	if err := other.ledgers().Init(t.Context(), ref, other.Cell,
+		netip.MustParsePrefix("fd20:a1b:2c3d:10:3::/80"), netip.MustParsePrefix("fd20:a1b:2c3d:10:4::/80")); err != nil {
+		t.Fatal(err)
+	}
+	issued, err := owner.Create(t.Context(), CreateRequest{VPC: ref, Lifetime: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sibling, err := other.Create(t.Context(), CreateRequest{VPC: ref, Lifetime: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, configured := range []string{"", other.Cell} {
+		foreign := owner
+		foreign.Cell = configured
+		if _, err := foreign.Rotate(t.Context(), issued.Connector, time.Hour); err == nil {
+			t.Fatal("foreign/empty cell rotated grant")
+		}
+		if err := foreign.Disable(t.Context(), issued.Connector); err == nil {
+			t.Fatal("foreign/empty cell disabled grant")
+		}
+		if err := foreign.Retire(t.Context(), issued.Connector); err == nil {
+			t.Fatal("foreign/empty cell retired grant")
+		}
+	}
+	empty := owner
+	empty.Cell = ""
+	if _, err := empty.Create(t.Context(), CreateRequest{VPC: ref, Lifetime: time.Hour}); err == nil {
+		t.Fatal("empty cell minted grant")
+	}
+	if rotated, err := owner.Rotate(t.Context(), issued.Connector, time.Hour); err != nil || rotated.Revision != 2 {
+		t.Fatalf("foreign attempts changed grant: %+v %v", rotated, err)
+	}
+	if err := owner.Retire(t.Context(), issued.Connector); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Rotate(t.Context(), sibling.Connector, time.Hour); err != nil {
+		t.Fatalf("sibling cell disrupted: %v", err)
+	}
+}
+
+func TestConfiguredCellUnrecordedRetirement(t *testing.T) {
+	owner, ref := faultyGrants(t, failOnce())
+	if _, err := owner.Create(t.Context(), CreateRequest{VPC: ref, Lifetime: time.Hour}); err == nil {
+		t.Fatal("expected record write failure")
+	}
+	allocation := owner.entries(t)[0]
+	other := owner
+	other.Cell = "other-cell"
+	if err := other.Retire(t.Context(), allocation.Connector); err == nil {
+		t.Fatal("foreign cell retired unrecorded allocation")
+	}
+	if owner.entries(t)[0] != allocation {
+		t.Fatal("foreign cell mutated allocation")
+	}
+	if err := owner.Retire(t.Context(), allocation.Connector); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // faultyGrants returns Grants over a fake API holding one VPC and its
 // ledger, whose grant record creates go through writes.
@@ -48,7 +113,7 @@ func faultyGrants(t *testing.T, writes recordWrites) (Grants, VPCRef) {
 			}
 		},
 	}).Build()
-	g := Grants{Client: c, Namespace: testNS, Now: time.Now}
+	g := Grants{Client: c, Namespace: testNS, Cell: testCell, Now: time.Now}
 	ref := VPCRef{Namespace: tenantNS, Name: vpcName, UID: string(vpc.UID)}
 	if err := g.ledgers().Init(context.Background(), ref, testCell, testConnectors, testPools); err != nil {
 		t.Fatal(err)
@@ -83,7 +148,7 @@ func failOnce() recordWrites {
 func TestCreateRetryKeepsAllocation(t *testing.T) {
 	g, ref := faultyGrants(t, failOnce())
 	ctx := context.Background()
-	_, err := g.Create(ctx, CreateRequest{VPC: ref, Cell: testCell, Lifetime: time.Hour})
+	_, err := g.Create(ctx, CreateRequest{VPC: ref, Lifetime: time.Hour})
 	if err == nil {
 		t.Fatal("create with a failed record write succeeded")
 	}
@@ -92,7 +157,7 @@ func TestCreateRetryKeepsAllocation(t *testing.T) {
 		!strings.Contains(err.Error(), e[0].Prefix.String()) {
 		t.Fatalf("failed create = %v with entries %+v; want an error naming the one connector and its /96", err, e)
 	}
-	issued, err := g.Create(ctx, CreateRequest{VPC: ref, Cell: testCell, Connector: e[0].Connector, Lifetime: time.Hour})
+	issued, err := g.Create(ctx, CreateRequest{VPC: ref, Connector: e[0].Connector, Lifetime: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +178,11 @@ func TestCreateLostReply(t *testing.T) {
 		return nil
 	})
 	ctx := context.Background()
-	if _, err := g.Create(ctx, CreateRequest{VPC: ref, Cell: testCell, Lifetime: time.Hour}); !errors.Is(err, errLost) {
+	if _, err := g.Create(ctx, CreateRequest{VPC: ref, Lifetime: time.Hour}); !errors.Is(err, errLost) {
 		t.Fatalf("create with a lost reply = %v", err)
 	}
 	e := g.entries(t)
-	_, err := g.Create(ctx, CreateRequest{VPC: ref, Cell: testCell, Connector: e[0].Connector, Lifetime: time.Hour})
+	_, err := g.Create(ctx, CreateRequest{VPC: ref, Connector: e[0].Connector, Lifetime: time.Hour})
 	if !apierrors.IsAlreadyExists(err) || !strings.Contains(err.Error(), "rotate") {
 		t.Fatalf("retry after a lost reply = %v; want AlreadyExists pointing at rotate", err)
 	}
@@ -135,7 +200,7 @@ func TestCreateLostReply(t *testing.T) {
 func TestRetireUnrecorded(t *testing.T) {
 	g, ref := faultyGrants(t, failOnce())
 	ctx := context.Background()
-	if _, err := g.Create(ctx, CreateRequest{VPC: ref, Cell: testCell, Lifetime: time.Hour}); err == nil {
+	if _, err := g.Create(ctx, CreateRequest{VPC: ref, Lifetime: time.Hour}); err == nil {
 		t.Fatal("create with a failed record write succeeded")
 	}
 	stranded := g.entries(t)[0]
@@ -145,11 +210,11 @@ func TestRetireUnrecorded(t *testing.T) {
 	if e := g.entries(t); len(e) != 1 || !e[0].Retired {
 		t.Fatalf("entries after retire %+v; want one tombstone", e)
 	}
-	if _, err := g.Create(ctx, CreateRequest{VPC: ref, Cell: testCell, Connector: stranded.Connector,
+	if _, err := g.Create(ctx, CreateRequest{VPC: ref, Connector: stranded.Connector,
 		Lifetime: time.Hour}); err == nil {
 		t.Fatal("a retired connector was created again")
 	}
-	issued, err := g.Create(ctx, CreateRequest{VPC: ref, Cell: testCell, Lifetime: time.Hour})
+	issued, err := g.Create(ctx, CreateRequest{VPC: ref, Lifetime: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}

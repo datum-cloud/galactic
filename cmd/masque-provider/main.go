@@ -42,6 +42,8 @@ func main() {
 }
 
 type options struct {
+	managedEndpoints                       bool
+	legacyCoexistence                      bool
 	provider, authority, listen, listenTCP string
 	healthListen                           string
 	certFile, keyFile                      string
@@ -67,6 +69,10 @@ func newRootCommand() *cobra.Command {
 	}
 	logOpts.BindFlags(cmd.Flags())
 	f := cmd.Flags()
+	f.BoolVar(&o.managedEndpoints, "managed-endpoints", false,
+		"Serve cell-local MASQUEEndpoint registrations on shared listeners")
+	f.BoolVar(&o.legacyCoexistence, "legacy-coexistence", false,
+		"Also serve only the configured legacy authority using the file certificate; requires managed-endpoints")
 	f.StringVar(&o.provider, "provider", "", "EdgeProvider this pod runs as (required)")
 	f.StringVar(&o.authority, "authority", "", "host[:port] clients send as :authority (required)")
 	f.StringVar(&o.listen, "listen", ":8443", "UDP address the HTTP/3 server listens on")
@@ -85,7 +91,9 @@ func newRootCommand() *cobra.Command {
 
 func (o *options) validate() error {
 	switch {
-	case o.provider == "" || o.authority == "":
+	case o.legacyCoexistence && (!o.managedEndpoints || o.authority == ""):
+		return errors.New("--legacy-coexistence requires --managed-endpoints and --authority")
+	case o.provider == "" || !o.managedEndpoints && o.authority == "":
 		return errors.New("--provider and --authority are required")
 	case !strings.HasPrefix(o.authorityURL, "https://"):
 		return errors.New("--grant-authority-url must be an https:// URL")
@@ -104,8 +112,10 @@ func run(parent context.Context, o *options) error {
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	certs := &certreload.Reloader{CertFile: o.certFile, KeyFile: o.keyFile}
-	if _, err := certs.GetCertificate(nil); err != nil {
-		return err
+	if !o.managedEndpoints || o.legacyCoexistence {
+		if _, err := certs.GetCertificate(nil); err != nil {
+			return err
+		}
 	}
 	pod, err := service.PodFromEnv()
 	if err != nil {
@@ -116,9 +126,11 @@ func run(parent context.Context, o *options) error {
 		return err
 	}
 	return service.Run(ctx, service.Config{
-		Client: c, Provider: o.provider, Authority: o.authority, Listen: o.listen, ListenTCP: o.listenTCP,
+		ManagedEndpoints:  o.managedEndpoints,
+		LegacyCoexistence: o.legacyCoexistence,
+		Client:            c, Provider: o.provider, Authority: o.authority, Listen: o.listen, ListenTCP: o.listenTCP,
 		HealthListen: o.healthListen,
 		Pod:          pod, GetCertificate: certs.GetCertificate,
-		Authorizer: &authority.Client{URL: o.authorityURL, CAFile: o.authorityCA, TokenFile: o.tokenFile},
+		Authorizer: &authority.Client{Reader: c, URL: o.authorityURL, CAFile: o.authorityCA, TokenFile: o.tokenFile},
 	})
 }

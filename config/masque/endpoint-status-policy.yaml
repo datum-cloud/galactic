@@ -1,0 +1,44 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: masque-endpoint-status
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [galactic.datumapis.com]
+        apiVersions: [v1alpha1]
+        operations: [UPDATE]
+        resources: [masqueendpoints/status]
+  matchConditions:
+    - name: provider
+      expression: request.userInfo.username == 'system:serviceaccount:masque-system:masque-provider'
+  variables:
+    - name: pods
+      expression: request.userInfo.extra[?'authentication.kubernetes.io/pod-uid'].orValue([])
+    - name: previous
+      expression: oldObject.?status.instances.orValue([])
+    - name: current
+      expression: object.?status.instances.orValue([])
+  validations:
+    - expression: variables.pods.size() == 1
+      message: endpoint acknowledgment requires a pod-bound token
+    - expression: >-
+        variables.pods.size() == 1 && variables.current.all(entry,
+
+          (entry.instanceName == 'ei-' + variables.pods[0]) ||
+          variables.previous.exists(previous, previous == entry))
+      message: a provider may acknowledge only its own instance
+    - expression: >-
+        variables.pods.size() == 1 && variables.previous.all(previous,
+
+          previous.instanceName == 'ei-' + variables.pods[0] || variables.current.exists(entry, entry == previous))
+      message: a provider may not remove another instance acknowledgment
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: masque-endpoint-status
+spec:
+  policyName: masque-endpoint-status
+  validationActions: [Deny]

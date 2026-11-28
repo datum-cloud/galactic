@@ -52,8 +52,8 @@ func TestConfigValidate(t *testing.T) {
 	if err := ga.Validate(); err != nil {
 		t.Fatalf("grant authority configuration: %v", err)
 	}
-	if _, ok := ga.Authorizer().(*authority.Client); !ok {
-		t.Fatalf("Authorizer() = %T with a grant authority, want *authority.Client", ga.Authorizer())
+	if _, ok := ga.Authorizer(nil).(*authority.Client); !ok {
+		t.Fatalf("Authorizer() = %T with a grant authority, want *authority.Client", ga.Authorizer(nil))
 	}
 	for _, tc := range []struct {
 		name   string

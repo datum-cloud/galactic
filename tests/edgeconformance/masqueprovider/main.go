@@ -73,6 +73,6 @@ func run() error {
 	defer stop()
 	return service.Run(ctx, service.Config{
 		Client: c, Provider: cfg.Provider, Authority: cfg.Authority, Listen: cfg.Listen,
-		Pod: pod, Authorizer: cfg.Authorizer(), GetCertificate: certs.GetCertificate,
+		Pod: pod, Authorizer: cfg.Authorizer(c), GetCertificate: certs.GetCertificate,
 	})
 }

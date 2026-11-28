@@ -18,6 +18,7 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	galacticv1alpha1 "go.datum.net/galactic/api/v1alpha1"
 	"go.datum.net/galactic/internal/edge/admission"
 	"go.datum.net/galactic/internal/edge/connectip"
 )
@@ -40,8 +41,9 @@ const (
 
 // AuthorizeRequest is the body of an Authorize call.
 type AuthorizeRequest struct {
-	Credential string `json:"credential"`
-	VPC        string `json:"vpc"`
+	EndpointRef *galacticv1alpha1.MASQUEEndpointReference `json:"endpointRef,omitempty"`
+	Credential  string                                    `json:"credential"`
+	VPC         string                                    `json:"vpc"`
 	// Nonce identifies the call: its retries send the same nonce and
 	// issue time.
 	Nonce string `json:"nonce"`

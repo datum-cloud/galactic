@@ -107,6 +107,7 @@ tasks:
       - controller-gen crd paths=./api/cloud/v1alpha1/... output:crd:artifacts:config=config/crd
       - controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/network/v1alpha1/...
       - controller-gen crd paths=./api/network/v1alpha1/... output:crd:artifacts:config=config/crd
+      - cp config/crd/galactic.datumapis.com_masqueendpoints.yaml config/masque/managed-endpoints-crd/galactic.datumapis.com_masqueendpoints.yaml
   generate:api-docs:
     desc: Regenerate Galactic, cloud, BGP and gateway API references (install hack/docs/requirements.txt first)
     cmds:
@@ -243,6 +244,7 @@ tasks:
     # instead.
     deps: [kustomize]
     cmds:
+      - cmp config/crd/galactic.datumapis.com_masqueendpoints.yaml config/masque/managed-endpoints-crd/galactic.datumapis.com_masqueendpoints.yaml
       - go build -o {{.LOCALBIN}}/check-log-settings ./hack/check-log-settings
       - |
         status=0

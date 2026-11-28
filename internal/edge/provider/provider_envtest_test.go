@@ -485,3 +485,41 @@ func TestLeaseReacquiredAfterRelease(t *testing.T) {
 		t.Fatalf("acquisition of a held lease: %v, want ErrHeld", err)
 	}
 }
+
+func TestLeaseAcquisitionTimestamp(t *testing.T) {
+	cell := startAPI(t)
+	instance := newInstance(t, cell, "acquire-time")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	store := InstanceStore{Client: cell, Namespace: ns, Now: func() time.Time { return now }}
+	record, err := store.Create(t.Context(), claim.Record{Key: instance.Name, Holder: "first", Epoch: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readTime := func() time.Time {
+		t.Helper()
+		var lease coordinationv1.Lease
+		if err := cell.Get(t.Context(), client.ObjectKeyFromObject(instance), &lease); err != nil {
+			t.Fatal(err)
+		}
+		if lease.Spec.AcquireTime == nil {
+			t.Fatal("missing acquisition timestamp")
+		}
+		return lease.Spec.AcquireTime.Time
+	}
+	acquired := readTime()
+	now = now.Add(time.Minute)
+	record, err = store.Update(t.Context(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !readTime().Equal(acquired) {
+		t.Fatal("renewal changed acquisition timestamp")
+	}
+	record.Holder, record.Epoch = "second", 2
+	if _, err := store.Update(t.Context(), record); err != nil {
+		t.Fatal(err)
+	}
+	if !readTime().Equal(now) {
+		t.Fatal("takeover retained stale acquisition timestamp")
+	}
+}

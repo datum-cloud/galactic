@@ -136,7 +136,7 @@ func (s *Server) serveH2(w http.ResponseWriter, r *http.Request) {
 			errors.New("not an Extended CONNECT for connect-ip"))
 		return
 	}
-	if r.Host != s.authority {
+	if s.resolveEndpoint == nil && r.Host != s.authority {
 		s.reject(w, r, http.StatusBadRequest, outcomeBadRequest, "invalid CONNECT-IP request",
 			errors.New("unknown authority"))
 		return

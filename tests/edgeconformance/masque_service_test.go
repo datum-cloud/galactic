@@ -727,7 +727,7 @@ func (s *service) disable(t *testing.T, c *svcConnector, transport string) {
 	t.Helper()
 	l := s.l
 	rs, disabled := s.stopsWhileOtherForwards(t, "disable-"+transport, c, transport, 30*time.Second, func() time.Time {
-		if _, err := s.authority(t, "grant", "disable", c.issued.Connector); err != nil {
+		if _, err := s.authority(t, "grant", "disable", c.issued.Connector, "--cell", svcCell); err != nil {
 			t.Fatal(err)
 		}
 		return time.Now()

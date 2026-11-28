@@ -123,6 +123,7 @@ func (l Limits) withDefaults() Limits {
 
 // Config configures a Server.
 type Config struct {
+	ResolveEndpoint func(*http.Request) (context.Context, func(), error)
 	// Authority is the host[:port] clients send as :authority.
 	Authority string
 	// TLSConfig holds the server certificate.
@@ -144,14 +145,15 @@ type Config struct {
 
 // Server terminates CONNECT-IP requests over HTTP/3 and HTTP/2.
 type Server struct {
-	authority string
-	template  *uritemplate.Template
-	admission Admission
-	backend   PacketBackend
-	log       *slog.Logger
-	h3        *http3.Server
-	h2        *http.Server
-	proxy     connectip.Proxy
+	resolveEndpoint func(*http.Request) (context.Context, func(), error)
+	authority       string
+	template        *uritemplate.Template
+	admission       Admission
+	backend         PacketBackend
+	log             *slog.Logger
+	h3              *http3.Server
+	h2              *http.Server
+	proxy           connectip.Proxy
 
 	// limits has every default applied. conns counts open QUIC
 	// connections; admitting and active hold one token per request in Admit
@@ -180,7 +182,7 @@ type pathWatchKey struct{}
 // NewServer validates cfg and returns a Server. It returns an error when the
 // authority, TLS config, admission authority or backend is missing.
 func NewServer(cfg Config) (*Server, error) {
-	if cfg.Authority == "" {
+	if cfg.Authority == "" && cfg.ResolveEndpoint == nil {
 		return nil, errors.New("authority is required")
 	}
 	if cfg.TLSConfig == nil {
@@ -225,16 +227,17 @@ func NewServer(cfg Config) (*Server, error) {
 	quicConf.HandshakeIdleTimeout = limits.HandshakeTimeout / 2
 
 	s := &Server{
-		authority:  cfg.Authority,
-		template:   template,
-		admission:  cfg.Admission,
-		backend:    cfg.Backend,
-		log:        log,
-		limits:     limits,
-		admitting:  make(chan struct{}, limits.MaxAdmissions),
-		active:     make(chan struct{}, limits.MaxSessions),
-		sources:    map[netip.Addr]int{},
-		credential: map[[sha256.Size]byte]int{},
+		resolveEndpoint: cfg.ResolveEndpoint,
+		authority:       cfg.Authority,
+		template:        template,
+		admission:       cfg.Admission,
+		backend:         cfg.Backend,
+		log:             log,
+		limits:          limits,
+		admitting:       make(chan struct{}, limits.MaxAdmissions),
+		active:          make(chan struct{}, limits.MaxSessions),
+		sources:         map[netip.Addr]int{},
+		credential:      map[[sha256.Size]byte]int{},
 	}
 	s.h3 = &http3.Server{
 		Handler:         s,
@@ -296,6 +299,15 @@ func (s *Server) Close() error {
 // Both transports share every step after parsing: limits, admission, grant
 // checks, the backend session and the packet policy.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.resolveEndpoint != nil {
+		ctx, release, err := s.resolveEndpoint(r)
+		if err != nil {
+			s.reject(w, r, http.StatusMisdirectedRequest, outcomeBadRequest, "unknown or unavailable endpoint", nil)
+			return
+		}
+		defer release()
+		r = r.WithContext(ctx)
+	}
 	switch r.ProtoMajor {
 	case 3:
 		s.serveH3(w, r)
@@ -312,7 +324,11 @@ func (s *Server) serveH3(w http.ResponseWriter, r *http.Request) {
 	if _, ok := r.Header[http3.CapsuleProtocolHeader]; !ok && r.Proto == connectIPProtocol {
 		r.Header.Set(http3.CapsuleProtocolHeader, "?1")
 	}
-	preq, err := connectip.ParseProxyRequest(r, s.template)
+	template := s.template
+	if s.resolveEndpoint != nil {
+		template = uritemplate.MustNew("https://" + r.Host + TemplatePath)
+	}
+	preq, err := connectip.ParseProxyRequest(r, template)
 	if err != nil {
 		status := http.StatusBadRequest
 		if perr, ok := errors.AsType[*connectip.ProxyRequestParseError](err); ok {
