@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/datum-cloud/galactic/examples/edge-provider/internal/packet"
 	"golang.org/x/sys/unix"
@@ -30,8 +31,9 @@ type Server interface {
 	Close() error
 }
 
-// Echo serves UDP on address and port, bound to the VRF vrf, replying with
-// identity, a space and the request's payload. Binding a socket to a device
+// Echo serves UDP and TCP on address and port, bound to the VRF vrf. Each
+// UDP datagram, and each read on a TCP connection, is answered with
+// identity, a space and the bytes received. Binding a socket to a device
 // needs no capability as long as the socket is not already bound to one.
 func Echo(ctx context.Context, log *slog.Logger, vrf string, address netip.Addr, port uint16, identity string,
 ) (Server, error) {
@@ -44,11 +46,55 @@ func Echo(ctx context.Context, log *slog.Logger, vrf string, address netip.Addr,
 		}
 		return serr
 	}}
-	pc, err := lc.ListenPacket(ctx, "udp6", net.JoinHostPort(address.String(), strconv.Itoa(int(port))))
+	hostPort := net.JoinHostPort(address.String(), strconv.Itoa(int(port)))
+	pc, err := lc.ListenPacket(ctx, "udp6", hostPort)
 	if err != nil {
-		return nil, fmt.Errorf("listen on [%s]:%d in VRF %s: %w", address, port, vrf, err)
+		return nil, fmt.Errorf("listen on UDP [%s]:%d in VRF %s: %w", address, port, vrf, err)
 	}
-	s := &loop{closer: pc}
+	ln, err := lc.Listen(ctx, "tcp6", hostPort)
+	if err != nil {
+		_ = pc.Close()
+		return nil, fmt.Errorf("listen on TCP [%s]:%d in VRF %s: %w", address, port, vrf, err)
+	}
+	conns := &connSet{conns: map[net.Conn]struct{}{}}
+	s := &loop{closer: multiCloser{pc, ln, conns}}
+	s.wg.Go(func() {
+		var backoff time.Duration
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				// A transient failure such as running out of descriptors
+				// must not end TCP service while UDP keeps answering.
+				backoff = min(max(2*backoff, 5*time.Millisecond), time.Second)
+				log.Error("echo listener accept failed", "vrf", vrf, "error", err, "retryIn", backoff)
+				time.Sleep(backoff)
+				continue
+			}
+			backoff = 0
+			if !conns.add(c) {
+				_ = c.Close()
+				return
+			}
+			s.wg.Go(func() {
+				defer conns.remove(c)
+				buf := make([]byte, 4096)
+				for {
+					_ = c.SetReadDeadline(time.Now().Add(tcpIdle))
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					if _, err := c.Write(append([]byte(identity+" "), buf[:n]...)); err != nil {
+						log.Warn("echo reply failed", "to", c.RemoteAddr(), "error", err)
+						return
+					}
+				}
+			})
+		}
+	})
 	s.wg.Go(func() {
 		buf := make([]byte, 65535)
 		for {
@@ -115,7 +161,59 @@ func TUN(log *slog.Logger, name, identity string, allow func() bool) (Server, er
 	return s, nil
 }
 
+// tcpIdle is how long a TCP echo connection may stay silent before the
+// server closes it.
+const tcpIdle = time.Minute
+
 type closer interface{ Close() error }
+
+// multiCloser closes each of its members and returns the first error.
+type multiCloser []closer
+
+func (m multiCloser) Close() error {
+	var first error
+	for _, c := range m {
+		if err := c.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// connSet holds the open TCP echo connections, so closing the server ends
+// them and its wait returns. Once closed it refuses new connections.
+type connSet struct {
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{}
+	closed bool
+}
+
+func (s *connSet) add(c net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.conns[c] = struct{}{}
+	return true
+}
+
+func (s *connSet) remove(c net.Conn) {
+	s.mu.Lock()
+	delete(s.conns, c)
+	s.mu.Unlock()
+	_ = c.Close()
+}
+
+func (s *connSet) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	for c := range s.conns {
+		_ = c.Close()
+	}
+	return nil
+}
 
 type loop struct {
 	closer closer
