@@ -1333,6 +1333,19 @@ tasks:
     cmds:
       - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig go test -count=1 -v -timeout 40m -run '^TestNoLocalWorkload$' ./tests/edgeconformance/
 
+  # Not part of verify: Phase 0 of docs/designs/edge-public-listener.md
+  # (#1507). It hand-wires a reference provider's SocketAccess attachment on
+  # dfw-worker3 as the backend of a dfw VIP, pins the VIP on tr1 to each dfw
+  # gateway in turn, sends UDP and TCP over both families from remote-host,
+  # and removes everything it created. Remote delivery must pass; local
+  # delivery is recorded. Needs the edge-provider image from
+  # build:edge-provider. Results land in bin/edge-conformance/.
+  "verify:edge-listener":
+    desc: Prove an edge SocketAccess attachment as a gateway VIP backend, remote and local delivery
+    dir: ../..
+    cmds:
+      - EDGE_CONFORMANCE_KUBECONFIG={{.ROOT_DIR}}/dfw.kubeconfig LAB={{.LAB}} go test -count=1 -v -timeout 30m -run '^TestListenerBackend$' ./tests/edgeconformance/
+
   # Not part of verify: it takes about 20 minutes, deploys the shipped MASQUE
   # service from config/masque through resources/masque-service (images from
   # build:masque-service and build:masque-authority, loaded by

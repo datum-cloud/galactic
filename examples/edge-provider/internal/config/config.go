@@ -29,7 +29,7 @@ const (
 type Config struct {
 	// Provider is the EdgeProvider this process runs as.
 	Provider string `json:"provider"`
-	// Port is the UDP port the SocketAccess echo listens on.
+	// Port is the UDP and TCP port the SocketAccess echo listens on.
 	Port uint16 `json:"port"`
 	// Services are the grants to attach to.
 	Services []Service `json:"services"`
